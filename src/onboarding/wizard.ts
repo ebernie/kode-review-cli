@@ -4,10 +4,54 @@ import { createOpencode } from '@opencode-ai/sdk'
 import { updateConfig, setOnboardingComplete, getConfigPath } from '../config/index.js'
 import { PROVIDER_NAMES } from '../config/schema.js'
 import { logger } from '../utils/logger.js'
-import { commandExists } from '../utils/exec.js'
+import { commandExists, exec, execInteractive } from '../utils/exec.js'
 import { cyan, bold, green, dim } from '../cli/colors.js'
 import { setupAntigravity } from './antigravity.js'
 import { setupVcs } from './vcs.js'
+
+/**
+ * Check if a provider has authentication configured in OpenCode
+ */
+async function isProviderAuthenticated(providerId: string): Promise<boolean> {
+  try {
+    const result = await exec('opencode', ['auth', 'list'])
+
+    if (result.exitCode !== 0) {
+      // Command failed, assume not authenticated
+      return false
+    }
+
+    // Parse output - typically shows provider names/IDs in the list
+    const output = result.stdout.toLowerCase()
+    return output.includes(providerId.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Run OpenCode auth login for a provider
+ */
+async function authenticateProvider(providerId: string): Promise<boolean> {
+  logger.info(`Setting up authentication for ${PROVIDER_NAMES[providerId] ?? providerId}...`)
+  logger.info('This will open an interactive authentication flow.')
+
+  const exitCode = await execInteractive('opencode', ['auth', 'login'])
+
+  if (exitCode !== 0) {
+    logger.error('Authentication was cancelled or failed')
+    return false
+  }
+
+  // Verify authentication was successful
+  if (await isProviderAuthenticated(providerId)) {
+    logger.success(`Successfully authenticated with ${PROVIDER_NAMES[providerId] ?? providerId}`)
+    return true
+  }
+
+  logger.warn('Authentication may not have completed. You can run "opencode auth login" manually.')
+  return false
+}
 
 interface ProviderInfo {
   id: string
@@ -153,7 +197,30 @@ export async function runOnboardingWizard(): Promise<boolean> {
       logger.warn('Antigravity setup was not completed. You can run setup again later.')
     }
   } else {
-    // Standard provider selected
+    // Standard provider selected - check if authentication is needed
+    const isAuthenticated = await isProviderAuthenticated(selection.provider)
+
+    if (!isAuthenticated) {
+      logger.warn(`${PROVIDER_NAMES[selection.provider] ?? selection.provider} requires authentication.`)
+
+      const setupAuth = await confirm({
+        message: 'Set up authentication now?',
+        default: true,
+      })
+
+      if (setupAuth) {
+        const authSuccess = await authenticateProvider(selection.provider)
+        if (!authSuccess) {
+          logger.warn('Authentication not completed. Reviews may fail without valid credentials.')
+          logger.info('You can authenticate later with: opencode auth login')
+        }
+      } else {
+        logger.info('Skipping authentication. You can set it up later with: opencode auth login')
+      }
+    } else {
+      logger.success(`${PROVIDER_NAMES[selection.provider] ?? selection.provider} is already authenticated`)
+    }
+
     updateConfig({
       provider: selection.provider,
       model: selection.model,
@@ -204,6 +271,30 @@ export async function runProviderSetup(): Promise<boolean> {
 
   if (selection === null) {
     return await setupAntigravity()
+  }
+
+  // Check if authentication is needed
+  const isAuthenticated = await isProviderAuthenticated(selection.provider)
+
+  if (!isAuthenticated) {
+    logger.warn(`${PROVIDER_NAMES[selection.provider] ?? selection.provider} requires authentication.`)
+
+    const setupAuth = await confirm({
+      message: 'Set up authentication now?',
+      default: true,
+    })
+
+    if (setupAuth) {
+      const authSuccess = await authenticateProvider(selection.provider)
+      if (!authSuccess) {
+        logger.warn('Authentication not completed. Reviews may fail without valid credentials.')
+        logger.info('You can authenticate later with: opencode auth login')
+      }
+    } else {
+      logger.info('Skipping authentication. You can set it up later with: opencode auth login')
+    }
+  } else {
+    logger.success(`${PROVIDER_NAMES[selection.provider] ?? selection.provider} is already authenticated`)
   }
 
   updateConfig({
