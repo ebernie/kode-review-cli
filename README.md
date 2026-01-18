@@ -12,15 +12,32 @@ AI-powered code review CLI using OpenCode SDK with Antigravity support.
 
 ## Requirements
 
-- Node.js 18+
-- [OpenCode](https://opencode.ai) installed
-- Git
-- Optional: GitHub CLI (`gh`) and/or GitLab CLI (`glab`)
+- **Node.js 18+**
+- **Bun** (recommended) or npm
+- **Git**
+- **OpenCode CLI** - Install with:
+  ```bash
+  curl -fsSL https://opencode.ai/install | bash
+  # or
+  bun install -g opencode-ai
+  ```
+- **Optional:** GitHub CLI ([`gh`](https://cli.github.com/)) and/or GitLab CLI ([`glab`](https://gitlab.com/gitlab-org/cli))
 
 ## Installation
 
+Install from source (not yet published to npm):
+
 ```bash
-bun install -g @kofikode/kode-review-cli
+# Clone the repository
+git clone https://github.com/kofikode/kode-review-cli.git
+cd kode-review-cli
+
+# Install dependencies and build
+bun install
+bun run build
+
+# Link globally for CLI access
+bun link
 ```
 
 ## Quick Start
@@ -81,6 +98,24 @@ kode-review --provider google --model antigravity-claude-sonnet-4-5-thinking --v
 | `--setup-vcs` | Re-configure GitHub/GitLab only |
 | `--reset` | Reset all configuration |
 
+## Onboarding
+
+The first run of `kode-review` triggers an interactive onboarding wizard. You can also run it manually with `kode-review --setup`.
+
+### Step 1: Provider Selection
+
+Choose your LLM provider:
+
+- **Antigravity (Recommended)** - Free access to premium models via Google OAuth
+- **Standard Providers** - Anthropic, Google, OpenAI, or OpenCode Zen (requires direct authentication)
+
+### Step 2: VCS Integration
+
+The wizard detects GitHub CLI (`gh`) and GitLab CLI (`glab`) and checks their authentication status. This enables:
+
+- Reviewing PRs/MRs directly
+- Auto-detecting the platform from git remote
+
 ## Configuration
 
 Configuration is stored in `~/.config/kode-review/config.json`.
@@ -89,14 +124,17 @@ Configuration is stored in `~/.config/kode-review/config.json`.
 
 Antigravity provides free access to premium models via Google OAuth:
 
-- Claude Sonnet 4.5 / Opus 4.5 (with thinking)
-- Gemini 3 Pro / Flash
+**Available Models:**
+- Claude Sonnet 4.5 / Opus 4.5 (with thinking variants: `low`, `max`)
+- Gemini 3 Pro (with thinking variants: `low`, `high`)
+- Gemini 3 Flash (with thinking variants: `minimal`, `low`, `medium`, `high`)
 
 When you select Antigravity during onboarding:
 
-1. The `opencode-antigravity-auth` plugin is configured
-2. Browser opens for Google OAuth
-3. Model definitions are added to your OpenCode config
+1. Installs the `opencode-antigravity-auth@beta` plugin into OpenCode
+2. Opens browser for Google OAuth authentication
+3. Prompts for model selection
+4. Prompts for thinking variant (budget level) if applicable
 
 ### VCS Integration
 
@@ -104,6 +142,8 @@ GitHub and GitLab CLI tools are detected automatically. If authenticated, you ca
 
 - Review PRs/MRs directly
 - Auto-detect which platform based on git remote
+
+To set up later: `kode-review --setup-vcs`
 
 ## Review Output
 
@@ -138,16 +178,6 @@ kode-review --scope local --quiet || {
   read response
   [[ "$response" =~ ^[Yy]$ ]] || exit 1
 }
-```
-
-### In CI/CD
-
-```yaml
-# GitHub Actions
-- name: Code Review
-  run: |
-    bun install -g @kofikode/kode-review-cli
-    kode-review --scope pr --pr ${{ github.event.pull_request.number }} --quiet
 ```
 
 ### From a Coding Agent
