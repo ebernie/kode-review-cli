@@ -1,4 +1,4 @@
-import { select, confirm, input } from '@inquirer/prompts'
+import { select, confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import { exec, execInteractive, commandExists } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
@@ -9,7 +9,8 @@ import { existsSync } from 'fs'
 import { homedir, platform } from 'os'
 import { join } from 'path'
 
-const PLUGIN_NAME = 'opencode-antigravity-auth@beta'
+const PLUGIN_NPM_PACKAGE = 'opencode-antigravity-auth'
+const PLUGIN_CONFIG_NAME = 'opencode-antigravity-auth@beta'
 
 /**
  * Get the OpenCode config directory path (platform-aware)
@@ -28,10 +29,29 @@ function getOpenCodeConfigDir(): string {
 }
 
 /**
- * Check if Antigravity plugin is installed
+ * Check if the Antigravity npm package is installed globally
+ */
+async function isNpmPackageInstalled(): Promise<boolean> {
+  try {
+    // Use exec with array args (safe from injection via execa)
+    const result = await exec('npm', ['list', '-g', PLUGIN_NPM_PACKAGE, '--depth=0'])
+    return result.exitCode === 0 && result.stdout.includes(PLUGIN_NPM_PACKAGE)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Check if Antigravity plugin is fully installed (npm package + config)
  */
 export async function isAntigravityInstalled(): Promise<boolean> {
-  // Check if plugin is in OpenCode config
+  // First check if the npm package is installed
+  const packageInstalled = await isNpmPackageInstalled()
+  if (!packageInstalled) {
+    return false
+  }
+
+  // Then check if plugin is in OpenCode config
   const configPath = join(getOpenCodeConfigDir(), 'opencode.json')
 
   if (!existsSync(configPath)) {
@@ -53,11 +73,39 @@ export async function isAntigravityInstalled(): Promise<boolean> {
 }
 
 /**
- * Check if Antigravity is authenticated
+ * Get the OpenCode data directory path (where auth.json is stored)
+ * - Windows: %LOCALAPPDATA%\opencode
+ * - macOS/Linux: ~/.local/share/opencode (respects XDG_DATA_HOME)
+ */
+function getOpenCodeDataDir(): string {
+  const home = homedir()
+
+  if (platform() === 'win32') {
+    return join(process.env.LOCALAPPDATA || join(home, 'AppData', 'Local'), 'opencode')
+  }
+
+  // macOS and Linux: use XDG_DATA_HOME or default to ~/.local/share
+  return join(process.env.XDG_DATA_HOME || join(home, '.local', 'share'), 'opencode')
+}
+
+/**
+ * Check if Antigravity/Google is authenticated by checking auth.json
  */
 export async function isAntigravityAuthenticated(): Promise<boolean> {
-  const accountsPath = join(getOpenCodeConfigDir(), 'antigravity-accounts.json')
-  return existsSync(accountsPath)
+  const authPath = join(getOpenCodeDataDir(), 'auth.json')
+
+  if (!existsSync(authPath)) {
+    return false
+  }
+
+  try {
+    const content = await readFile(authPath, 'utf-8')
+    const auth = JSON.parse(content)
+    // Check if there's a google credential
+    return auth && typeof auth === 'object' && 'google' in auth
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -67,13 +115,42 @@ export async function installAntigravityPlugin(): Promise<boolean> {
   const spinner = ora('Installing Antigravity plugin...').start()
 
   try {
-    // Ensure opencode config directory exists
+    // Step 1: Install the npm package globally if not already installed
+    const packageInstalled = await isNpmPackageInstalled()
+    if (!packageInstalled) {
+      spinner.text = 'Installing Antigravity npm package (this may take a moment)...'
+      const npmResult = await exec('npm', ['install', '-g', PLUGIN_NPM_PACKAGE])
+      if (npmResult.exitCode !== 0) {
+        const stderr = npmResult.stderr || ''
+        const isPermissionError = stderr.includes('EACCES') ||
+                                   stderr.includes('permission denied') ||
+                                   stderr.includes('Permission denied')
+
+        spinner.fail('Failed to install Antigravity npm package')
+
+        if (isPermissionError) {
+          logger.error('Permission denied during global npm install')
+          logger.info('')
+          logger.info('Please run one of the following commands manually:')
+          logger.info(`  sudo npm install -g ${PLUGIN_NPM_PACKAGE}`)
+          logger.info('  # or with bun:')
+          logger.info(`  sudo bun install -g ${PLUGIN_NPM_PACKAGE}`)
+        } else {
+          logger.error(stderr || 'npm install failed')
+          logger.info(`Try running manually: npm install -g ${PLUGIN_NPM_PACKAGE}`)
+        }
+        return false
+      }
+      spinner.text = 'Configuring Antigravity plugin...'
+    }
+
+    // Step 2: Ensure opencode config directory exists
     const configDir = getOpenCodeConfigDir()
     if (!existsSync(configDir)) {
       await mkdir(configDir, { recursive: true })
     }
 
-    // Read or create OpenCode config
+    // Step 3: Read or create OpenCode config
     const configPath = join(configDir, 'opencode.json')
     let config: Record<string, unknown> = {}
 
@@ -82,13 +159,14 @@ export async function installAntigravityPlugin(): Promise<boolean> {
       config = JSON.parse(content)
     }
 
-    // Add plugin if not already present
+    // Step 4: Add plugin if not already present
     if (!Array.isArray(config.plugin)) {
       config.plugin = []
     }
 
-    if (!config.plugin.includes(PLUGIN_NAME)) {
-      config.plugin.push(PLUGIN_NAME)
+    const pluginArray = config.plugin as string[]
+    if (!pluginArray.includes(PLUGIN_CONFIG_NAME)) {
+      pluginArray.push(PLUGIN_CONFIG_NAME)
     }
 
     // Add model definitions under google provider
@@ -128,7 +206,7 @@ export async function installAntigravityPlugin(): Promise<boolean> {
 }
 
 /**
- * Run Antigravity OAuth authentication
+ * Run Antigravity OAuth authentication using the CLI directly
  */
 export async function authenticateAntigravity(): Promise<boolean> {
   // Check if OpenCode is available
@@ -142,24 +220,48 @@ export async function authenticateAntigravity(): Promise<boolean> {
     return false
   }
 
-  logger.info('Opening browser for Google OAuth authentication...')
-  logger.info('Please sign in with your Google account.')
+  console.log('')
+  console.log('  ┌─────────────────────────────────────────────────────┐')
+  console.log('  │  Starting OpenCode authentication...                │')
+  console.log('  │                                                     │')
+  console.log('  │  1. Select "Google" from the provider list          │')
+  console.log('  │  2. Choose "OAuth"                                  │')
+  console.log('  │  3. Complete sign-in in your browser                │')
+  console.log('  │  4. The CLI will detect when you\'re done            │')
+  console.log('  └─────────────────────────────────────────────────────┘')
+  console.log('')
 
   // Run opencode auth login interactively
   const exitCode = await execInteractive('opencode', ['auth', 'login'])
 
-  if (exitCode !== 0) {
-    logger.error('Authentication failed or was cancelled')
-    return false
+  // Small delay to let credentials be written
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
+  // Check result
+  if (exitCode === 0) {
+    // Verify credentials were saved
+    const result = await exec('opencode', ['auth', 'list'])
+    if (result.stdout.toLowerCase().includes('google') ||
+        result.stdout.includes('1 credential') ||
+        result.stdout.includes('credentials')) {
+      logger.success('Successfully authenticated!')
+      return true
+    }
   }
 
-  // Verify authentication
+  // Check if auth file exists as fallback
   if (await isAntigravityAuthenticated()) {
-    logger.success('Successfully authenticated with Antigravity')
+    logger.success('Successfully authenticated!')
     return true
   }
 
-  logger.warn('Authentication may not have completed. Please try again.')
+  if (exitCode !== 0) {
+    logger.error('Authentication was cancelled or failed')
+  } else {
+    logger.warn('Authentication may not have completed for Google.')
+    logger.info('Please try again and make sure to select Google > OAuth')
+  }
+
   return false
 }
 

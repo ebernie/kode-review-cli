@@ -19,8 +19,8 @@ export async function exec(
     ...options,
   })
   return {
-    stdout: result.stdout,
-    stderr: result.stderr,
+    stdout: String(result.stdout ?? ''),
+    stderr: String(result.stderr ?? ''),
     exitCode: result.exitCode ?? 0,
   }
 }

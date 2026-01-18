@@ -1,4 +1,4 @@
-import { select, confirm, input } from '@inquirer/prompts'
+import { select, confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import { createOpencode } from '@opencode-ai/sdk'
 import { updateConfig, setOnboardingComplete, getConfigPath } from '../config/index.js'
@@ -82,10 +82,13 @@ async function fetchProviders(): Promise<ProviderInfo[]> {
       const providers: ProviderInfo[] = result.data.providers.map((p) => ({
         id: p.id,
         name: PROVIDER_NAMES[p.id] ?? p.name ?? p.id,
-        models: p.models?.map((m) => ({
-          id: m.id,
-          name: m.name ?? m.id,
-        })) ?? [],
+        // p.models is an object/dictionary, not an array - convert using Object.values()
+        models: p.models
+          ? Object.values(p.models).map((m) => ({
+              id: m.id,
+              name: m.name ?? m.id,
+            }))
+          : [],
       }))
 
       spinner.succeed('Loaded available providers')

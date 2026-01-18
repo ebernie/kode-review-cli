@@ -1,4 +1,4 @@
-import chalk, { Chalk } from 'chalk'
+import chalk, { Chalk, type ChalkInstance } from 'chalk'
 
 /**
  * Check if we're running in a TTY (interactive terminal)
@@ -10,7 +10,7 @@ export function isTTY(): boolean {
 /**
  * Get chalk with appropriate color level
  */
-function getChalk(): Chalk {
+function getChalk(): ChalkInstance {
   if (!isTTY()) {
     // Disable colors when not in TTY
     return new Chalk({ level: 0 })

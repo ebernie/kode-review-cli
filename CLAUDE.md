@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build & Development Commands
 
+> **Note**: This project uses **Bun** as the package manager. Always use `bun` instead of `npm`.
+
 ```bash
-npm run build          # Build with tsup (output to dist/)
-npm run dev            # Watch mode for development
-npm run typecheck      # TypeScript type checking (tsc --noEmit)
-npm run lint           # ESLint
-npm test               # Run tests once (vitest run)
-npm run test:watch     # Watch mode for tests (vitest)
+bun run build          # Build with tsup (output to dist/)
+bun run dev            # Watch mode for development
+bun run typecheck      # TypeScript type checking (tsc --noEmit)
+bun run lint           # ESLint
+bun test               # Run tests once (vitest run)
+bun run test:watch     # Watch mode for tests (vitest)
 ```
 
 **Run the CLI locally:**

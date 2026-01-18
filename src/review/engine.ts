@@ -1,4 +1,4 @@
-import { createOpencode, createOpencodeClient } from '@opencode-ai/sdk'
+import { createOpencode, createOpencodeClient, type TextPart } from '@opencode-ai/sdk'
 import { getConfig } from '../config/index.js'
 import { buildReviewPrompt, type ReviewPromptOptions } from './prompt.js'
 import { logger } from '../utils/logger.js'
@@ -92,7 +92,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
 
     // Extract text content from parts
     const content = result.data.parts
-      .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+      .filter((part): part is TextPart => part.type === 'text')
       .map((part) => part.text)
       .join('\n')
 
@@ -163,7 +163,7 @@ export async function runReviewWithServer(
   }
 
   const content = result.data.parts
-    .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+    .filter((part): part is TextPart => part.type === 'text')
     .map((part) => part.text)
     .join('\n')
 
