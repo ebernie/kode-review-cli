@@ -1,0 +1,58 @@
+{
+  "name": "@kofikode/kode-review-cli",
+  "version": "0.1.0",
+  "description": "AI-powered code review CLI using OpenCode SDK with Antigravity support",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "kode-review": "./bin/kode-review.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "lint": "eslint src/",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "code-review",
+    "ai",
+    "opencode",
+    "antigravity",
+    "github",
+    "gitlab",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kofikode/kode-review-cli"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0",
+    "@opencode-ai/sdk": "^1.0.0",
+    "chalk": "^5.4.0",
+    "commander": "^13.0.0",
+    "conf": "^13.0.0",
+    "execa": "^9.5.0",
+    "ora": "^8.1.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  },
+  "files": [
+    "dist",
+    "bin"
+  ]
+}
