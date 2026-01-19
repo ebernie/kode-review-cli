@@ -7,6 +7,7 @@ import { logger, setQuietMode, errorJson } from './utils/logger.js'
 import {
   isOnboardingComplete,
   resetConfig,
+  getConfig,
 } from './config/index.js'
 import { runOnboardingWizard, runProviderSetup, setupVcs } from './onboarding/index.js'
 import {
@@ -29,6 +30,7 @@ import {
   getGitLabMRInfo,
   type VcsPlatform,
 } from './vcs/index.js'
+import { startWatchMode, type WatchConfig, type Platform } from './watch/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
   if (options.reset) {
@@ -60,6 +62,50 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
   }
 
   return false
+}
+
+async function runWatchMode(options: CliOptions, ctx: CliContext): Promise<void> {
+  let config = getConfig()
+
+  // Check if VCS is configured - if not, auto-detect
+  let githubEnabled = config.github.enabled && config.github.authenticated
+  let gitlabEnabled = config.gitlab.enabled && config.gitlab.authenticated
+
+  if (!githubEnabled && !gitlabEnabled) {
+    logger.info('VCS not configured yet, detecting GitHub/GitLab CLI status...')
+    const vcsResult = await setupVcs()
+    githubEnabled = vcsResult.github.enabled && vcsResult.github.authenticated
+    gitlabEnabled = vcsResult.gitlab.enabled && vcsResult.gitlab.authenticated
+  }
+
+  if (!githubEnabled && !gitlabEnabled) {
+    throw new Error(
+      'No VCS platforms authenticated for watch mode. Please authenticate with GitHub CLI (gh auth login) or GitLab CLI (glab auth login).'
+    )
+  }
+
+  // Build platforms list
+  const platforms: Platform[] = []
+  if (githubEnabled) platforms.push('github')
+  if (gitlabEnabled) platforms.push('gitlab')
+
+  // Build watch config
+  const watchConfig: WatchConfig = {
+    interval: options.watchInterval,
+    interactive: options.watchInteractive,
+    platforms,
+  }
+
+  // Start watch mode
+  await startWatchMode({
+    detectorConfig: {
+      githubEnabled,
+      gitlabEnabled,
+    },
+    watchConfig,
+    cliOptions: options,
+    ctx,
+  })
 }
 
 async function selectPrMr(
@@ -382,6 +428,12 @@ async function main(): Promise<void> {
           'Configuration not found. Run "kode-review --setup" first, or configure interactively.'
         )
       }
+    }
+
+    // Check if watch mode requested
+    if (options.watch) {
+      await runWatchMode(options, ctx)
+      return
     }
 
     // Run code review

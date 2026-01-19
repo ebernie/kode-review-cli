@@ -17,6 +17,11 @@ export interface CliOptions {
   // Server
   attach?: string
 
+  // Watch mode
+  watch: boolean
+  watchInterval: number
+  watchInteractive: boolean
+
   // Setup commands
   setup: boolean
   setupProvider: boolean
@@ -49,6 +54,12 @@ export function createProgram(): Command {
   program
     .option('--attach <url>', 'Attach to running OpenCode server')
 
+  // Watch mode
+  program
+    .option('-w, --watch', 'Watch mode: monitor for PRs/MRs where you are a reviewer', false)
+    .option('--watch-interval <seconds>', 'Polling interval in seconds (default: 300)', '300')
+    .option('--watch-interactive', 'Prompt to select PR/MR instead of auto-reviewing', false)
+
   // Setup commands
   program
     .option('--setup', 'Run the full onboarding wizard', false)
@@ -65,6 +76,13 @@ export function parseArgs(argv: string[]): CliOptions {
 
   const opts = program.opts()
 
+  // Validate watch interval
+  const watchIntervalRaw = opts.watchInterval ?? '300'
+  const watchInterval = parseInt(watchIntervalRaw, 10)
+  if (isNaN(watchInterval) || watchInterval < 10) {
+    throw new Error(`Invalid watch interval: "${watchIntervalRaw}". Must be a number >= 10 seconds.`)
+  }
+
   return {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,
@@ -74,6 +92,9 @@ export function parseArgs(argv: string[]): CliOptions {
     model: opts.model,
     variant: opts.variant,
     attach: opts.attach,
+    watch: opts.watch ?? false,
+    watchInterval,
+    watchInteractive: opts.watchInteractive ?? false,
     setup: opts.setup ?? false,
     setupProvider: opts.setupProvider ?? false,
     setupVcs: opts.setupVcs ?? false,
