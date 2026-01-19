@@ -256,9 +256,11 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         getGitHubPRInfo(prMr.id),
       ])
 
-      if (prDiff) {
-        diffContent += `\n=== PULL REQUEST #${prMr.id} CHANGES ===\n\n${prDiff}`
+      if (!prDiff) {
+        throw new Error(`Failed to fetch diff for PR #${prMr.id}. Check that the PR exists and you have access.`)
       }
+
+      diffContent += `\n=== PULL REQUEST #${prMr.id} CHANGES ===\n\n${prDiff}`
 
       if (prInfo) {
         prMrInfo = JSON.stringify(prInfo, null, 2)
@@ -271,9 +273,11 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         getGitLabMRInfo(prMr.id),
       ])
 
-      if (mrDiff) {
-        diffContent += `\n=== MERGE REQUEST !${prMr.id} CHANGES ===\n\n${mrDiff}`
+      if (!mrDiff) {
+        throw new Error(`Failed to fetch diff for MR !${prMr.id}. Check that the MR exists and you have access.`)
       }
+
+      diffContent += `\n=== MERGE REQUEST !${prMr.id} CHANGES ===\n\n${mrDiff}`
 
       if (mrInfo) {
         prMrInfo = JSON.stringify(mrInfo, null, 2)
