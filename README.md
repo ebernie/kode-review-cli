@@ -93,10 +93,40 @@ kode-review --provider google --model antigravity-claude-sonnet-4-5-thinking --v
 | `--model <id>` | Override model |
 | `--variant <name>` | Override variant (e.g., `max`, `low`) |
 | `--attach <url>` | Connect to running OpenCode server |
+| `-w, --watch` | Watch mode: monitor for PRs/MRs where you are a reviewer |
+| `--watch-interval <sec>` | Polling interval in seconds (default: 300) |
+| `--watch-interactive` | Prompt to select PR/MR instead of auto-reviewing |
 | `--setup` | Re-run full onboarding wizard |
 | `--setup-provider` | Re-configure provider/model only |
 | `--setup-vcs` | Re-configure GitHub/GitLab only |
 | `--reset` | Reset all configuration |
+
+## Watch Mode
+
+Watch mode monitors for PRs/MRs where you are assigned as a reviewer across all repositories.
+
+```bash
+# Start watching with default 5-minute polling interval
+kode-review --watch
+
+# Custom polling interval (1 minute)
+kode-review --watch --watch-interval 60
+
+# Interactive mode - prompt to select which PR/MR to review
+kode-review --watch --watch-interactive
+
+# Quiet mode for background monitoring
+kode-review --watch --quiet
+```
+
+**Features:**
+- Polls both GitHub and GitLab simultaneously (if both CLIs are authenticated)
+- Persists reviewed PR/MR state to disk to avoid duplicates across restarts
+- Auto-detects VCS CLI authentication on first run
+- Graceful shutdown on Ctrl+C (waits for current review to complete)
+- Retries transient errors (network, timeout) in the next poll cycle
+
+**State file:** `~/.config/kode-review-watch/config.json`
 
 ## Onboarding
 
