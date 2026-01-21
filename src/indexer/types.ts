@@ -381,3 +381,50 @@ export interface RepoInfo {
   /** Total files across all branches */
   totalFiles: number
 }
+
+/**
+ * Type of change for a modified line
+ */
+export type ChangeType = 'addition' | 'deletion' | 'modification'
+
+/**
+ * Represents a modified line extracted from a git diff
+ */
+export interface ModifiedLine {
+  /** File path (relative to repo root) */
+  filename: string
+
+  /** Line number in the new file (for additions/modifications) or old file (for deletions) */
+  lineNumber: number
+
+  /** The actual line content (without the +/- prefix) */
+  content: string
+
+  /** Type of change */
+  changeType: ChangeType
+}
+
+/**
+ * Parsed diff information containing all modified lines grouped by file
+ */
+export interface ParsedDiff {
+  /** All modified lines across all files */
+  modifiedLines: ModifiedLine[]
+
+  /** Files that have changes, mapped to their line ranges */
+  fileChanges: Map<string, { additions: number[]; deletions: number[]; modifications: number[] }>
+}
+
+/**
+ * Code chunk with weighted score for prioritization
+ */
+export interface WeightedCodeChunk extends CodeChunk {
+  /** Original similarity score before weighting */
+  originalScore: number
+
+  /** Weight multiplier applied (1.0 for no boost, 2.0 for modified lines) */
+  weightMultiplier: number
+
+  /** Whether this chunk overlaps with modified lines */
+  isModifiedContext: boolean
+}

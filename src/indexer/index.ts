@@ -7,6 +7,10 @@ export type {
   IndexerStatus,
   SemanticContextOptions,
   RepoInfo,
+  ModifiedLine,
+  ParsedDiff,
+  WeightedCodeChunk,
+  ChangeType,
 } from './types.js'
 
 // Detector
@@ -31,7 +35,13 @@ export {
 export { IndexerClient } from './client.js'
 
 // Context retrieval
-export { getSemanticContext, extractQueriesFromDiff } from './context.js'
+export {
+  getSemanticContext,
+  extractQueriesFromDiff,
+  parseDiffToModifiedLines,
+  chunkOverlapsModifiedLines,
+  applyModifiedLineWeighting,
+} from './context.js'
 
 // Setup wizard
 export { setupIndexer, showIndexerStatus, handleStopIndexer, handleCleanupIndexer } from './setup.js'
