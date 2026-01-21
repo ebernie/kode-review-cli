@@ -23,6 +23,8 @@ export {
   cleanupIndexer,
   listIndexedRepos,
   runCocoIndexFlow,
+  extractRelationships,
+  verifyExport,
 } from './docker.js'
 
 // HTTP client

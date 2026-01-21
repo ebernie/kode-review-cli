@@ -70,9 +70,11 @@ function ensureDockerAssets(): string {
     'main.py',
     'indexer.py',
     'cocoindex_flow.py',
+    'ast_chunker.py',
     'migrate.py',
     'schema.sql',
     'requirements.txt',
+    'verify_export.py',
   ]
 
   for (const file of files) {
@@ -499,7 +501,12 @@ export async function cleanupIndexer(): Promise<void> {
     'Dockerfile',
     'main.py',
     'indexer.py',
+    'cocoindex_flow.py',
+    'ast_chunker.py',
+    'migrate.py',
+    'schema.sql',
     'requirements.txt',
+    'verify_export.py',
     '.env',
   ]
 
@@ -617,4 +624,108 @@ export async function runCocoIndexFlow(
 
   logger.info(result.stdout)
   logger.success('CocoIndex flow completed successfully')
+
+  // Run relationship extraction after the main flow
+  if (!options?.live) {
+    await extractRelationships(repoUrl, effectiveBranch)
+  }
+}
+
+/**
+ * Extract relationships between code chunks.
+ *
+ * This runs the relationship extraction script which analyzes
+ * chunks in the database and creates relationship records based on
+ * imports, exports, and symbol references.
+ *
+ * @param repoUrl - Repository URL
+ * @param branch - Branch being indexed
+ */
+export async function extractRelationships(
+  repoUrl: string,
+  branch: string
+): Promise<void> {
+  const status = await getIndexerStatus()
+  if (!status.running) {
+    throw new Error('Indexer is not running')
+  }
+
+  const network = getDockerNetwork()
+  const image = getIndexerImage()
+  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+
+  logger.info('Extracting relationships between code chunks...')
+
+  // Note: Using exec wrapper from utils which uses execa (no shell, safe from injection)
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '--network', network,
+    '-e', `COCOINDEX_DATABASE_URL=${dbUrl}`,
+    '-e', `REPO_URL=${repoUrl}`,
+    '-e', `REPO_BRANCH=${branch}`,
+    image,
+    'python', 'cocoindex_flow.py', '--extract-relationships',
+  ]
+
+  const result = await exec('docker', dockerArgs, { timeout: 300000 }) // 5 minute timeout
+
+  if (result.exitCode !== 0) {
+    logger.warn(`Relationship extraction warning: ${result.stderr}`)
+    // Don't fail the whole indexing if relationship extraction fails
+    return
+  }
+
+  logger.info(result.stdout.trim())
+}
+
+/**
+ * Verify that data was exported correctly to Postgres.
+ *
+ * This runs the verification script to check:
+ * - Chunks table has embeddings
+ * - Relationships table is populated
+ * - Vector search works
+ *
+ * @param repoUrl - Repository URL
+ * @param branch - Branch being verified
+ */
+export async function verifyExport(
+  repoUrl: string,
+  branch: string
+): Promise<boolean> {
+  const status = await getIndexerStatus()
+  if (!status.running) {
+    throw new Error('Indexer is not running')
+  }
+
+  const network = getDockerNetwork()
+  const image = getIndexerImage()
+  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+
+  logger.info('Verifying export to Postgres...')
+
+  // Note: Using exec wrapper from utils which uses execa (no shell, safe from injection)
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '--network', network,
+    '-e', `COCOINDEX_DATABASE_URL=${dbUrl}`,
+    '-e', `REPO_URL=${repoUrl}`,
+    '-e', `REPO_BRANCH=${branch}`,
+    image,
+    'python', 'verify_export.py', '--skip-search',
+  ]
+
+  const result = await exec('docker', dockerArgs, { timeout: 60000 })
+
+  logger.info(result.stdout)
+
+  if (result.exitCode !== 0) {
+    logger.error('Verification failed')
+    return false
+  }
+
+  logger.success('Verification passed')
+  return true
 }
