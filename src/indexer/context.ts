@@ -1,7 +1,7 @@
 import { IndexerClient } from './client.js'
 import { getIndexerApiUrl, isIndexerRunning } from './docker.js'
 import { logger } from '../utils/logger.js'
-import type { CodeChunk, SemanticContextOptions, ModifiedLine, ParsedDiff, WeightedCodeChunk } from './types.js'
+import type { CodeChunk, SemanticContextOptions, ModifiedLine, ParsedDiff, WeightedCodeChunk, PrDescriptionInfo } from './types.js'
 
 /**
  * Weight multiplier for chunks that overlap with modified lines.
@@ -19,6 +19,18 @@ const TEST_FILE_WEIGHT_MULTIPLIER = 1.5
  * Maximum number of test file chunks to include per source file.
  */
 const MAX_TEST_CHUNKS_PER_SOURCE = 3
+
+/**
+ * Weight multiplier for chunks matching PR description intent.
+ * A value of 1.3 means description-referenced code is ranked higher
+ * to ensure the LLM understands the intent behind changes.
+ */
+const DESCRIPTION_WEIGHT_MULTIPLIER = 1.3
+
+/**
+ * Maximum number of queries to extract from PR description.
+ */
+const MAX_DESCRIPTION_QUERIES = 8
 
 /**
  * Test file naming patterns - file must contain one of these patterns to be a test file.
@@ -405,6 +417,215 @@ const NOISE_KEYWORDS = new Set([
   'def', 'lambda', 'self', 'cls', 'pass', 'raise', 'except', 'assert', 'print',
   'main', 'init', 'test', 'setup', 'teardown', 'describe', 'it', 'expect', 'mock',
 ])
+
+/**
+ * Common noise words in PR descriptions that shouldn't be extracted.
+ */
+const DESCRIPTION_NOISE_WORDS = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
+  'may', 'might', 'must', 'shall', 'can', 'need', 'dare', 'ought', 'used',
+  'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by', 'from', 'as', 'into',
+  'through', 'during', 'before', 'after', 'above', 'below', 'between', 'under',
+  'and', 'but', 'or', 'nor', 'so', 'yet', 'both', 'either', 'neither',
+  'not', 'only', 'also', 'just', 'than', 'that', 'this', 'these', 'those',
+  'it', 'its', 'we', 'our', 'they', 'their', 'i', 'my', 'you', 'your',
+  'what', 'which', 'who', 'whom', 'when', 'where', 'why', 'how',
+  'all', 'each', 'every', 'some', 'any', 'no', 'none', 'one', 'two', 'three',
+  'add', 'adds', 'added', 'adding', 'update', 'updates', 'updated', 'updating',
+  'fix', 'fixes', 'fixed', 'fixing', 'remove', 'removes', 'removed', 'removing',
+  'change', 'changes', 'changed', 'changing', 'make', 'makes', 'made', 'making',
+  'now', 'new', 'old', 'more', 'less', 'most', 'least', 'very', 'too',
+  'pr', 'mr', 'wip', 'draft', 'todo', 'fixme', 'note', 'see', 'ref', 'refs',
+])
+
+/**
+ * Patterns for extracting file paths from PR descriptions.
+ */
+const FILE_PATH_PATTERNS = [
+  // Explicit file paths with extensions
+  /(?:^|[\s`'"(])([a-zA-Z0-9_\-./]+\.[a-z]{1,4})(?:[\s`'")\]:,]|$)/gi,
+  // src/, lib/, pkg/ style paths
+  /(?:^|[\s`'"(])((?:src|lib|pkg|packages|app|components|utils|services|api|tests?|spec)\/[a-zA-Z0-9_\-./]+)(?:[\s`'")\]:,]|$)/gi,
+  // Markdown code references `path/to/file`
+  /`([a-zA-Z0-9_\-./]+(?:\.[a-z]+)?)`/gi,
+]
+
+/**
+ * Patterns for extracting technical terms from PR descriptions.
+ */
+const TECHNICAL_TERM_PATTERNS = [
+  // PascalCase identifiers (class names, component names)
+  /\b([A-Z][a-z]+(?:[A-Z][a-z]+)+)\b/g,
+  // camelCase identifiers (function names, variable names)
+  /\b([a-z]+(?:[A-Z][a-z]+)+)\b/g,
+  // snake_case identifiers
+  /\b([a-z]+(?:_[a-z]+)+)\b/g,
+  // CONSTANT_CASE identifiers
+  /\b([A-Z]+(?:_[A-Z]+)+)\b/g,
+  // Backtick-wrapped code references
+  /`([a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)*)`/g,
+  // Words ending with common suffixes (Handler, Service, Controller, etc.)
+  /\b([A-Z][a-zA-Z]*(?:Handler|Service|Controller|Manager|Provider|Factory|Repository|Store|Client|Server|Middleware|Router|Validator|Parser|Builder|Resolver|Listener|Observer|Worker|Queue|Cache|Logger|Util|Helper|Config|Schema|Model|Type|Interface))\b/g,
+]
+
+/**
+ * Extract information from a PR/MR description for context biasing.
+ *
+ * Extracts:
+ * - A summary (first non-empty paragraph or first 200 chars)
+ * - Key terms (technical identifiers, component names)
+ * - Mentioned file paths
+ * - Technical concepts
+ */
+export function extractPrDescriptionInfo(description: string | undefined): PrDescriptionInfo | null {
+  if (!description || description.trim().length === 0) {
+    return null
+  }
+
+  const keyTerms: string[] = []
+  const mentionedPaths: string[] = []
+  const technicalConcepts: string[] = []
+
+  // Extract file paths
+  for (const pattern of FILE_PATH_PATTERNS) {
+    const matches = description.matchAll(new RegExp(pattern.source, pattern.flags))
+    for (const match of matches) {
+      const path = match[1]?.trim()
+      if (path && path.length > 2 && !mentionedPaths.includes(path)) {
+        // Clean up path - remove trailing punctuation
+        const cleanPath = path.replace(/[.,;:!?]+$/, '')
+        if (cleanPath.length > 2) {
+          mentionedPaths.push(cleanPath)
+        }
+      }
+    }
+  }
+
+  // Extract technical terms
+  for (const pattern of TECHNICAL_TERM_PATTERNS) {
+    const matches = description.matchAll(new RegExp(pattern.source, pattern.flags))
+    for (const match of matches) {
+      const term = match[1]?.trim()
+      if (term && term.length >= 3 && !DESCRIPTION_NOISE_WORDS.has(term.toLowerCase())) {
+        if (!technicalConcepts.includes(term)) {
+          technicalConcepts.push(term)
+        }
+      }
+    }
+  }
+
+  // Extract key terms (significant words from the description)
+  const words = description
+    .replace(/[#*`_~[\](){}|<>]/g, ' ') // Remove markdown
+    .replace(/https?:\/\/[^\s]+/g, ' ') // Remove URLs
+    .split(/\s+/)
+    .filter(word => {
+      const lower = word.toLowerCase().replace(/[^a-z0-9]/g, '')
+      return (
+        lower.length >= 4 &&
+        !DESCRIPTION_NOISE_WORDS.has(lower) &&
+        !NOISE_KEYWORDS.has(lower) &&
+        !/^\d+$/.test(lower) // Not purely numeric
+      )
+    })
+
+  // Collect unique key terms
+  const seenTerms = new Set<string>()
+  for (const word of words) {
+    const cleaned = word.replace(/[^a-zA-Z0-9_-]/g, '')
+    const lower = cleaned.toLowerCase()
+    if (cleaned.length >= 4 && !seenTerms.has(lower)) {
+      seenTerms.add(lower)
+      keyTerms.push(cleaned)
+    }
+  }
+
+  // Generate summary - first meaningful paragraph or first 200 chars
+  const paragraphs = description.split(/\n\s*\n/)
+  let summary = ''
+
+  for (const para of paragraphs) {
+    const trimmed = para.trim()
+    // Skip headers, lists starting with -, empty lines
+    if (trimmed.length > 20 && !trimmed.startsWith('#') && !trimmed.startsWith('-') && !trimmed.startsWith('*')) {
+      summary = trimmed.slice(0, 200)
+      if (trimmed.length > 200) {
+        summary += '...'
+      }
+      break
+    }
+  }
+
+  // If no good paragraph found, use first 200 chars
+  if (!summary) {
+    const cleaned = description.replace(/[#*`_~[\]]/g, '').trim()
+    summary = cleaned.slice(0, 200)
+    if (cleaned.length > 200) {
+      summary += '...'
+    }
+  }
+
+  return {
+    summary,
+    keyTerms: keyTerms.slice(0, 20), // Limit to top 20 key terms
+    mentionedPaths: mentionedPaths.slice(0, 10), // Limit to 10 paths
+    technicalConcepts: technicalConcepts.slice(0, 15), // Limit to 15 concepts
+  }
+}
+
+/**
+ * Generate semantic queries from PR description information.
+ *
+ * Combines key terms, file paths, and technical concepts into
+ * search queries that can bias the semantic context retrieval
+ * toward code relevant to the PR's stated intent.
+ */
+export function extractQueriesFromPrDescription(descriptionInfo: PrDescriptionInfo | null): string[] {
+  if (!descriptionInfo) {
+    return []
+  }
+
+  const queries: string[] = []
+
+  // Add mentioned file paths as high-priority queries
+  for (const path of descriptionInfo.mentionedPaths) {
+    // Extract meaningful parts from the path
+    const parts = path.split('/').filter(p => p.length > 2)
+    if (parts.length > 0) {
+      // Add the full path
+      queries.push(path)
+      // Add the filename without extension
+      const filename = parts[parts.length - 1]
+      const baseName = filename.replace(/\.[^.]+$/, '')
+      if (baseName.length > 2 && !queries.includes(baseName)) {
+        queries.push(baseName)
+      }
+    }
+  }
+
+  // Add technical concepts
+  for (const concept of descriptionInfo.technicalConcepts) {
+    if (!queries.includes(concept)) {
+      queries.push(concept)
+    }
+  }
+
+  // Add key terms (limited to avoid noise)
+  const keyTermsToAdd = descriptionInfo.keyTerms.slice(0, 5)
+  for (const term of keyTermsToAdd) {
+    if (!queries.includes(term)) {
+      queries.push(term)
+    }
+  }
+
+  // Deduplicate and limit
+  const uniqueQueries = [...new Set(queries)]
+    .filter(q => q.length >= 3 && q.length < 100)
+    .slice(0, MAX_DESCRIPTION_QUERIES)
+
+  return uniqueQueries
+}
 
 /**
  * Patterns for extracting function, class, and method names from various languages.
@@ -839,7 +1060,8 @@ function estimateTokens(text: string): number {
 
 /**
  * Format code chunks for inclusion in the prompt.
- * Weighted chunks are annotated to indicate they contain modified code or are test files.
+ * Weighted chunks are annotated to indicate they contain modified code, are test files,
+ * or match PR description intent.
  */
 function formatContext(chunks: WeightedCodeChunk[]): string {
   if (chunks.length === 0) {
@@ -856,6 +1078,9 @@ function formatContext(chunks: WeightedCodeChunk[]): string {
     }
     if (chunk.isTestFile) {
       annotations.push('TEST_FILE')
+    }
+    if (chunk.matchesDescriptionIntent) {
+      annotations.push('PR_INTENT')
     }
 
     const annotationStr = annotations.length > 0 ? ` [${annotations.join(', ')}]` : ''
@@ -1035,11 +1260,14 @@ async function findTestFilesBySymbolSearch(
  *
  * Test files related to modified source files are automatically included
  * with a 1.5x weight multiplier to help the LLM verify test coverage.
+ *
+ * PR/MR description is used to bias context retrieval toward relevant
+ * subsystems with a 1.3x weight multiplier.
  */
 export async function getSemanticContext(
   options: SemanticContextOptions
 ): Promise<string | null> {
-  const { diffContent, repoUrl, branch, topK, maxTokens } = options
+  const { diffContent, repoUrl, branch, topK, maxTokens, prDescription } = options
 
   // Check if indexer is running
   const running = await isIndexerRunning()
@@ -1062,20 +1290,43 @@ export async function getSemanticContext(
   const parsedDiff = parseDiffToModifiedLines(diffContent)
 
   // Extract queries from the diff
-  const queries = extractQueriesFromDiff(diffContent)
+  const diffQueries = extractQueriesFromDiff(diffContent)
 
-  if (queries.length === 0) {
-    logger.debug('No queries extracted from diff')
+  // Extract queries from PR description for intent biasing
+  const descriptionInfo = extractPrDescriptionInfo(prDescription)
+  const descriptionQueries = extractQueriesFromPrDescription(descriptionInfo)
+
+  if (descriptionQueries.length > 0) {
+    logger.debug(`Extracted ${descriptionQueries.length} queries from PR description`)
+  }
+
+  // Combine diff and description queries, keeping track of which are from description
+  const descriptionQuerySet = new Set(descriptionQueries.map(q => q.toLowerCase()))
+  const allQueries = [...diffQueries]
+
+  // Add description queries that aren't already in diff queries
+  for (const query of descriptionQueries) {
+    if (!diffQueries.some(dq => dq.toLowerCase() === query.toLowerCase())) {
+      allQueries.push(query)
+    }
+  }
+
+  if (allQueries.length === 0) {
+    logger.debug('No queries extracted from diff or description')
     return null
   }
 
-  logger.debug(`Extracted ${queries.length} queries from diff`)
+  logger.debug(`Total queries: ${allQueries.length} (${diffQueries.length} from diff, ${descriptionQueries.length} from description)`)
 
   // Search for each query and collect results
+  // Track which chunks came from description queries for weighting
   const allChunks: CodeChunk[] = []
+  const descriptionMatchedChunkIds = new Set<string>()
   const seenIds = new Set<string>()
 
-  for (const query of queries) {
+  for (const query of allQueries) {
+    const isDescriptionQuery = descriptionQuerySet.has(query.toLowerCase())
+
     try {
       const results = await client.search(query, repoUrl, topK, branch)
 
@@ -1085,6 +1336,14 @@ export async function getSemanticContext(
         if (!seenIds.has(id)) {
           seenIds.add(id)
           allChunks.push(chunk)
+
+          // Track if this chunk was found via description query
+          if (isDescriptionQuery) {
+            descriptionMatchedChunkIds.add(id)
+          }
+        } else if (isDescriptionQuery) {
+          // Mark existing chunk as also matching description
+          descriptionMatchedChunkIds.add(id)
         }
       }
     } catch (error) {
@@ -1098,11 +1357,29 @@ export async function getSemanticContext(
   }
 
   // Apply weight multiplier to chunks overlapping with modified lines
-  const weightedChunks = applyModifiedLineWeighting(allChunks, parsedDiff)
+  let weightedChunks = applyModifiedLineWeighting(allChunks, parsedDiff)
 
-  // Count how many chunks are from modified context
+  // Apply additional weight for description-matched chunks
+  weightedChunks = weightedChunks.map(chunk => {
+    const id = `${chunk.filename}:${chunk.startLine}-${chunk.endLine}`
+    if (descriptionMatchedChunkIds.has(id)) {
+      return {
+        ...chunk,
+        score: chunk.score * DESCRIPTION_WEIGHT_MULTIPLIER,
+        weightMultiplier: chunk.weightMultiplier * DESCRIPTION_WEIGHT_MULTIPLIER,
+        matchesDescriptionIntent: true,
+      }
+    }
+    return chunk
+  })
+
+  // Count how many chunks are from modified context and description intent
   const modifiedCount = weightedChunks.filter(c => c.isModifiedContext).length
+  const descriptionCount = weightedChunks.filter(c => c.matchesDescriptionIntent).length
   logger.debug(`Found ${modifiedCount} chunks overlapping with modified lines (weighted 2x)`)
+  if (descriptionCount > 0) {
+    logger.debug(`Found ${descriptionCount} chunks matching PR description intent (weighted 1.3x)`)
+  }
 
   // Find related test files for modified source files
   const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
@@ -1159,9 +1436,16 @@ export async function getSemanticContext(
 
   const selectedModifiedCount = selectedChunks.filter(c => c.isModifiedContext).length
   const selectedTestCount = selectedChunks.filter(c => c.isTestFile).length
-  logger.info(
-    `Including ${selectedChunks.length} related code chunks (${selectedModifiedCount} modified, ${selectedTestCount} test files, ${totalTokens} estimated tokens)`
-  )
+  const selectedIntentCount = selectedChunks.filter(c => c.matchesDescriptionIntent).length
+
+  // Build informative log message
+  const parts = [`${selectedChunks.length} related code chunks`]
+  if (selectedModifiedCount > 0) parts.push(`${selectedModifiedCount} modified`)
+  if (selectedTestCount > 0) parts.push(`${selectedTestCount} test files`)
+  if (selectedIntentCount > 0) parts.push(`${selectedIntentCount} PR intent`)
+  parts.push(`${totalTokens} estimated tokens`)
+
+  logger.info(`Including ${parts.join(', ')}`)
 
   return formatContext(selectedChunks)
 }

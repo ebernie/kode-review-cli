@@ -187,13 +187,15 @@ export interface ReviewPromptOptions {
   prMrInfo?: string
   /** Semantic context from the code indexer */
   semanticContext?: string
+  /** PR/MR description summary to provide author intent context */
+  prDescriptionSummary?: string
 }
 
 /**
  * Known structural XML tags used in prompts
  * These must be escaped in user content to prevent tag injection
  */
-const STRUCTURAL_TAGS = ['pr_mr_info', 'related_code', 'diff_content']
+const STRUCTURAL_TAGS = ['pr_mr_info', 'related_code', 'diff_content', 'author_intent']
 
 /**
  * Sanitize content to prevent XML tag injection
@@ -268,6 +270,20 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
   parts.push(options.context)
   parts.push('')
 
+  // Include author intent summary prominently when available
+  if (options.prDescriptionSummary) {
+    parts.push('## Author Intent')
+    parts.push('')
+    parts.push('The PR/MR author describes the purpose of these changes as:')
+    parts.push('')
+    parts.push('<author_intent>')
+    parts.push(sanitizeXmlContent(options.prDescriptionSummary, 'author_intent'))
+    parts.push('</author_intent>')
+    parts.push('')
+    parts.push('Use this context to understand what the author is trying to accomplish and verify the implementation matches the stated intent.')
+    parts.push('')
+  }
+
   if (options.prMrInfo) {
     parts.push('## PR/MR Information')
     parts.push('<pr_mr_info>')
@@ -280,6 +296,9 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     parts.push('## Related Code Context')
     parts.push('')
     parts.push('The following code snippets are semantically related to the changes being reviewed.')
+    if (options.prDescriptionSummary) {
+      parts.push('Chunks marked [PR_INTENT] were retrieved based on the PR description.')
+    }
     parts.push('')
     parts.push('<related_code>')
     parts.push(sanitizeXmlContent(options.semanticContext, 'related_code'))

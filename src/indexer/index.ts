@@ -11,6 +11,7 @@ export type {
   ParsedDiff,
   WeightedCodeChunk,
   ChangeType,
+  PrDescriptionInfo,
 } from './types.js'
 
 // Detector
@@ -45,6 +46,8 @@ export {
   generateTestFilePaths,
   extractSourceFilesFromDiff,
   findRelatedTestFiles,
+  extractPrDescriptionInfo,
+  extractQueriesFromPrDescription,
 } from './context.js'
 
 // Setup wizard

@@ -42,6 +42,7 @@ import {
   isIndexerRunning,
   handleCleanupIndexer,
   listIndexedRepos,
+  extractPrDescriptionInfo,
 } from './indexer/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
@@ -395,6 +396,8 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
   const contextParts: string[] = []
   let diffContent = ''
   let prMrInfo: string | undefined
+  let prDescription: string | undefined // Raw PR/MR description for semantic context biasing
+  let prDescriptionSummary: string | undefined // Extracted summary for LLM prompt
 
   if ((scope === 'local' || scope === 'both') && hasLocal) {
     contextParts.push(`Reviewing local changes (staged and unstaged) on branch '${branch}'.`)
@@ -418,6 +421,13 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       if (prInfo) {
         prMrInfo = JSON.stringify(prInfo, null, 2)
+        // Extract description for semantic context biasing
+        prDescription = prInfo.body
+        // Extract summary for LLM prompt
+        const descriptionInfo = extractPrDescriptionInfo(prDescription)
+        if (descriptionInfo) {
+          prDescriptionSummary = descriptionInfo.summary
+        }
       }
     } else {
       contextParts.push(`Reviewing GitLab Merge Request !${prMr.id}.`)
@@ -435,6 +445,13 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       if (mrInfo) {
         prMrInfo = JSON.stringify(mrInfo, null, 2)
+        // Extract description for semantic context biasing
+        prDescription = mrInfo.description
+        // Extract summary for LLM prompt
+        const descriptionInfo = extractPrDescriptionInfo(prDescription)
+        if (descriptionInfo) {
+          prDescriptionSummary = descriptionInfo.summary
+        }
       }
     }
   }
@@ -498,6 +515,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
             repoUrl,
             topK: options.contextTopK,
             maxTokens: config.indexer.maxContextTokens,
+            prDescription, // Include PR description for intent biasing
           })
 
           if (context) {
@@ -531,6 +549,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       context: contextParts.join('\n'),
       prMrInfo,
       semanticContext,
+      prDescriptionSummary,
       provider: options.provider,
       model: options.model,
       variant: options.variant,

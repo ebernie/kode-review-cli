@@ -360,6 +360,26 @@ export interface SemanticContextOptions {
 
   /** Maximum tokens for context */
   maxTokens: number
+
+  /** PR/MR description to extract intent and bias context retrieval */
+  prDescription?: string
+}
+
+/**
+ * Extracted information from a PR/MR description
+ */
+export interface PrDescriptionInfo {
+  /** Summary of what the PR is trying to accomplish */
+  summary: string
+
+  /** Key terms extracted from the description */
+  keyTerms: string[]
+
+  /** File paths or module names mentioned */
+  mentionedPaths: string[]
+
+  /** Technical concepts and components referenced */
+  technicalConcepts: string[]
 }
 
 /**
@@ -433,4 +453,7 @@ export interface WeightedCodeChunk extends CodeChunk {
 
   /** The source file this test file is related to (if isTestFile is true) */
   relatedSourceFile?: string
+
+  /** Whether this chunk matches PR description intent */
+  matchesDescriptionIntent?: boolean
 }
