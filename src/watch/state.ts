@@ -15,12 +15,12 @@ const ReviewOutcomeSchema = z.object({
 /**
  * Schema for watch state
  */
-const WatchStateSchema = z.object({
+const _WatchStateSchema = z.object({
   reviewedRequests: z.record(z.string(), ReviewOutcomeSchema),
   lastPollTime: z.string().optional(),
 })
 
-type WatchState = z.infer<typeof WatchStateSchema>
+type WatchState = z.infer<typeof _WatchStateSchema>
 
 /**
  * Manages persistent state for watch mode.

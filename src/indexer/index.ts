@@ -22,6 +22,7 @@ export {
   resetIndex,
   cleanupIndexer,
   listIndexedRepos,
+  runCocoIndexFlow,
 } from './docker.js'
 
 // HTTP client

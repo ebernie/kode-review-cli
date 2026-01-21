@@ -63,8 +63,17 @@ function ensureDockerAssets(): string {
   const configDir = getIndexerConfigDir()
   const assetsDir = getDockerAssetsPath()
 
-  // Include indexer.py for ephemeral container use
-  const files = ['compose.yaml', 'Dockerfile', 'main.py', 'indexer.py', 'requirements.txt']
+  // Include all necessary files for ephemeral container use and CocoIndex flow
+  const files = [
+    'compose.yaml',
+    'Dockerfile',
+    'main.py',
+    'indexer.py',
+    'cocoindex_flow.py',
+    'migrate.py',
+    'schema.sql',
+    'requirements.txt',
+  ]
 
   for (const file of files) {
     const src = join(assetsDir, file)
@@ -513,4 +522,99 @@ export async function cleanupIndexer(): Promise<void> {
   }
 
   logger.success('Indexer cleanup complete')
+}
+
+/**
+ * Run the CocoIndex file ingestion flow.
+ *
+ * This uses the CocoIndex CLI to execute the file ingestion flow,
+ * which reads repository files and detects their programming language.
+ *
+ * @param repoPath - Path to the repository
+ * @param repoUrl - Repository URL
+ * @param branch - Branch being indexed (optional, defaults to 'main')
+ * @param options - Additional options for flow execution
+ */
+export async function runCocoIndexFlow(
+  repoPath: string,
+  repoUrl: string,
+  branch?: string,
+  options?: {
+    /** Force setup before update */
+    setup?: boolean
+    /** Enable live update mode (watch for changes) */
+    live?: boolean
+    /** Force re-export all data */
+    reexport?: boolean
+  }
+): Promise<void> {
+  const config = getConfig()
+
+  // Resolve to absolute path
+  const absoluteRepoPath = resolve(repoPath)
+
+  // Ensure indexer services are running (PostgreSQL + API)
+  const status = await getIndexerStatus()
+  if (!status.running) {
+    await startIndexer()
+  }
+
+  const effectiveBranch = branch || 'main'
+  logger.info(`Running CocoIndex flow for: ${repoUrl}`)
+  logger.info(`Branch: ${effectiveBranch}`)
+  logger.info(`Path: ${absoluteRepoPath}`)
+
+  // Build the ephemeral container command
+  const network = getDockerNetwork()
+  const image = getIndexerImage()
+  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+
+  // Build CocoIndex CLI arguments
+  const cocoindexArgs = ['update']
+
+  if (options?.setup) {
+    cocoindexArgs.push('--setup')
+  }
+
+  if (options?.live) {
+    cocoindexArgs.push('-L')
+  }
+
+  if (options?.reexport) {
+    cocoindexArgs.push('--reexport')
+  }
+
+  cocoindexArgs.push('cocoindex_flow.py')
+
+  // Note: Using execa via the exec wrapper which safely escapes arguments
+  // to prevent command injection (no shell involved)
+  const dockerArgs = [
+    'run',
+    '--rm',                                    // Remove container after exit
+    '--network', network,                      // Connect to indexer network
+    '-v', `${absoluteRepoPath}:/repo:ro`,     // Mount repo read-only
+    '-e', `COCOINDEX_DATABASE_URL=${dbUrl}`,
+    '-e', `REPO_URL=${repoUrl}`,
+    '-e', `REPO_BRANCH=${effectiveBranch}`,
+    '-e', `REPO_PATH=/repo`,
+    '-e', `EMBEDDING_MODEL=${config.indexer.embeddingModel}`,
+    image,
+    'cocoindex',
+    ...cocoindexArgs,
+  ]
+
+  logger.info('Starting CocoIndex flow container...')
+
+  // Run the ephemeral container
+  const timeout = options?.live ? 0 : 600000 // No timeout for live mode, 10 min otherwise
+  const result = await exec('docker', dockerArgs, { timeout })
+
+  if (result.exitCode !== 0) {
+    logger.error(`CocoIndex output:\n${result.stdout}`)
+    logger.error(`CocoIndex errors:\n${result.stderr}`)
+    throw new Error(`CocoIndex flow failed with exit code ${result.exitCode}`)
+  }
+
+  logger.info(result.stdout)
+  logger.success('CocoIndex flow completed successfully')
 }
