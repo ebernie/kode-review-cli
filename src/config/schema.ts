@@ -9,6 +9,51 @@ export const VcsConfigSchema = z.object({
 })
 
 /**
+ * Indexer configuration for semantic code search
+ */
+export const IndexerConfigSchema = z.object({
+  /** Whether the indexer feature is enabled */
+  enabled: z.boolean().default(false),
+
+  /** Docker Compose project name */
+  composeProject: z.string().default('kode-review-indexer'),
+
+  /** Port for the indexer API */
+  apiPort: z.number().default(8321),
+
+  /** Port for the PostgreSQL database */
+  dbPort: z.number().default(5436),
+
+  /** Embedding model to use */
+  embeddingModel: z.string().default('sentence-transformers/all-MiniLM-L6-v2'),
+
+  /** Chunk size for code splitting */
+  chunkSize: z.number().default(1000),
+
+  /** Overlap between chunks */
+  chunkOverlap: z.number().default(300),
+
+  /** Number of results to return from search */
+  topK: z.number().default(5),
+
+  /** Maximum tokens for context */
+  maxContextTokens: z.number().default(4000),
+
+  /** File patterns to include */
+  includedPatterns: z.array(z.string()).default([
+    '**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx',
+    '**/*.py', '**/*.rs', '**/*.go', '**/*.java',
+    '**/*.c', '**/*.cpp', '**/*.h', '**/*.cs',
+  ]),
+
+  /** File patterns to exclude */
+  excludedPatterns: z.array(z.string()).default([
+    '**/node_modules/**', '**/dist/**', '**/build/**',
+    '**/.git/**', '**/vendor/**', '**/target/**',
+  ]),
+})
+
+/**
  * Antigravity model definition for OpenCode config
  */
 export const AntigravityModelSchema = z.object({
@@ -44,6 +89,9 @@ export const ConfigSchema = z.object({
   github: VcsConfigSchema.default({}),
   gitlab: VcsConfigSchema.default({}),
 
+  // Indexer integration
+  indexer: IndexerConfigSchema.default({}),
+
   // State
   onboardingComplete: z.boolean().default(false),
 })
@@ -51,6 +99,7 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>
 export type VcsConfig = z.infer<typeof VcsConfigSchema>
 export type AntigravityModel = z.infer<typeof AntigravityModelSchema>
+export type IndexerConfigType = z.infer<typeof IndexerConfigSchema>
 
 /**
  * Default configuration

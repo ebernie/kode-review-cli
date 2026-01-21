@@ -1,4 +1,4 @@
-export { detectPlatform, getCurrentBranch, isGitRepository, type VcsPlatform } from './detect.js'
+export { detectPlatform, getCurrentBranch, isGitRepository, getRepoUrl, getRepoRoot, type VcsPlatform } from './detect.js'
 export {
   isGhInstalled,
   isGhAuthenticated,

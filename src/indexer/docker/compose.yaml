@@ -1,0 +1,34 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: cocoindex
+      POSTGRES_PASSWORD: cocoindex
+      POSTGRES_DB: cocoindex
+    ports:
+      - "${KODE_REVIEW_DB_PORT:-5436}:5432"
+    volumes:
+      - indexer-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cocoindex"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${KODE_REVIEW_API_PORT:-8321}:8000"
+    environment:
+      - COCOINDEX_DATABASE_URL=postgresql://cocoindex:cocoindex@db:5432/cocoindex
+      - EMBEDDING_MODEL=${KODE_REVIEW_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+    depends_on:
+      db:
+        condition: service_healthy
+    # NOTE: No repo volume mount - API only handles search/stats/repos/delete
+    # Indexing is done by ephemeral containers spawned by the CLI
+
+volumes:
+  indexer-data:

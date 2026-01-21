@@ -9,6 +9,7 @@ AI-powered code review CLI using OpenCode SDK with Antigravity support.
 - **Multi-Platform VCS**: Supports GitHub PRs and GitLab MRs
 - **Interactive & Agent Modes**: Works interactively or in CI/automation pipelines
 - **Onboarding Wizard**: Guided setup for providers and VCS integration
+- **Semantic Code Indexer**: Optional Docker-based code indexing for contextual reviews
 
 ## Requirements
 
@@ -22,6 +23,7 @@ AI-powered code review CLI using OpenCode SDK with Antigravity support.
   bun install -g opencode-ai
   ```
 - **Optional:** GitHub CLI ([`gh`](https://cli.github.com/)) and/or GitLab CLI ([`glab`](https://gitlab.com/gitlab-org/cli))
+- **Optional:** [Docker](https://www.docker.com/products/docker-desktop/) (required for semantic code indexer)
 
 ## Installation
 
@@ -100,6 +102,12 @@ kode-review --provider google --model antigravity-claude-sonnet-4-5-thinking --v
 | `--setup-provider` | Re-configure provider/model only |
 | `--setup-vcs` | Re-configure GitHub/GitLab only |
 | `--reset` | Reset all configuration |
+| `--setup-indexer` | Interactive indexer setup wizard |
+| `--index` | Index/update current repository |
+| `--index-status` | Show indexer status |
+| `--index-reset` | Drop and rebuild index for current repo |
+| `--with-context` | Include semantic context in review |
+| `--context-top-k <n>` | Number of similar code chunks to include (default: 5) |
 
 ## Watch Mode
 
@@ -127,6 +135,150 @@ kode-review --watch --quiet
 - Retries transient errors (network, timeout) in the next poll cycle
 
 **State file:** `~/.config/kode-review-watch/config.json`
+
+## Semantic Code Indexer
+
+The semantic code indexer is an **optional** feature that provides contextual information during code reviews. When reviewing a diff, the tool queries an index to find related code from your codebase, helping the AI reviewer understand the broader context.
+
+### Requirements
+
+- **Docker Desktop** (macOS/Windows) or **Docker Engine** (Linux)
+- Docker Compose v2 (included with Docker Desktop)
+
+### Setup
+
+Run the interactive setup wizard:
+
+```bash
+kode-review --setup-indexer
+```
+
+This will:
+1. Check Docker prerequisites
+2. Build and start the indexer containers (PostgreSQL + API)
+3. Enable the indexer feature in your configuration
+
+The indexer runs as two Docker containers:
+- **PostgreSQL with pgvector** - Stores code embeddings for semantic search
+- **FastAPI server** - Handles indexing and search requests
+
+### Indexing a Repository
+
+Before using semantic context in reviews, you need to index your repository:
+
+```bash
+# Navigate to your repository
+cd /path/to/your/repo
+
+# Index the repository
+kode-review --index
+```
+
+The indexer will:
+- Scan files matching configured patterns (TypeScript, JavaScript, Python, Go, Rust, Java, etc.)
+- Split code into overlapping chunks
+- Generate embeddings using SentenceTransformers
+- Store in PostgreSQL for fast similarity search
+
+**Re-index** after significant code changes:
+```bash
+kode-review --index
+```
+
+**Reset and rebuild** the index completely:
+```bash
+kode-review --index-reset
+kode-review --index
+```
+
+### Using Semantic Context in Reviews
+
+Once your repository is indexed, include semantic context in reviews:
+
+```bash
+# Review with semantic context
+kode-review --with-context
+
+# Review a PR with context
+kode-review --scope pr --pr 123 --with-context
+
+# Adjust number of related code chunks (default: 5)
+kode-review --with-context --context-top-k 10
+```
+
+When `--with-context` is enabled, the tool:
+1. Extracts function names, class names, and imports from the diff
+2. Searches the index for semantically similar code
+3. Includes the most relevant chunks in the review prompt
+4. The AI reviewer uses this context to understand how changes fit into your codebase
+
+### Checking Status
+
+View the indexer status and configuration:
+
+```bash
+kode-review --index-status
+```
+
+This shows:
+- Whether containers are running
+- Health check status
+- Configuration settings (ports, embedding model, etc.)
+- Indexed repository statistics
+
+### Configuration
+
+The indexer stores configuration in `~/.config/kode-review/config.json`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `indexer.enabled` | `false` | Whether indexer is enabled |
+| `indexer.apiPort` | `8321` | API server port |
+| `indexer.dbPort` | `5436` | PostgreSQL port |
+| `indexer.embeddingModel` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
+| `indexer.chunkSize` | `1000` | Characters per chunk |
+| `indexer.topK` | `5` | Default search results |
+| `indexer.maxContextTokens` | `4000` | Max tokens for context |
+
+### File Patterns
+
+By default, the indexer includes common source files:
+- TypeScript/JavaScript: `**/*.ts`, `**/*.tsx`, `**/*.js`, `**/*.jsx`
+- Python: `**/*.py`
+- Go: `**/*.go`
+- Rust: `**/*.rs`
+- Java: `**/*.java`
+- C/C++: `**/*.c`, `**/*.cpp`, `**/*.h`
+- C#: `**/*.cs`
+
+And excludes:
+- `**/node_modules/**`
+- `**/dist/**`, `**/build/**`
+- `**/.git/**`
+- `**/vendor/**`, `**/target/**`
+
+### Stopping the Indexer
+
+The indexer containers continue running in the background. To stop them:
+
+```bash
+docker compose -p kode-review-indexer down
+```
+
+### Troubleshooting
+
+**Indexer won't start:**
+- Ensure Docker is running: `docker info`
+- Check if ports 8321 and 5436 are available
+- View logs: `docker compose -p kode-review-indexer logs`
+
+**Context not appearing in reviews:**
+- Verify indexer is running: `kode-review --index-status`
+- Ensure repository is indexed: `kode-review --index`
+- Check the indexer is enabled in config
+
+**Re-indexing different repository:**
+When you run `--index` in a different repository, the indexer containers will automatically restart with the new repository mounted.
 
 ## Onboarding
 

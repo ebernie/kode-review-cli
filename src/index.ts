@@ -29,8 +29,20 @@ import {
   getGitLabMRDiff,
   getGitLabMRInfo,
   type VcsPlatform,
+  getRepoUrl,
+  getRepoRoot,
 } from './vcs/index.js'
 import { startWatchMode, type WatchConfig, type Platform } from './watch/index.js'
+import {
+  setupIndexer,
+  showIndexerStatus,
+  indexRepository,
+  resetIndex,
+  getSemanticContext,
+  isIndexerRunning,
+  handleCleanupIndexer,
+  listIndexedRepos,
+} from './indexer/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
   if (options.reset) {
@@ -58,6 +70,102 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   if (options.setupVcs) {
     await setupVcs()
+    return true
+  }
+
+  return false
+}
+
+async function handleIndexerCommands(options: CliOptions): Promise<boolean> {
+  // Setup indexer
+  if (options.setupIndexer) {
+    await setupIndexer()
+    return true
+  }
+
+  // Show status
+  if (options.indexStatus) {
+    await showIndexerStatus()
+    return true
+  }
+
+  // List all indexed repositories
+  if (options.indexListRepos) {
+    await listIndexedRepos()
+    return true
+  }
+
+  // Index current repository
+  if (options.index) {
+    if (!(await isGitRepository())) {
+      throw new Error('Not in a git repository')
+    }
+
+    const repoRoot = await getRepoRoot()
+    if (!repoRoot) {
+      throw new Error('Could not determine repository root directory.')
+    }
+
+    const repoUrl = await getRepoUrl()
+    if (!repoUrl) {
+      throw new Error('Could not determine repository URL. Ensure you have a git remote configured.')
+    }
+
+    // Determine branch: use --index-branch if provided, otherwise use current branch
+    let branch: string | undefined = options.indexBranch
+    if (!branch) {
+      const currentBranch = await getCurrentBranch()
+      if (!currentBranch) {
+        throw new Error(
+          'Cannot determine current branch (detached HEAD state?). ' +
+          'Please specify a branch with --index-branch <name>'
+        )
+      }
+      branch = currentBranch
+    }
+
+    await indexRepository(repoRoot, repoUrl, branch)
+    return true
+  }
+
+  // Reset index for current repository
+  if (options.indexReset) {
+    if (!(await isGitRepository())) {
+      throw new Error('Not in a git repository')
+    }
+
+    const repoUrl = await getRepoUrl()
+    if (!repoUrl) {
+      throw new Error('Could not determine repository URL.')
+    }
+
+    // Determine branch for reset
+    const branch = options.indexBranch
+
+    const confirmMessage = branch
+      ? `Reset the index for ${repoUrl}@${branch}?`
+      : `Reset the index for ${repoUrl} (all branches)?`
+
+    const confirmed = await confirm({
+      message: confirmMessage,
+      default: false,
+    })
+
+    if (confirmed) {
+      await resetIndex(repoUrl, branch)
+    }
+    return true
+  }
+
+  // Watch mode indexing (continuous)
+  if (options.indexWatch) {
+    logger.warn('Watch mode indexing is not yet implemented.')
+    return true
+  }
+
+  // Complete cleanup of the indexer
+  if (options.indexerCleanup) {
+    await handleCleanupIndexer()
     return true
   }
 
@@ -350,6 +458,62 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
     }
   }
 
+  // Retrieve semantic context if requested
+  let semanticContext: string | undefined
+
+  if (options.withContext) {
+    const config = getConfig()
+    const indexerRunning = await isIndexerRunning()
+
+    // Check if indexer is properly set up and running
+    if (!config.indexer.enabled || !indexerRunning) {
+      const reason = !config.indexer.enabled
+        ? 'Indexer has not been set up'
+        : 'Indexer containers are not running'
+
+      logger.warn(`${reason}. Semantic context will not be available.`)
+      console.log('')
+      console.log('To set up the indexer, run:')
+      console.log('  kode-review --setup-indexer')
+      console.log('')
+
+      if (!ctx.quiet) {
+        const continueWithoutContext = await confirm({
+          message: 'Continue review without semantic context?',
+          default: true,
+        })
+
+        if (!continueWithoutContext) {
+          logger.info('Review cancelled by user')
+          process.exit(0)
+        }
+      }
+    } else {
+      const repoUrl = await getRepoUrl()
+      if (repoUrl) {
+        try {
+          logger.info('Retrieving semantic context...')
+          const context = await getSemanticContext({
+            diffContent,
+            repoUrl,
+            topK: options.contextTopK,
+            maxTokens: config.indexer.maxContextTokens,
+          })
+
+          if (context) {
+            semanticContext = context
+            logger.success('Semantic context retrieved')
+          } else {
+            logger.info('No relevant semantic context found')
+          }
+        } catch (error) {
+          logger.warn('Could not retrieve semantic context')
+          logger.debug(`Error: ${error}`)
+        }
+      }
+    }
+  }
+
   // Run review
   if (!ctx.quiet) {
     console.log('')
@@ -366,6 +530,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       diffContent,
       context: contextParts.join('\n'),
       prMrInfo,
+      semanticContext,
       provider: options.provider,
       model: options.model,
       variant: options.variant,
@@ -405,6 +570,11 @@ async function main(): Promise<void> {
   try {
     // Handle setup commands first
     if (await handleSetupCommands(options)) {
+      return
+    }
+
+    // Handle indexer commands
+    if (await handleIndexerCommands(options)) {
       return
     }
 

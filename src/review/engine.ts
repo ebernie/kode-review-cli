@@ -10,6 +10,8 @@ export interface ReviewOptions {
   context: string
   /** PR/MR info as JSON string */
   prMrInfo?: string
+  /** Semantic context from code indexer */
+  semanticContext?: string
   /** Override provider */
   provider?: string
   /** Override model */
@@ -46,6 +48,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     context: options.context,
     diffContent: options.diffContent,
     prMrInfo: options.prMrInfo,
+    semanticContext: options.semanticContext,
   }
   const prompt = buildReviewPrompt(promptOptions)
 
@@ -129,6 +132,7 @@ export async function runReviewWithServer(
     context: options.context,
     diffContent: options.diffContent,
     prMrInfo: options.prMrInfo,
+    semanticContext: options.semanticContext,
   }
   const prompt = buildReviewPrompt(promptOptions)
 

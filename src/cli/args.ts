@@ -27,6 +27,20 @@ export interface CliOptions {
   setupProvider: boolean
   setupVcs: boolean
   reset: boolean
+
+  // Indexer commands
+  setupIndexer: boolean
+  index: boolean
+  indexWatch: boolean
+  indexReset: boolean
+  indexStatus: boolean
+  indexerCleanup: boolean
+  indexBranch?: string
+  indexListRepos: boolean
+
+  // Review context
+  withContext: boolean
+  contextTopK: number
 }
 
 export function createProgram(): Command {
@@ -67,6 +81,22 @@ export function createProgram(): Command {
     .option('--setup-vcs', 'Re-configure GitHub/GitLab only', false)
     .option('--reset', 'Reset all configuration', false)
 
+  // Indexer commands
+  program
+    .option('--setup-indexer', 'Interactive indexer setup wizard', false)
+    .option('--index', 'Index/update current repository', false)
+    .option('--index-watch', 'Continuous indexing (watch mode)', false)
+    .option('--index-reset', 'Drop and rebuild index for current repo', false)
+    .option('--index-status', 'Show indexer status (running, indexed repos, stats)', false)
+    .option('--indexer-cleanup', 'Remove indexer containers, volumes, and all indexed data', false)
+    .option('--index-branch <branch>', 'Branch to index (defaults to current branch)')
+    .option('--index-list-repos', 'List all indexed repositories with their branches', false)
+
+  // Review context options
+  program
+    .option('--with-context', 'Include semantic context in review', false)
+    .option('--context-top-k <n>', 'Number of similar code chunks to include (default: 5)', '5')
+
   return program
 }
 
@@ -81,6 +111,13 @@ export function parseArgs(argv: string[]): CliOptions {
   const watchInterval = parseInt(watchIntervalRaw, 10)
   if (isNaN(watchInterval) || watchInterval < 10) {
     throw new Error(`Invalid watch interval: "${watchIntervalRaw}". Must be a number >= 10 seconds.`)
+  }
+
+  // Validate context top-k
+  const contextTopKRaw = opts.contextTopK ?? '5'
+  const contextTopK = parseInt(contextTopKRaw, 10)
+  if (isNaN(contextTopK) || contextTopK < 1 || contextTopK > 20) {
+    throw new Error(`Invalid context-top-k: "${contextTopKRaw}". Must be a number between 1 and 20.`)
   }
 
   return {
@@ -99,5 +136,15 @@ export function parseArgs(argv: string[]): CliOptions {
     setupProvider: opts.setupProvider ?? false,
     setupVcs: opts.setupVcs ?? false,
     reset: opts.reset ?? false,
+    setupIndexer: opts.setupIndexer ?? false,
+    index: opts.index ?? false,
+    indexWatch: opts.indexWatch ?? false,
+    indexReset: opts.indexReset ?? false,
+    indexStatus: opts.indexStatus ?? false,
+    indexerCleanup: opts.indexerCleanup ?? false,
+    indexBranch: opts.indexBranch,
+    indexListRepos: opts.indexListRepos ?? false,
+    withContext: opts.withContext ?? false,
+    contextTopK,
   }
 }
