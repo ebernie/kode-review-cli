@@ -47,8 +47,11 @@ class CodeChunk:
     code: str
     start_line: int
     end_line: int
-    chunk_type: str = "other"  # function, class, method, module, other
-    symbol_name: str | None = None
+    chunk_type: str = "other"  # function, class, method, module, interface, other
+    symbol_name: str | None = None  # Primary symbol (backward compatibility)
+    symbol_names: list[str] = field(default_factory=list)  # All symbols defined in this chunk
+    imports: list[str] = field(default_factory=list)  # Import paths/modules
+    exports: list[str] = field(default_factory=list)  # Exported symbol names
 
 
 @dataclass
@@ -80,6 +83,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["expression_statement"],  # Docstrings are expression statements with strings
         "name_field": "name",
+        "import_types": ["import_statement", "import_from_statement"],
+        "export_types": [],  # Python uses __all__ for exports, handled specially
     },
     # JavaScript/TypeScript
     ".js": {
@@ -90,6 +95,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["import_statement"],
+        "export_types": ["export_statement"],
     },
     ".jsx": {
         "language": tree_sitter_javascript.language(),
@@ -99,6 +106,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["import_statement"],
+        "export_types": ["export_statement"],
     },
     ".ts": {
         "language": tree_sitter_typescript.language_typescript(),
@@ -109,6 +118,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["import_statement"],
+        "export_types": ["export_statement"],
     },
     ".tsx": {
         "language": tree_sitter_typescript.language_tsx(),
@@ -119,6 +130,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["import_statement"],
+        "export_types": ["export_statement"],
     },
     # Go
     ".go": {
@@ -129,6 +142,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["import_declaration"],
+        "export_types": [],  # Go exports via capitalization
     },
     # Rust
     ".rs": {
@@ -139,6 +154,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["line_comment", "block_comment"],
         "docstring_types": ["line_comment"],  # Doc comments in Rust are /// or //!
         "name_field": "name",
+        "import_types": ["use_declaration"],
+        "export_types": [],  # Rust uses pub keyword, detected differently
     },
     # Java
     ".java": {
@@ -149,6 +166,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["line_comment", "block_comment"],
         "docstring_types": ["block_comment"],  # Javadoc
         "name_field": "name",
+        "import_types": ["import_declaration"],
+        "export_types": [],  # Java uses public keyword
     },
     # C/C++
     ".c": {
@@ -159,6 +178,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],
         "name_field": "declarator",
+        "import_types": ["preproc_include"],
+        "export_types": [],  # C uses header files
     },
     ".h": {
         "language": tree_sitter_c.language(),
@@ -168,6 +189,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],
         "name_field": "declarator",
+        "import_types": ["preproc_include"],
+        "export_types": [],  # C uses header files
     },
     ".cpp": {
         "language": tree_sitter_cpp.language(),
@@ -177,6 +200,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],
         "name_field": "declarator",
+        "import_types": ["preproc_include"],
+        "export_types": [],  # C++ uses header files
     },
     ".hpp": {
         "language": tree_sitter_cpp.language(),
@@ -186,6 +211,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],
         "name_field": "declarator",
+        "import_types": ["preproc_include"],
+        "export_types": [],  # C++ uses header files
     },
     # Ruby
     ".rb": {
@@ -196,6 +223,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": [],
         "name_field": "name",
+        "import_types": ["call"],  # require/require_relative are method calls
+        "export_types": [],  # Ruby uses module_function or public
     },
     # PHP
     ".php": {
@@ -206,6 +235,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],
         "name_field": "name",
+        "import_types": ["namespace_use_declaration"],
+        "export_types": [],  # PHP uses namespaces
     },
     # C#
     ".cs": {
@@ -216,6 +247,8 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "comment_types": ["comment"],
         "docstring_types": ["comment"],  # XML doc comments
         "name_field": "name",
+        "import_types": ["using_directive"],
+        "export_types": [],  # C# uses public keyword
     },
 }
 
@@ -288,6 +321,271 @@ def get_leading_comments(node: Node, source_bytes: bytes, config: dict) -> str:
         comment_parts.append(text)
 
     return "\n".join(comment_parts) + "\n"
+
+
+def extract_imports(node: Node, source_bytes: bytes, config: dict) -> list[str]:
+    """
+    Extract import statements from the AST root node.
+
+    Returns a list of module/file paths being imported.
+    Attempts to resolve relative imports to file paths where possible.
+    """
+    import_types = config.get("import_types", [])
+    if not import_types:
+        return []
+
+    imports: list[str] = []
+
+    def traverse_for_imports(n: Node) -> None:
+        if n.type in import_types:
+            # Extract the import path based on language
+            import_text = source_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+            import_path = _parse_import_path(n, import_text, config)
+            if import_path:
+                imports.extend(import_path if isinstance(import_path, list) else [import_path])
+        else:
+            for child in n.children:
+                traverse_for_imports(child)
+
+    traverse_for_imports(node)
+    return list(set(imports))  # Deduplicate
+
+
+def _parse_import_path(node: Node, import_text: str, config: dict) -> list[str] | str | None:
+    """
+    Parse import path from import statement text.
+
+    Handles language-specific import syntax:
+    - Python: import foo, from foo import bar
+    - JavaScript/TypeScript: import x from 'path'
+    - Go: import "path/to/pkg"
+    - Rust: use crate::module
+    - Java: import com.package.Class
+    - C/C++: #include <header.h> or #include "header.h"
+    """
+    import re
+
+    # Python: import foo or from foo import bar
+    if node.type == "import_statement":
+        # import foo, bar
+        match = re.search(r'import\s+([^\n]+)', import_text)
+        if match:
+            modules = [m.strip().split(' as ')[0].strip() for m in match.group(1).split(',')]
+            return modules
+    elif node.type == "import_from_statement":
+        # from foo import bar
+        match = re.search(r'from\s+([\w.]+)', import_text)
+        if match:
+            return match.group(1)
+
+    # JavaScript/TypeScript: import x from 'path' or import 'path'
+    elif node.type == "import_statement":
+        # Look for the source string
+        source_node = node.child_by_field_name("source")
+        if source_node:
+            path = source_node.text.decode("utf-8", errors="ignore").strip("'\"")
+            return path
+        # Fallback to regex
+        match = re.search(r'from\s+[\'"]([^\'"]+)[\'"]', import_text)
+        if match:
+            return match.group(1)
+        match = re.search(r'import\s+[\'"]([^\'"]+)[\'"]', import_text)
+        if match:
+            return match.group(1)
+
+    # Go: import "path" or import ( "path1" "path2" )
+    elif node.type == "import_declaration":
+        matches = re.findall(r'[\'"]([^\'"]+)[\'"]', import_text)
+        return matches if matches else None
+
+    # Rust: use crate::foo::bar or use std::collections::HashMap
+    elif node.type == "use_declaration":
+        match = re.search(r'use\s+([^;{]+)', import_text)
+        if match:
+            path = match.group(1).strip()
+            # Handle {a, b} syntax
+            if '{' in path:
+                base = path.split('{')[0].rstrip(':')
+                return base
+            return path
+
+    # Java: import com.example.Class
+    elif node.type == "import_declaration":
+        match = re.search(r'import\s+(?:static\s+)?([^;\s]+)', import_text)
+        if match:
+            return match.group(1)
+
+    # C/C++: #include <header.h> or #include "header.h"
+    elif node.type == "preproc_include":
+        match = re.search(r'#include\s*[<"]([^>"]+)[>"]', import_text)
+        if match:
+            return match.group(1)
+
+    # PHP: use Namespace\Class
+    elif node.type == "namespace_use_declaration":
+        match = re.search(r'use\s+([^;,\s]+)', import_text)
+        if match:
+            return match.group(1)
+
+    # C#: using Namespace
+    elif node.type == "using_directive":
+        match = re.search(r'using\s+(?:static\s+)?([^;=\s]+)', import_text)
+        if match:
+            return match.group(1)
+
+    # Ruby: require/require_relative
+    elif node.type == "call":
+        if 'require' in import_text:
+            match = re.search(r'require(?:_relative)?\s*[\(]?\s*[\'"]([^\'"]+)[\'"]', import_text)
+            if match:
+                return match.group(1)
+
+    return None
+
+
+def extract_exports(node: Node, source_bytes: bytes, config: dict, filename: str) -> list[str]:
+    """
+    Extract exported symbol names from the AST root node.
+
+    Returns a list of symbol names that are exported from this file.
+    """
+    export_types = config.get("export_types", [])
+    exports: list[str] = []
+
+    def traverse_for_exports(n: Node) -> None:
+        if n.type in export_types:
+            export_text = source_bytes[n.start_byte:n.end_byte].decode("utf-8", errors="ignore")
+            exported = _parse_export_symbols(n, export_text, config)
+            if exported:
+                exports.extend(exported if isinstance(exported, list) else [exported])
+        else:
+            for child in n.children:
+                traverse_for_exports(child)
+
+    if export_types:
+        traverse_for_exports(node)
+
+    # Handle Python's __all__ for exports
+    ext = Path(filename).suffix.lower()
+    if ext == ".py":
+        py_exports = _extract_python_all(source_bytes)
+        exports.extend(py_exports)
+
+    return list(set(exports))  # Deduplicate
+
+
+def _parse_export_symbols(node: Node, export_text: str, config: dict) -> list[str] | None:
+    """
+    Parse exported symbol names from export statement.
+
+    Handles language-specific export syntax:
+    - JavaScript/TypeScript: export { a, b }, export default X, export function foo()
+    """
+    import re
+
+    # JavaScript/TypeScript exports
+    if node.type == "export_statement":
+        symbols = []
+
+        # export default X
+        if "export default" in export_text:
+            # Try to find the identifier after default
+            match = re.search(r'export\s+default\s+(?:class|function)?\s*(\w+)', export_text)
+            if match:
+                symbols.append(match.group(1))
+            else:
+                symbols.append("default")
+            return symbols
+
+        # export { a, b, c }
+        match = re.search(r'export\s*\{([^}]+)\}', export_text)
+        if match:
+            items = match.group(1).split(',')
+            for item in items:
+                item = item.strip()
+                # Handle "foo as bar" syntax - export the local name
+                if ' as ' in item:
+                    item = item.split(' as ')[0].strip()
+                if item:
+                    symbols.append(item)
+            return symbols
+
+        # export function foo() or export class Bar or export const x
+        match = re.search(r'export\s+(?:async\s+)?(?:function|class|const|let|var|interface|type|enum)\s+(\w+)', export_text)
+        if match:
+            symbols.append(match.group(1))
+            return symbols
+
+        # export * from './module' - re-export (we note it as star export)
+        if 'export *' in export_text:
+            match = re.search(r'from\s+[\'"]([^\'"]+)[\'"]', export_text)
+            if match:
+                return [f"* from {match.group(1)}"]
+
+    return None
+
+
+def _extract_python_all(source_bytes: bytes) -> list[str]:
+    """
+    Extract symbols from Python's __all__ = [...] declaration.
+    """
+    import re
+
+    content = source_bytes.decode("utf-8", errors="ignore")
+    # Match __all__ = ['a', 'b', 'c'] or __all__ = ["a", "b", "c"]
+    match = re.search(r'__all__\s*=\s*\[([^\]]+)\]', content)
+    if match:
+        items = match.group(1)
+        # Extract quoted strings
+        symbols = re.findall(r'[\'"]([^\'"]+)[\'"]', items)
+        return symbols
+    return []
+
+
+def extract_all_symbols_from_chunk(
+    node: Node,
+    source_bytes: bytes,
+    config: dict,
+    start_line: int,
+    end_line: int
+) -> list[str]:
+    """
+    Extract all symbol names (functions, classes, methods) defined within a line range.
+
+    This traverses the AST and collects names of all definitions within the chunk boundaries.
+    """
+    function_types = config.get("function_types", [])
+    class_types = config.get("class_types", [])
+    method_types = config.get("method_types", [])
+    interface_types = config.get("interface_types", [])
+
+    symbols: list[str] = []
+
+    def traverse(n: Node) -> None:
+        node_start = n.start_point[0] + 1  # Convert to 1-indexed
+        node_end = n.end_point[0] + 1
+
+        # Skip nodes completely outside our range
+        if node_end < start_line or node_start > end_line:
+            return
+
+        # Check if this is a symbol-defining node
+        if n.type in function_types or n.type in class_types or n.type in method_types:
+            name = get_node_name(n, config)
+            if name:
+                symbols.append(name)
+
+        if interface_types and n.type in interface_types:
+            name = get_node_name(n, config)
+            if name:
+                symbols.append(name)
+
+        # Recurse into children
+        for child in n.children:
+            traverse(child)
+
+    traverse(node)
+    return list(dict.fromkeys(symbols))  # Deduplicate while preserving order
 
 
 def is_nested_function(node: Node, config: dict) -> bool:
@@ -397,6 +695,7 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
     Chunk code using AST-based function/class boundary detection.
 
     Returns a list of CodeChunk objects, each representing a semantic unit.
+    Now includes symbol_names, imports, and exports for each chunk.
     """
     source_bytes = content.encode("utf-8")
     language = config["language"]
@@ -412,11 +711,19 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
     lines = content.split("\n")
     total_lines = len(lines)
 
+    # Extract file-level imports and exports once
+    file_imports = extract_imports(tree.root_node, source_bytes, config)
+    file_exports = extract_exports(tree.root_node, source_bytes, config, filename)
+
     # Extract all top-level semantic units
     semantic_units = list(extract_semantic_units(tree.root_node, source_bytes, config))
 
     if not semantic_units:
         # No semantic units found, return the whole file as a single chunk
+        # Extract any symbols defined at module level
+        all_symbols = extract_all_symbols_from_chunk(
+            tree.root_node, source_bytes, config, 1, total_lines
+        )
         return [CodeChunk(
             filename=filename,
             location=f"1-{total_lines}",
@@ -425,6 +732,9 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
             end_line=total_lines,
             chunk_type="module",
             symbol_name=None,
+            symbol_names=all_symbols,
+            imports=file_imports,
+            exports=file_exports,
         )]
 
     # Sort units by start line
@@ -441,6 +751,13 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
             if large_nested:
                 # Extract large nested functions separately
                 for nested in large_nested:
+                    # Get all symbols in this nested chunk
+                    nested_symbols = [nested.name] if nested.name else []
+                    # For classes, include child method names too
+                    for child in nested.children:
+                        if child.name:
+                            nested_symbols.append(child.name)
+
                     chunks.append(CodeChunk(
                         filename=filename,
                         location=f"{nested.start_line}-{nested.end_line}",
@@ -449,7 +766,19 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
                         end_line=nested.end_line,
                         chunk_type=nested.node_type,
                         symbol_name=nested.name,
+                        symbol_names=nested_symbols,
+                        imports=[],  # Nested functions don't have imports
+                        exports=[],  # Nested functions don't have exports
                     ))
+
+        # Collect symbols for this unit
+        unit_symbols = [unit.name] if unit.name else []
+
+        # For classes, include method names
+        if unit.node_type == "class" and unit.children:
+            for child in unit.children:
+                if child.name:
+                    unit_symbols.append(child.name)
 
         # Add the main unit
         chunks.append(CodeChunk(
@@ -460,6 +789,9 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
             end_line=unit.end_line,
             chunk_type=unit.node_type,
             symbol_name=unit.name,
+            symbol_names=unit_symbols,
+            imports=[],  # Individual semantic units don't carry imports
+            exports=[unit.name] if unit.name and unit.name in file_exports else [],
         ))
 
         covered_ranges.append((unit.start_line, unit.end_line))
@@ -474,6 +806,11 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
 
         # Only include non-empty gaps
         if gap_content.strip():
+            # Extract symbols defined in this gap (e.g., module-level constants)
+            gap_symbols = extract_all_symbols_from_chunk(
+                tree.root_node, source_bytes, config, gap_start, gap_end
+            )
+
             chunks.append(CodeChunk(
                 filename=filename,
                 location=f"{gap_start}-{gap_end}",
@@ -482,6 +819,9 @@ def chunk_with_ast(content: str, filename: str, config: dict) -> list[CodeChunk]
                 end_line=gap_end,
                 chunk_type="other",
                 symbol_name=None,
+                symbol_names=gap_symbols,
+                imports=file_imports,  # Module-level code often contains imports
+                exports=[],  # Gap code doesn't typically have explicit exports
             ))
 
     # Sort chunks by start line for consistent output

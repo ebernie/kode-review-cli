@@ -64,6 +64,32 @@ def generate_repo_id(repo_url: str) -> str:
     return hashlib.sha256(repo_url.encode()).hexdigest()[:16]
 
 
+# Mapping of file extensions to language names
+EXTENSION_TO_LANGUAGE = {
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".py": "python",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java",
+    ".c": "c",
+    ".cpp": "cpp",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "csharp",
+    ".md": "markdown",
+}
+
+
+def _get_language_from_extension(ext: str) -> str | None:
+    """Get the programming language from a file extension."""
+    return EXTENSION_TO_LANGUAGE.get(ext.lower())
+
+
 def should_include_file(path: Path) -> bool:
     """Check if a file should be included in indexing."""
     # Check extension
@@ -209,6 +235,7 @@ def index_repository() -> dict:
     print("Writing to database...")
     with conn.cursor() as cur:
         for chunk, embedding in zip(all_chunks, all_embeddings):
+            # Insert into legacy code_embeddings table for backward compatibility
             cur.execute(
                 """
                 INSERT INTO code_embeddings
@@ -231,6 +258,60 @@ def index_repository() -> dict:
                     chunk.start_line,
                     chunk.end_line,
                     embedding.tolist()
+                )
+            )
+
+            # Also insert into the new chunks table with full metadata
+            # First, ensure the file exists in the files table
+            ext = Path(chunk.filename).suffix.lower()
+            language = _get_language_from_extension(ext)
+
+            cur.execute(
+                """
+                INSERT INTO files (file_path, repo_id, repo_url, branch, language)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (file_path) DO UPDATE SET
+                    repo_id = EXCLUDED.repo_id,
+                    repo_url = EXCLUDED.repo_url,
+                    branch = EXCLUDED.branch,
+                    language = EXCLUDED.language,
+                    updated_at = NOW()
+                """,
+                (chunk.filename, repo_id, REPO_URL, REPO_BRANCH, language)
+            )
+
+            # Now insert the chunk with all metadata
+            # Get symbol_names, imports, exports from the chunk (with defaults for backward compat)
+            symbol_names = getattr(chunk, 'symbol_names', [])
+            imports = getattr(chunk, 'imports', [])
+            exports = getattr(chunk, 'exports', [])
+
+            # Pad embedding to 1536 dimensions if needed (legacy model uses 384)
+            embedding_list = embedding.tolist()
+            if len(embedding_list) < 1536:
+                embedding_list = embedding_list + [0.0] * (1536 - len(embedding_list))
+
+            cur.execute(
+                """
+                INSERT INTO chunks
+                (file_path, content, embedding, language, chunk_type, symbol_names,
+                 line_start, line_end, imports, exports, repo_id, repo_url, branch)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    chunk.filename,
+                    chunk.code,
+                    embedding_list,
+                    language,
+                    chunk.chunk_type,
+                    symbol_names,
+                    chunk.start_line,
+                    chunk.end_line,
+                    imports,
+                    exports,
+                    repo_id,
+                    REPO_URL,
+                    REPO_BRANCH,
                 )
             )
             chunks_indexed += 1
