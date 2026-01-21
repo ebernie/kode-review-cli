@@ -114,7 +114,53 @@ export type ChunkType =
   | 'import'
   | 'export'
   | 'comment'
+  | 'config'
   | 'other'
+
+/**
+ * Configuration file type
+ */
+export type ConfigFileType =
+  | 'typescript'   // tsconfig.json
+  | 'eslint'       // eslint.config.*, .eslintrc.*
+  | 'prettier'     // .prettierrc, prettier.config.*
+  | 'package'      // package.json (partial)
+  | 'python'       // pyproject.toml, setup.py, setup.cfg
+  | 'go'           // go.mod, go.sum
+  | 'rust'         // Cargo.toml
+  | 'editor'       // .editorconfig
+  | 'docker'       // Dockerfile, docker-compose.*
+  | 'ci'           // .github/workflows/*, .gitlab-ci.yml
+  | 'generic'      // Other config files
+
+/**
+ * Metadata extracted from configuration files
+ */
+export interface ConfigMetadata {
+  /** Type of configuration file */
+  configType: ConfigFileType
+
+  /** Whether strict mode is enabled (TypeScript, ESLint) */
+  strictMode?: boolean
+
+  /** Key lint rules enabled */
+  lintRules?: string[]
+
+  /** Key dependencies (from package.json) */
+  dependencies?: string[]
+
+  /** Dev dependencies (from package.json) */
+  devDependencies?: string[]
+
+  /** Target version (TypeScript, Go, Python) */
+  targetVersion?: string
+
+  /** Module type (ESM, CommonJS) */
+  moduleType?: string
+
+  /** Compiler/interpreter options */
+  compilerOptions?: Record<string, unknown>
+}
 
 /**
  * Represents a code chunk stored in the database with full metadata

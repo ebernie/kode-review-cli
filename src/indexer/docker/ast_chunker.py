@@ -19,6 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generator
 
+# Config file detection
+from config_parser import is_config_file, chunk_config_file, ConfigChunk
+
 # Tree-sitter imports
 import tree_sitter_python
 import tree_sitter_javascript
@@ -907,6 +910,9 @@ def chunk_code_ast(content: str, filename: str) -> list[CodeChunk]:
     Attempts to use AST-based chunking if the language is supported,
     otherwise falls back to line-based chunking.
 
+    For configuration files (tsconfig.json, eslint.config.*, pyproject.toml, etc.),
+    uses specialized config file handling with chunk_type='config'.
+
     Args:
         content: The source code content
         filename: The filename (used for extension detection)
@@ -916,6 +922,26 @@ def chunk_code_ast(content: str, filename: str) -> list[CodeChunk]:
     """
     if not content.strip():
         return []
+
+    # Check if this is a config file first
+    if is_config_file(filename):
+        config_chunks = chunk_config_file(content, filename)
+        # Convert ConfigChunk to CodeChunk
+        return [
+            CodeChunk(
+                filename=c.filename,
+                location=c.location,
+                code=c.code,
+                start_line=c.start_line,
+                end_line=c.end_line,
+                chunk_type=c.chunk_type,
+                symbol_name=c.symbol_name,
+                symbol_names=c.symbol_names,
+                imports=c.imports,
+                exports=c.exports,
+            )
+            for c in config_chunks
+        ]
 
     config = get_language_config(filename)
 

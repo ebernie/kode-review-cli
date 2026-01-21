@@ -109,6 +109,87 @@ INCLUDED_PATTERNS = [
     "**/*.yaml",
     "**/*.yml",
     "**/*.toml",
+    # ===== Configuration Files =====
+    # TypeScript config
+    "**/tsconfig.json",
+    "**/tsconfig.*.json",
+    "**/jsconfig.json",
+    # ESLint config (various formats)
+    "**/eslint.config.js",
+    "**/eslint.config.mjs",
+    "**/eslint.config.cjs",
+    "**/eslint.config.ts",
+    "**/.eslintrc",
+    "**/.eslintrc.js",
+    "**/.eslintrc.cjs",
+    "**/.eslintrc.json",
+    "**/.eslintrc.yml",
+    "**/.eslintrc.yaml",
+    # Prettier config
+    "**/.prettierrc",
+    "**/.prettierrc.json",
+    "**/.prettierrc.yml",
+    "**/.prettierrc.yaml",
+    "**/.prettierrc.js",
+    "**/.prettierrc.cjs",
+    "**/.prettierrc.mjs",
+    "**/prettier.config.js",
+    "**/prettier.config.cjs",
+    "**/prettier.config.mjs",
+    # Package managers (partial extraction)
+    "**/package.json",
+    "**/composer.json",
+    # Python project config
+    "**/pyproject.toml",
+    "**/setup.py",
+    "**/setup.cfg",
+    "**/requirements.txt",
+    "**/Pipfile",
+    "**/tox.ini",
+    "**/.python-version",
+    # Go config
+    "**/go.mod",
+    # Rust config
+    "**/Cargo.toml",
+    # Editor config
+    "**/.editorconfig",
+    # Docker config
+    "**/Dockerfile",
+    "**/dockerfile",
+    "**/docker-compose.yml",
+    "**/docker-compose.yaml",
+    "**/compose.yml",
+    "**/compose.yaml",
+    # CI/CD config
+    "**/.gitlab-ci.yml",
+    "**/.travis.yml",
+    "**/azure-pipelines.yml",
+    "**/.github/workflows/*.yml",
+    "**/.github/workflows/*.yaml",
+    "**/.circleci/config.yml",
+    "**/Jenkinsfile",
+    # Build tool configs
+    "**/babel.config.js",
+    "**/babel.config.json",
+    "**/.babelrc",
+    "**/webpack.config.js",
+    "**/webpack.config.ts",
+    "**/vite.config.js",
+    "**/vite.config.ts",
+    "**/rollup.config.js",
+    "**/rollup.config.ts",
+    # Test configs
+    "**/jest.config.js",
+    "**/jest.config.ts",
+    "**/vitest.config.ts",
+    "**/vitest.config.js",
+    "**/pytest.ini",
+    # Other common configs
+    "**/.npmrc",
+    "**/.yarnrc",
+    "**/.nvmrc",
+    "**/.env.example",
+    "**/.env.template",
 ]
 
 # Directories and patterns to exclude from indexing
