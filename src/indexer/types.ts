@@ -63,6 +63,183 @@ export interface CodeChunk {
 }
 
 /**
+ * Database schema types for the enhanced indexer
+ */
+
+/**
+ * Represents a file tracked in the index
+ */
+export interface IndexedFile {
+  /** File path relative to repo root (primary key) */
+  filePath: string
+
+  /** Last modification timestamp */
+  lastModified: Date
+
+  /** File size in bytes */
+  size: number
+
+  /** Programming language (e.g., 'typescript', 'python') */
+  language: string | null
+
+  /** Complexity score (optional metric) */
+  complexityScore: number | null
+
+  /** Repository identifier */
+  repoId: string
+
+  /** Repository URL */
+  repoUrl: string
+
+  /** Branch name */
+  branch: string
+
+  /** When the file was first indexed */
+  createdAt: Date
+
+  /** When the file was last updated in the index */
+  updatedAt: Date
+}
+
+/**
+ * Chunk type classification
+ */
+export type ChunkType =
+  | 'function'
+  | 'class'
+  | 'method'
+  | 'interface'
+  | 'type'
+  | 'constant'
+  | 'import'
+  | 'export'
+  | 'comment'
+  | 'other'
+
+/**
+ * Represents a code chunk stored in the database with full metadata
+ */
+export interface IndexedChunk {
+  /** UUID primary key */
+  id: string
+
+  /** File path this chunk belongs to */
+  filePath: string
+
+  /** The actual code content */
+  content: string
+
+  /** Vector embedding (1536 dimensions) - null if not yet computed */
+  embedding: number[] | null
+
+  /** Programming language */
+  language: string | null
+
+  /** Type of code construct */
+  chunkType: ChunkType | null
+
+  /** Symbol names defined in this chunk (functions, classes, variables) */
+  symbolNames: string[]
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** Modules/packages imported by this chunk */
+  imports: string[]
+
+  /** Symbols exported by this chunk */
+  exports: string[]
+
+  /** Repository identifier */
+  repoId: string
+
+  /** Repository URL */
+  repoUrl: string
+
+  /** Branch name */
+  branch: string
+
+  /** When this chunk was indexed */
+  createdAt: Date
+}
+
+/**
+ * Relationship types between code chunks
+ */
+export type RelationshipType =
+  | 'imports'      // Source imports from target
+  | 'calls'        // Source calls function in target
+  | 'extends'      // Source extends/inherits target
+  | 'implements'   // Source implements interface from target
+  | 'references'   // Source references symbol from target
+  | 'contains'     // Source contains target (e.g., class contains method)
+
+/**
+ * Represents a relationship between two code chunks
+ */
+export interface ChunkRelationship {
+  /** UUID of the source chunk */
+  sourceChunkId: string
+
+  /** UUID of the target chunk */
+  targetChunkId: string
+
+  /** Type of relationship */
+  relationshipType: RelationshipType
+
+  /** Additional metadata about the relationship */
+  metadata?: Record<string, unknown>
+
+  /** When this relationship was created */
+  createdAt: Date
+}
+
+/**
+ * Input for creating a new file record
+ */
+export interface CreateFileInput {
+  filePath: string
+  size: number
+  language?: string
+  complexityScore?: number
+  repoId: string
+  repoUrl: string
+  branch: string
+}
+
+/**
+ * Input for creating a new chunk record
+ */
+export interface CreateChunkInput {
+  filePath: string
+  content: string
+  embedding?: number[]
+  language?: string
+  chunkType?: ChunkType
+  symbolNames?: string[]
+  lineStart: number
+  lineEnd: number
+  imports?: string[]
+  exports?: string[]
+  repoId: string
+  repoUrl: string
+  branch: string
+}
+
+/**
+ * Input for creating a relationship between chunks
+ */
+export interface CreateRelationshipInput {
+  sourceChunkId: string
+  targetChunkId: string
+  relationshipType: RelationshipType
+  metadata?: Record<string, unknown>
+}
+
+/**
  * Search result from the indexer
  */
 export interface SearchResult {

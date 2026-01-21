@@ -150,36 +150,16 @@ def chunk_code(content: str, filename: str, chunk_size: int = CHUNK_SIZE, overla
 
 
 def ensure_table_exists(conn: psycopg.Connection) -> None:
-    """Create the embeddings table if it doesn't exist."""
-    with conn.cursor() as cur:
-        # Enable pgvector extension
-        cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    """Create the embeddings table if it doesn't exist.
 
-        # Create table with all required columns
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS code_embeddings (
-                repo_id TEXT NOT NULL,
-                repo_url TEXT NOT NULL,
-                branch TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                location TEXT NOT NULL,
-                code TEXT NOT NULL,
-                start_line INTEGER NOT NULL,
-                end_line INTEGER NOT NULL,
-                embedding vector(384),
-                PRIMARY KEY (repo_id, branch, filename, location)
-            )
-        """)
-
-        # Create vector index if not exists
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS code_embeddings_embedding_idx
-            ON code_embeddings
-            USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
-        """)
-
-        conn.commit()
+    This runs the full schema migration which creates:
+    - files table: file metadata and tracking
+    - chunks table: code chunks with embeddings and rich metadata
+    - relationships table: links between chunks (imports, calls, etc.)
+    - code_embeddings table: legacy table for backward compatibility
+    """
+    from migrate import run_migration
+    run_migration(conn)
 
 
 def delete_existing_index(conn: psycopg.Connection, repo_id: str, branch: str) -> int:

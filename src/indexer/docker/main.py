@@ -138,6 +138,16 @@ class HealthResponse(BaseModel):
 async def startup_event():
     """Initialize on application startup."""
     load_dotenv()
+
+    # Run schema migration to ensure tables exist
+    print("Running schema migration...")
+    try:
+        from migrate import ensure_schema
+        ensure_schema()
+    except Exception as e:
+        print(f"Warning: Could not run migration: {e}")
+        print("Tables may need to be created manually or by the indexer")
+
     # Pre-load the embedding model
     print("Pre-loading embedding model...")
     get_embedding_model()
