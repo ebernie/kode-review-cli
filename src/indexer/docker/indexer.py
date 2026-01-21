@@ -4,7 +4,7 @@ Standalone indexer for ephemeral container execution.
 
 This script:
 1. Reads source files from /repo (mounted volume)
-2. Chunks the code using language-aware splitting
+2. Chunks the code using AST-based function/class boundary detection
 3. Generates embeddings using sentence-transformers
 4. Writes directly to PostgreSQL
 
@@ -13,8 +13,10 @@ Environment variables:
 - REPO_URL: Repository URL for identification
 - REPO_BRANCH: Branch being indexed
 - EMBEDDING_MODEL: Model to use (default: sentence-transformers/all-MiniLM-L6-v2)
-- CHUNK_SIZE: Maximum chunk size (default: 1000)
-- CHUNK_OVERLAP: Overlap between chunks (default: 300)
+- CHUNK_SIZE: Maximum chunk size (default: 1000) - used for fallback
+- CHUNK_OVERLAP: Overlap between chunks (default: 300) - used for fallback
+- NESTED_FUNCTION_THRESHOLD: Size threshold for separating nested functions (default: 50)
+- FALLBACK_MAX_LINES: Max lines per chunk in fallback mode (default: 500)
 """
 
 import os
@@ -23,11 +25,13 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Generator
-from dataclasses import dataclass
 
 import psycopg
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
+
+# Import AST-based chunking
+from ast_chunker import chunk_code_ast, CodeChunk
 
 
 # Configuration from environment
@@ -60,16 +64,6 @@ def generate_repo_id(repo_url: str) -> str:
     return hashlib.sha256(repo_url.encode()).hexdigest()[:16]
 
 
-@dataclass
-class CodeChunk:
-    """A chunk of code with metadata."""
-    filename: str
-    location: str
-    code: str
-    start_line: int
-    end_line: int
-
-
 def should_include_file(path: Path) -> bool:
     """Check if a file should be included in indexing."""
     # Check extension
@@ -94,59 +88,17 @@ def find_files(repo_path: str) -> Generator[Path, None, None]:
 
 
 def chunk_code(content: str, filename: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[CodeChunk]:
-    """Split code into overlapping chunks."""
-    lines = content.split("\n")
-    chunks = []
+    """
+    Split code into semantically coherent chunks using AST-based boundary detection.
 
-    if not lines:
-        return chunks
+    Uses tree-sitter to identify function/class boundaries and never splits
+    a function across chunks. Falls back to line-based chunking for
+    non-parseable files.
 
-    current_chunk_lines = []
-    current_start = 1
-    current_size = 0
-
-    for i, line in enumerate(lines, 1):
-        line_size = len(line) + 1  # +1 for newline
-
-        if current_size + line_size > chunk_size and current_chunk_lines:
-            # Save current chunk
-            chunk_text = "\n".join(current_chunk_lines)
-            chunks.append(CodeChunk(
-                filename=filename,
-                location=f"{current_start}-{i-1}",
-                code=chunk_text,
-                start_line=current_start,
-                end_line=i - 1
-            ))
-
-            # Calculate overlap - keep last N characters worth of lines
-            overlap_lines = []
-            overlap_size = 0
-            for prev_line in reversed(current_chunk_lines):
-                if overlap_size + len(prev_line) + 1 > overlap:
-                    break
-                overlap_lines.insert(0, prev_line)
-                overlap_size += len(prev_line) + 1
-
-            current_chunk_lines = overlap_lines
-            current_start = i - len(overlap_lines)
-            current_size = overlap_size
-
-        current_chunk_lines.append(line)
-        current_size += line_size
-
-    # Don't forget the last chunk
-    if current_chunk_lines:
-        chunk_text = "\n".join(current_chunk_lines)
-        chunks.append(CodeChunk(
-            filename=filename,
-            location=f"{current_start}-{len(lines)}",
-            code=chunk_text,
-            start_line=current_start,
-            end_line=len(lines)
-        ))
-
-    return chunks
+    The chunk_size and overlap parameters are kept for backward compatibility
+    but are primarily used in the fallback line-based chunking.
+    """
+    return chunk_code_ast(content, filename)
 
 
 def ensure_table_exists(conn: psycopg.Connection) -> None:
