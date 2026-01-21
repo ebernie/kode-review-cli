@@ -118,7 +118,7 @@ diff --git a/main.go b/main.go
     expect(queries).toContain('Server')
   })
 
-  it('ignores lines that are not additions', () => {
+  it('extracts from both additions and deletions for better context', () => {
     const diff = `
 diff --git a/src/app.ts b/src/app.ts
 --- a/src/app.ts
@@ -132,9 +132,9 @@ diff --git a/src/app.ts b/src/app.ts
 +}
 `
     const queries = extractQueriesFromDiff(diff)
-    // Should only extract the added function
+    // Should extract both - deletions provide context for renamed/refactored code
     expect(queries).toContain('newFunction')
-    expect(queries).not.toContain('oldFunction')
+    expect(queries).toContain('oldFunction')
   })
 
   it('filters out common noise keywords', () => {
@@ -193,15 +193,15 @@ diff --git a/src/app.ts b/src/app.ts
 
   it('limits the number of queries returned', () => {
     // Create a diff with many additions
-    const manyFunctions = Array.from({ length: 20 }, (_, i) => `+function func${i}() {}`).join('\n')
+    const manyFunctions = Array.from({ length: 30 }, (_, i) => `+function func${i}() {}`).join('\n')
     const diff = `
 diff --git a/src/many.ts b/src/many.ts
 +++ b/src/many.ts
 ${manyFunctions}
 `
     const queries = extractQueriesFromDiff(diff)
-    // Should be limited to 10 queries max
-    expect(queries.length).toBeLessThanOrEqual(10)
+    // Should be limited to 15 queries max (increased for richer context)
+    expect(queries.length).toBeLessThanOrEqual(15)
   })
 
   it('deduplicates identical queries', () => {
@@ -233,6 +233,224 @@ diff --git a/src/UserService.java b/src/UserService.java
     const queries = extractQueriesFromDiff(diff)
     expect(queries).toContain('handleRequest')
     expect(queries).toContain('formatUser')
+  })
+
+  // New tests for expanded query extraction (US-009)
+
+  describe('type annotation extraction', () => {
+    it('extracts type annotations from variable declarations', () => {
+      const diff = `
+diff --git a/src/service.ts b/src/service.ts
++++ b/src/service.ts
++const user: UserProfile = await getUser()
++let config: ApplicationConfig = loadConfig()
++const items: Array<ProductItem> = []
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('UserProfile')
+      expect(queries).toContain('ApplicationConfig')
+      expect(queries).toContain('ProductItem')
+    })
+
+    it('extracts generic type parameters', () => {
+      const diff = `
+diff --git a/src/service.ts b/src/service.ts
++++ b/src/service.ts
++function process<TInput, TOutput>(input: TInput): Promise<TOutput> {
++  const result: Map<string, TOutput> = new Map()
++  return result as TOutput
++}
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('TInput')
+      expect(queries).toContain('TOutput')
+    })
+
+    it('extracts implements and extends types', () => {
+      const diff = `
+diff --git a/src/models.ts b/src/models.ts
++++ b/src/models.ts
++class UserService extends BaseService implements Serializable, Disposable {
++  async process(): Promise<void> {}
++}
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('UserService')
+      expect(queries).toContain('BaseService')
+      expect(queries).toContain('Serializable')
+      expect(queries).toContain('Disposable')
+    })
+
+    it('extracts Python type hints', () => {
+      const diff = `
+diff --git a/main.py b/main.py
++++ b/main.py
++def process_user(user: UserModel) -> ResponseData:
++    config: ConfigSettings = load_config()
++    return ResponseData(user)
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('UserModel')
+      expect(queries).toContain('ResponseData')
+      expect(queries).toContain('ConfigSettings')
+    })
+  })
+
+  describe('string literal identifier extraction', () => {
+    it('extracts namespaced event names', () => {
+      const diff = `
+diff --git a/src/events.ts b/src/events.ts
++++ b/src/events.ts
++emitter.emit('user:created', data)
++emitter.on('order:completed', handler)
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries.some(q => q.includes('user:created') || q === 'created')).toBe(true)
+    })
+
+    it('extracts CONSTANT_CASE action types', () => {
+      const diff = `
+diff --git a/src/actions.ts b/src/actions.ts
++++ b/src/actions.ts
++const action = { type: 'USER_LOGGED_IN' }
++dispatch({ type: 'FETCH_DATA_SUCCESS' })
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('USER_LOGGED_IN')
+      expect(queries).toContain('FETCH_DATA_SUCCESS')
+    })
+
+    it('extracts event listener event names', () => {
+      const diff = `
+diff --git a/src/component.ts b/src/component.ts
++++ b/src/component.ts
++element.addEventListener('click', handler)
++socket.on('message', onMessage)
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('click')
+      expect(queries).toContain('message')
+    })
+  })
+
+  describe('import extraction', () => {
+    it('extracts named imports as separate queries', () => {
+      const diff = `
+diff --git a/src/app.ts b/src/app.ts
++++ b/src/app.ts
++import { useState, useEffect, useCallback } from 'react'
++import { UserService, ConfigLoader } from './services'
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('useState')
+      expect(queries).toContain('useEffect')
+      expect(queries).toContain('useCallback')
+      expect(queries).toContain('UserService')
+      expect(queries).toContain('ConfigLoader')
+    })
+
+    it('extracts Python imports', () => {
+      const diff = `
+diff --git a/main.py b/main.py
++++ b/main.py
++from django.db import models, transaction
++import numpy as np
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries.some(q => q.includes('django') || q === 'models')).toBe(true)
+    })
+
+    it('extracts Rust use statements', () => {
+      const diff = `
+diff --git a/src/lib.rs b/src/lib.rs
++++ b/src/lib.rs
++use std::collections::{HashMap, HashSet}
++use tokio::sync::Mutex
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries.some(q => q.includes('collections') || q === 'HashMap')).toBe(true)
+    })
+  })
+
+  describe('semantic query generation per hunk', () => {
+    it('generates context-aware queries from hunks', () => {
+      const diff = `
+diff --git a/src/utils/validation.ts b/src/utils/validation.ts
+--- a/src/utils/validation.ts
++++ b/src/utils/validation.ts
+@@ -10,6 +10,10 @@ export function validateEmail(email: string) {
+ }
+
++export function validatePassword(password: string): ValidationResult {
++  const result = checkStrength(password)
++  return result
++}
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('validatePassword')
+      expect(queries).toContain('ValidationResult')
+      // Should have a semantic query combining file context with identifiers
+      expect(queries.some(q => q.includes('validation'))).toBe(true)
+    })
+
+    it('handles multiple hunks in a single file', () => {
+      const diff = `
+diff --git a/src/api/handlers.ts b/src/api/handlers.ts
+--- a/src/api/handlers.ts
++++ b/src/api/handlers.ts
+@@ -5,6 +5,9 @@ import { db } from './db'
++export async function createUser(data: CreateUserRequest): Promise<User> {
++  return db.users.create(data)
++}
+@@ -20,6 +23,9 @@ export function getUser() {}
++export async function deleteUser(userId: string): Promise<void> {
++  await db.users.delete(userId)
++}
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('createUser')
+      expect(queries).toContain('deleteUser')
+      expect(queries).toContain('CreateUserRequest')
+    })
+  })
+
+  describe('deletion context extraction', () => {
+    it('extracts identifiers from deleted code for rename detection', () => {
+      const diff = `
+diff --git a/src/service.ts b/src/service.ts
+--- a/src/service.ts
++++ b/src/service.ts
+@@ -10,7 +10,7 @@ import { config } from './config'
+-export class OldServiceName {
+-  private readonly client: OldClientType
++export class NewServiceName {
++  private readonly client: NewClientType
+`
+      const queries = extractQueriesFromDiff(diff)
+      // Both old and new names should be extracted for context
+      expect(queries).toContain('OldServiceName')
+      expect(queries).toContain('NewServiceName')
+      expect(queries).toContain('OldClientType')
+      expect(queries).toContain('NewClientType')
+    })
+
+    it('extracts function signatures from refactored code', () => {
+      const diff = `
+diff --git a/src/utils.ts b/src/utils.ts
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -1,5 +1,5 @@
+-function processDataSync(data: RawData): ProcessedData {
+-  return transform(data)
++async function processDataAsync(data: RawData): Promise<ProcessedData> {
++  return await transform(data)
+`
+      const queries = extractQueriesFromDiff(diff)
+      expect(queries).toContain('processDataSync')
+      expect(queries).toContain('processDataAsync')
+      expect(queries).toContain('RawData')
+      expect(queries).toContain('ProcessedData')
+    })
   })
 })
 

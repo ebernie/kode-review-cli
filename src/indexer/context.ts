@@ -391,92 +391,413 @@ export function applyModifiedLineWeighting(
 }
 
 /**
- * Extract meaningful queries from a diff for semantic search.
- *
- * Strategy:
- * 1. Extract function/class/method names being modified
- * 2. Extract import statements to find related modules
- * 3. Take key changed code snippets (additions)
+ * Common noise keywords that shouldn't be extracted as meaningful identifiers.
  */
-export function extractQueriesFromDiff(diffContent: string): string[] {
-  const queries: string[] = []
-  const lines = diffContent.split('\n')
+const NOISE_KEYWORDS = new Set([
+  'if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'throw', 'try',
+  'else', 'break', 'continue', 'case', 'default', 'do', 'finally', 'with',
+  'this', 'super', 'null', 'undefined', 'true', 'false', 'void', 'typeof',
+  'instanceof', 'delete', 'in', 'of', 'async', 'await', 'yield', 'get', 'set',
+  'static', 'public', 'private', 'protected', 'readonly', 'abstract', 'final',
+  'extends', 'implements', 'import', 'export', 'from', 'as', 'default', 'const',
+  'let', 'var', 'function', 'class', 'interface', 'type', 'enum', 'namespace',
+  'module', 'declare', 'require', 'package', 'struct', 'impl', 'trait', 'fn',
+  'def', 'lambda', 'self', 'cls', 'pass', 'raise', 'except', 'assert', 'print',
+  'main', 'init', 'test', 'setup', 'teardown', 'describe', 'it', 'expect', 'mock',
+])
 
-  // Patterns for extracting meaningful identifiers
-  const functionPatterns = [
-    // JavaScript/TypeScript
-    /function\s+(\w+)\s*[<(]/, // function declarations: function foo( or function foo<
-    /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(/, // arrow function assignments
-    /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function/, // function expression assignments
-    /class\s+(\w+)/, // class declarations
-    /interface\s+(\w+)/, // interface declarations
-    /type\s+(\w+)\s*=/, // type declarations
-    // Python
-    /def\s+(\w+)\s*\(/, // function definitions
-    /class\s+(\w+)\s*[:(]/, // class definitions
-    // Go
-    /func\s+(?:\([^)]*\)\s*)?(\w+)\s*\(/, // function declarations
-    /type\s+(\w+)\s+struct/, // struct declarations
-    // Rust
-    /fn\s+(\w+)\s*[<(]/, // function declarations
-    /struct\s+(\w+)/, // struct declarations
-    /impl\s+(?:<[^>]+>\s*)?(\w+)/, // impl blocks
-    // Java/C#
-    /(?:public|private|protected)\s+(?:static\s+)?(?:\w+\s+)?(\w+)\s*\([^)]*\)/, // methods with access modifier
-  ]
+/**
+ * Patterns for extracting function, class, and method names from various languages.
+ */
+const FUNCTION_PATTERNS = [
+  // JavaScript/TypeScript
+  /function\s+(\w+)\s*[<(]/, // function declarations: function foo( or function foo<
+  /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\(/, // arrow function assignments
+  /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?function/, // function expression assignments
+  /class\s+(\w+)/, // class declarations
+  /interface\s+(\w+)/, // interface declarations
+  /type\s+(\w+)\s*[=<]/, // type declarations with = or <
+  /(\w+)\s*:\s*(?:async\s+)?function/, // object method shorthand
+  /(\w+)\s*\([^)]*\)\s*\{/, // method definitions in classes
+  // Python
+  /def\s+(\w+)\s*\(/, // function definitions
+  /class\s+(\w+)\s*[:(]/, // class definitions
+  /async\s+def\s+(\w+)\s*\(/, // async function definitions
+  // Go
+  /func\s+(?:\([^)]*\)\s*)?(\w+)\s*\(/, // function declarations
+  /func\s+\([^)]+\)\s*(\w+)\s*\(/, // method declarations
+  /type\s+(\w+)\s+(?:struct|interface)/, // struct/interface declarations
+  // Rust
+  /fn\s+(\w+)\s*[<(]/, // function declarations
+  /struct\s+(\w+)/, // struct declarations
+  /enum\s+(\w+)/, // enum declarations
+  /trait\s+(\w+)/, // trait declarations
+  /impl\s+(?:<[^>]+>\s*)?(\w+)/, // impl blocks
+  // Java/C#/Kotlin
+  /(?:public|private|protected)\s+(?:static\s+)?(?:final\s+)?(?:suspend\s+)?(?:\w+\s+)?(\w+)\s*\([^)]*\)/, // methods with access modifier
+  /(?:data\s+)?class\s+(\w+)/, // class declarations with optional data modifier
+  /object\s+(\w+)/, // Kotlin object declarations
+]
 
-  // Import patterns
-  const importPatterns = [
-    /import\s+.*from\s+['"]([^'"]+)['"]/, // ES6 imports
-    /require\s*\(\s*['"]([^'"]+)['"]\s*\)/, // CommonJS
-    /from\s+(\w+)\s+import/, // Python
-    /import\s+"([^"]+)"/, // Go
-    /use\s+([\w:]+)/, // Rust
-  ]
+/**
+ * Patterns for extracting import statements and finding related modules.
+ */
+const IMPORT_PATTERNS = [
+  // JavaScript/TypeScript - named imports
+  /import\s+\{([^}]+)\}\s+from\s+['"]([^'"]+)['"]/, // import { foo, bar } from 'module'
+  // JavaScript/TypeScript - default and namespace imports
+  /import\s+(?:(\w+)|(\*\s+as\s+\w+))\s+from\s+['"]([^'"]+)['"]/, // import foo from 'module' or import * as foo from 'module'
+  // JavaScript/TypeScript - simple path imports
+  /import\s+['"]([^'"]+)['"]/, // import 'module' (side effect only)
+  // CommonJS
+  /require\s*\(\s*['"]([^'"]+)['"]\s*\)/, // require('module')
+  // Python
+  /from\s+([\w.]+)\s+import\s+(.+)/, // from module import foo, bar
+  /import\s+([\w.]+)(?:\s+as\s+\w+)?/, // import module or import module as alias
+  // Go
+  /import\s+"([^"]+)"/, // import "module"
+  /import\s+\w+\s+"([^"]+)"/, // import alias "module"
+  // Rust
+  /use\s+([\w:]+)(?:::\{([^}]+)\})?/, // use crate::module or use crate::module::{foo, bar}
+  // Java
+  /import\s+(?:static\s+)?([\w.]+)(?:\.\*)?;/, // import com.example.Class;
+]
 
-  for (const line of lines) {
-    // Skip file headers
-    if (line.startsWith('diff --git') || line.startsWith('+++') || line.startsWith('---')) {
-      continue
-    }
+/**
+ * Patterns for extracting type annotations and generic type parameters.
+ */
+const TYPE_ANNOTATION_PATTERNS = [
+  // TypeScript type annotations - various endings
+  /:\s*(\w+)(?:<[^>]+>)?(?:\s*[=;,)\]}|&])/, // : TypeName followed by =;,)]}|&
+  /:\s*(\w+)(?:<[^>]+>)?\s*\{/, // : TypeName { (function return type before body)
+  /:\s*(\w+)\s*$/, // : TypeName at end of line
+  // Promise, Array, and other generic wrappers
+  /:\s*Promise<(\w+)>/, // : Promise<Type>
+  /:\s*Array<(\w+)>/, // : Array<Type>
+  /:\s*Map<\w+,\s*(\w+)>/, // : Map<K, V> - extract V
+  /:\s*Set<(\w+)>/, // : Set<Type>
+  // Field type annotations (private/readonly etc)
+  /(?:private|public|protected|readonly)\s+(?:readonly\s+)?(?:\w+\s+)?(\w+):\s*(\w+)/, // private client: Type
+  /(?:private|public|protected|readonly)\s+(?:readonly\s+)?(\w+):\s*(\w+)/, // private readonly field: Type
+  // Type casting/assertions
+  /as\s+(\w+)(?:<[^>]+>)?/, // as Type or as Type<T>
+  /<(\w+)(?:,\s*\w+)*>/, // Generic type parameters <T> or <T, U>
+  // Type assertions and casts
+  /\((\w+)\)\s*\w+/, // (Type)variable - Java/C# style cast
+  // Implements/extends
+  /implements\s+([\w,\s]+)/, // implements Interface1, Interface2
+  /extends\s+(\w+)/, // extends BaseClass
+  // Python type hints
+  /->\s*(\w+)(?:[:\s[]|$)/, // -> ReturnType: or -> ReturnType[ or end of line
+  /:\s*(\w+)(?:\[[\w,\s]+\])?\s*=/, // variable: Type = value (with optional generic)
+  // Go interface implementation
+  /\.\((\w+)\)/, // type assertion .(Type)
+]
 
-    // Only look at added lines (+ prefix, but not +++ which is file header)
-    if (!line.startsWith('+') || line.startsWith('+++')) {
-      continue
-    }
+/**
+ * Patterns for extracting string literals that look like identifiers.
+ * These capture event names, config keys, route paths, etc.
+ */
+const STRING_IDENTIFIER_PATTERNS = [
+  // Event names: 'user:created', 'onClick', 'onSubmit', 'data-loaded'
+  /['"]([a-z][a-zA-Z]*:[a-z][a-zA-Z]+)['"]/, // namespaced events: 'user:created'
+  /['"]on[A-Z]\w+['"]/, // React-style event handlers: 'onClick'
+  /on\(['"](\w+)['"]/, // .on('event') pattern
+  /emit\(['"](\w+)['"]/, // .emit('event') pattern
+  /addEventListener\(['"](\w+)['"]/, // addEventListener('event')
+  // Config keys and action types
+  /['"]([A-Z][A-Z_]+[A-Z])['"]/, // CONSTANT_CASE strings: 'USER_LOGGED_IN'
+  /action:\s*['"](\w+)['"]/, // action: 'actionName'
+  /type:\s*['"](\w+)['"]/, // type: 'typeName'
+  // API routes and endpoints
+  /['"]\/api\/(\w+)/, // API routes: '/api/users'
+  /['"]\/(\w+\/\w+)['"]/, // Path patterns: '/users/profile'
+  // GraphQL and database
+  /query\s+(\w+)/, // GraphQL query names
+  /mutation\s+(\w+)/, // GraphQL mutation names
+  /(?:table|collection):\s*['"](\w+)['"]/, // Database table/collection names
+]
 
-    const codeLine = line.slice(1) // Remove the + prefix
-
-    // Extract function/class names
-    for (const pattern of functionPatterns) {
-      const match = codeLine.match(pattern)
-      if (match && match[1]) {
-        const name = match[1]
-        // Skip common noise
-        if (!['if', 'for', 'while', 'switch', 'catch', 'return', 'new'].includes(name)) {
-          queries.push(name)
-        }
+/**
+ * Extract named imports from an import statement.
+ * E.g., "{ foo, bar as baz, qux }" -> ['foo', 'baz', 'qux']
+ */
+function extractNamedImports(namedPart: string): string[] {
+  const names: string[] = []
+  const parts = namedPart.split(',').map(p => p.trim())
+  for (const part of parts) {
+    // Handle "foo as bar" -> extract "bar"
+    const asMatch = part.match(/(\w+)\s+as\s+(\w+)/)
+    if (asMatch) {
+      names.push(asMatch[2])
+    } else {
+      const name = part.match(/^(\w+)/)
+      if (name) {
+        names.push(name[1])
       }
     }
+  }
+  return names
+}
 
-    // Extract imports - these help find related code
-    for (const pattern of importPatterns) {
-      const match = codeLine.match(pattern)
-      if (match && match[1]) {
-        // Clean up import path
-        const importPath = match[1]
-          .replace(/^@/, '') // Remove @ prefix
-          .replace(/\//g, ' ') // Replace slashes with spaces
-          .replace(/\.(js|ts|tsx|jsx|py|go|rs)$/, '') // Remove extensions
+/**
+ * Clean up an import path for use as a search query.
+ */
+function cleanImportPath(importPath: string): string {
+  return importPath
+    .replace(/^@/, '') // Remove @ prefix (scoped packages)
+    .replace(/^\.+\//, '') // Remove relative path prefixes
+    .replace(/\//g, ' ') // Replace slashes with spaces
+    .replace(/\.(js|ts|tsx|jsx|py|go|rs|java|kt)$/, '') // Remove extensions
+    .trim()
+}
 
-        if (importPath.length > 2) {
-          queries.push(importPath)
+/**
+ * Check if an identifier is meaningful (not a noise keyword, not too short).
+ */
+function isMeaningfulIdentifier(name: string): boolean {
+  if (!name || name.length < 3) return false
+  if (NOISE_KEYWORDS.has(name.toLowerCase())) return false
+  // Skip single uppercase letters (generic type params like T, K, V)
+  if (/^[A-Z]$/.test(name)) return false
+  // Skip purely numeric strings
+  if (/^\d+$/.test(name)) return false
+  return true
+}
+
+/**
+ * Represents a diff hunk with its context and extracted queries.
+ */
+interface DiffHunk {
+  filename: string
+  startLine: number
+  queries: string[]
+  codeSnippet: string
+}
+
+/**
+ * Parse diff into hunks for contextual query extraction.
+ */
+function parseDiffIntoHunks(diffContent: string): DiffHunk[] {
+  const hunks: DiffHunk[] = []
+  const lines = diffContent.split('\n')
+
+  let currentFile = ''
+  let currentHunk: DiffHunk | null = null
+  let hunkLines: string[] = []
+
+  for (const line of lines) {
+    // Match file header
+    const fileMatch = line.match(/^diff --git a\/(.+) b\/(.+)$/)
+    if (fileMatch) {
+      // Save previous hunk if exists
+      if (currentHunk && hunkLines.length > 0) {
+        currentHunk.codeSnippet = hunkLines.join('\n').slice(0, 500)
+        hunks.push(currentHunk)
+      }
+      currentFile = fileMatch[2]
+      currentHunk = null
+      hunkLines = []
+      continue
+    }
+
+    // Match hunk header
+    const hunkMatch = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+    if (hunkMatch) {
+      // Save previous hunk if exists
+      if (currentHunk && hunkLines.length > 0) {
+        currentHunk.codeSnippet = hunkLines.join('\n').slice(0, 500)
+        hunks.push(currentHunk)
+      }
+      currentHunk = {
+        filename: currentFile,
+        startLine: parseInt(hunkMatch[1], 10),
+        queries: [],
+        codeSnippet: ''
+      }
+      hunkLines = []
+      continue
+    }
+
+    // Skip file headers
+    if (line.startsWith('+++') || line.startsWith('---') ||
+        line.startsWith('index ') || line.startsWith('new file') ||
+        line.startsWith('deleted file') || line.startsWith('Binary')) {
+      continue
+    }
+
+    // Collect changed lines for the hunk
+    if (currentHunk && (line.startsWith('+') || line.startsWith('-'))) {
+      const codeLine = line.slice(1)
+      hunkLines.push(codeLine)
+    }
+  }
+
+  // Don't forget the last hunk
+  if (currentHunk && hunkLines.length > 0) {
+    currentHunk.codeSnippet = hunkLines.join('\n').slice(0, 500)
+    hunks.push(currentHunk)
+  }
+
+  return hunks
+}
+
+/**
+ * Extract queries from a single line of code.
+ */
+function extractQueriesFromLine(codeLine: string): string[] {
+  const queries: string[] = []
+
+  // Extract function/class/method names
+  for (const pattern of FUNCTION_PATTERNS) {
+    const match = codeLine.match(pattern)
+    if (match) {
+      // Check all capture groups
+      for (let i = 1; i < match.length; i++) {
+        if (match[i] && isMeaningfulIdentifier(match[i])) {
+          queries.push(match[i])
         }
       }
     }
   }
 
-  // Also extract significant code snippets (first 500 chars of additions)
+  // Extract type annotations
+  for (const pattern of TYPE_ANNOTATION_PATTERNS) {
+    const matches = codeLine.matchAll(new RegExp(pattern, 'g'))
+    for (const match of matches) {
+      // Handle patterns that capture multiple types (like implements)
+      const captured = match[1]
+      if (captured) {
+        // Split by comma for patterns like "implements A, B, C"
+        const types = captured.split(',').map(t => t.trim())
+        for (const type of types) {
+          if (isMeaningfulIdentifier(type)) {
+            queries.push(type)
+          }
+        }
+      }
+    }
+  }
+
+  // Extract imports
+  for (const pattern of IMPORT_PATTERNS) {
+    const match = codeLine.match(pattern)
+    if (match) {
+      // Handle named imports (capture group with curly braces content)
+      for (let i = 1; i < match.length; i++) {
+        const captured = match[i]
+        if (!captured) continue
+
+        // Check if this looks like named imports
+        if (captured.includes(',') || /^\w+$/.test(captured.trim())) {
+          const names = extractNamedImports(captured)
+          for (const name of names) {
+            if (isMeaningfulIdentifier(name)) {
+              queries.push(name)
+            }
+          }
+        }
+
+        // Also extract the module path as a query
+        if (captured.includes('/') || captured.includes('.') || captured.length > 2) {
+          const cleanPath = cleanImportPath(captured)
+          if (cleanPath.length > 2) {
+            queries.push(cleanPath)
+          }
+        }
+      }
+    }
+  }
+
+  // Extract string literal identifiers
+  for (const pattern of STRING_IDENTIFIER_PATTERNS) {
+    const match = codeLine.match(pattern)
+    if (match && match[1] && isMeaningfulIdentifier(match[1])) {
+      queries.push(match[1])
+    }
+  }
+
+  return queries
+}
+
+/**
+ * Generate a semantic query from a hunk's context.
+ * This creates a natural language-like query based on the hunk content.
+ */
+function generateSemanticQueryFromHunk(hunk: DiffHunk): string | null {
+  // Extract key identifiers from the hunk
+  const identifiers = hunk.queries.slice(0, 5).filter(q => q.length < 50)
+
+  if (identifiers.length === 0) {
+    return null
+  }
+
+  // Create a semantic query that combines the file context with identifiers
+  const fileBase = hunk.filename.split('/').pop()?.replace(/\.[^.]+$/, '') || ''
+
+  if (fileBase && identifiers.length > 0) {
+    // Combine file name with key identifiers
+    return `${fileBase} ${identifiers.join(' ')}`
+  }
+
+  return identifiers.join(' ')
+}
+
+/**
+ * Extract meaningful queries from a diff for semantic search.
+ *
+ * Enhanced strategy:
+ * 1. Process both additions AND deletions (renamed/refactored code)
+ * 2. Extract function/class/method names with expanded patterns
+ * 3. Extract import statements and named imports
+ * 4. Extract type annotations and interface names
+ * 5. Extract string literals that look like identifiers (event names, config keys)
+ * 6. Generate semantic queries per diff hunk for better context
+ */
+export function extractQueriesFromDiff(diffContent: string): string[] {
+  const allQueries: string[] = []
+  const lines = diffContent.split('\n')
+
+  // Parse into hunks for contextual extraction
+  const hunks = parseDiffIntoHunks(diffContent)
+
+  // Process each line for query extraction
+  for (const line of lines) {
+    // Skip file headers and metadata
+    if (line.startsWith('diff --git') || line.startsWith('+++') ||
+        line.startsWith('---') || line.startsWith('index ') ||
+        line.startsWith('@@') || line.startsWith('new file') ||
+        line.startsWith('deleted file') || line.startsWith('Binary')) {
+      continue
+    }
+
+    // Process both additions (+) AND deletions (-) for better context
+    // Renamed/refactored code often has valuable identifiers in deletions
+    if ((line.startsWith('+') || line.startsWith('-')) &&
+        !line.startsWith('+++') && !line.startsWith('---')) {
+      const codeLine = line.slice(1)
+      const lineQueries = extractQueriesFromLine(codeLine)
+      allQueries.push(...lineQueries)
+    }
+  }
+
+  // Generate semantic queries from hunks
+  for (const hunk of hunks) {
+    // Extract queries from hunk content
+    const hunkContent = hunk.codeSnippet
+    for (const line of hunkContent.split('\n')) {
+      const lineQueries = extractQueriesFromLine(line)
+      hunk.queries.push(...lineQueries)
+    }
+
+    // Generate a semantic query combining hunk context
+    const semanticQuery = generateSemanticQueryFromHunk(hunk)
+    if (semanticQuery) {
+      allQueries.push(semanticQuery)
+    }
+  }
+
+  // Add significant code snippets from additions (for semantic similarity)
   const addedCode: string[] = []
   for (const line of lines) {
     if (line.startsWith('+') && !line.startsWith('+++')) {
@@ -487,13 +808,25 @@ export function extractQueriesFromDiff(diffContent: string): string[] {
   if (addedCode.length > 0) {
     const codeSnippet = addedCode.slice(0, 20).join('\n').slice(0, 500)
     if (codeSnippet.length > 50) {
-      queries.push(codeSnippet)
+      allQueries.push(codeSnippet)
     }
   }
 
-  // Deduplicate and limit
-  const uniqueQueries = [...new Set(queries)]
-  return uniqueQueries.slice(0, 10) // Limit to 10 queries
+  // Deduplicate, filter, and limit
+  const uniqueQueries = [...new Set(allQueries)]
+    .filter(q => q.length >= 3 && q.length < 600) // Filter very short and very long queries
+
+  // Prioritize: identifiers first, then longer queries (code snippets)
+  const sortedQueries = uniqueQueries.sort((a, b) => {
+    // Prefer shorter, identifier-like queries
+    const aIsIdentifier = /^\w+$/.test(a)
+    const bIsIdentifier = /^\w+$/.test(b)
+    if (aIsIdentifier && !bIsIdentifier) return -1
+    if (!aIsIdentifier && bIsIdentifier) return 1
+    return a.length - b.length
+  })
+
+  return sortedQueries.slice(0, 15) // Increased limit to 15 for richer context
 }
 
 /**
