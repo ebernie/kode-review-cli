@@ -427,4 +427,10 @@ export interface WeightedCodeChunk extends CodeChunk {
 
   /** Whether this chunk overlaps with modified lines */
   isModifiedContext: boolean
+
+  /** Whether this chunk is from a test file */
+  isTestFile?: boolean
+
+  /** The source file this test file is related to (if isTestFile is true) */
+  relatedSourceFile?: string
 }

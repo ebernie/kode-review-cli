@@ -4,6 +4,9 @@ import {
   parseDiffToModifiedLines,
   chunkOverlapsModifiedLines,
   applyModifiedLineWeighting,
+  isTestFile,
+  generateTestFilePaths,
+  extractSourceFilesFromDiff,
 } from '../context.js'
 import type { CodeChunk, ParsedDiff } from '../types.js'
 
@@ -548,5 +551,209 @@ describe('applyModifiedLineWeighting', () => {
 
     expect(weighted[0].isModifiedContext).toBe(false)
     expect(weighted[0].weightMultiplier).toBe(1.0)
+  })
+})
+
+describe('isTestFile', () => {
+  describe('naming pattern detection', () => {
+    it('detects .test. pattern', () => {
+      expect(isTestFile('src/utils/helpers.test.ts')).toBe(true)
+      expect(isTestFile('helpers.test.js')).toBe(true)
+      expect(isTestFile('path/to/component.test.tsx')).toBe(true)
+    })
+
+    it('detects .spec. pattern', () => {
+      expect(isTestFile('src/utils/helpers.spec.ts')).toBe(true)
+      expect(isTestFile('helpers.spec.js')).toBe(true)
+      expect(isTestFile('path/to/component.spec.tsx')).toBe(true)
+    })
+
+    it('detects _test. pattern (Go/Python style)', () => {
+      expect(isTestFile('pkg/handler_test.go')).toBe(true)
+      expect(isTestFile('helpers_test.py')).toBe(true)
+      expect(isTestFile('src/utils/parser_test.rs')).toBe(true)
+    })
+
+    it('detects test_ prefix pattern (Python style)', () => {
+      expect(isTestFile('test_helpers.py')).toBe(true)
+      expect(isTestFile('tests/test_utils.py')).toBe(true)
+      expect(isTestFile('src/test_parser.py')).toBe(true)
+    })
+
+    it('detects plural forms .tests. and .specs.', () => {
+      expect(isTestFile('api.tests.ts')).toBe(true)
+      expect(isTestFile('component.specs.js')).toBe(true)
+    })
+  })
+
+  describe('directory pattern detection', () => {
+    it('detects __tests__ directory', () => {
+      expect(isTestFile('src/utils/__tests__/helpers.ts')).toBe(true)
+      expect(isTestFile('__tests__/integration/api.js')).toBe(true)
+      expect(isTestFile('components/__tests__/Button.tsx')).toBe(true)
+    })
+
+    it('detects tests/ directory', () => {
+      expect(isTestFile('tests/helpers.ts')).toBe(true)
+      expect(isTestFile('src/tests/utils.js')).toBe(true)
+      expect(isTestFile('packages/core/tests/api.ts')).toBe(true)
+    })
+
+    it('detects test/ directory', () => {
+      expect(isTestFile('test/helpers.ts')).toBe(true)
+      expect(isTestFile('src/test/utils.js')).toBe(true)
+      expect(isTestFile('packages/core/test/api.ts')).toBe(true)
+    })
+
+    it('detects spec/ directory', () => {
+      expect(isTestFile('spec/helpers.ts')).toBe(true)
+      expect(isTestFile('src/spec/utils.js')).toBe(true)
+      expect(isTestFile('packages/core/spec/api.ts')).toBe(true)
+    })
+  })
+
+  describe('non-test file detection', () => {
+    it('returns false for regular source files', () => {
+      expect(isTestFile('src/utils/helpers.ts')).toBe(false)
+      expect(isTestFile('lib/parser.js')).toBe(false)
+      expect(isTestFile('pkg/handler.go')).toBe(false)
+      expect(isTestFile('main.py')).toBe(false)
+    })
+
+    it('returns false for files with "test" in path but not in test patterns', () => {
+      expect(isTestFile('src/testutils/helpers.ts')).toBe(false)
+      expect(isTestFile('contest/entry.js')).toBe(false)
+      expect(isTestFile('attest/verify.ts')).toBe(false)
+    })
+  })
+
+  describe('path normalization', () => {
+    it('handles Windows-style paths', () => {
+      expect(isTestFile('src\\utils\\helpers.test.ts')).toBe(true)
+      expect(isTestFile('src\\__tests__\\helpers.ts')).toBe(true)
+    })
+  })
+})
+
+describe('generateTestFilePaths', () => {
+  describe('TypeScript/JavaScript files', () => {
+    it('generates paths for src/utils/helpers.ts', () => {
+      const paths = generateTestFilePaths('src/utils/helpers.ts')
+
+      // Same directory patterns
+      expect(paths).toContain('src/utils/helpers.test.ts')
+      expect(paths).toContain('src/utils/helpers.spec.ts')
+
+      // __tests__ directory patterns
+      expect(paths).toContain('src/utils/__tests__/helpers.ts')
+      expect(paths).toContain('src/utils/__tests__/helpers.test.ts')
+      expect(paths).toContain('src/utils/__tests__/helpers.spec.ts')
+
+      // Root test directories with mirrored structure
+      expect(paths).toContain('test/utils/helpers.ts')
+      expect(paths).toContain('test/utils/helpers.test.ts')
+      expect(paths).toContain('tests/utils/helpers.ts')
+      expect(paths).toContain('tests/utils/helpers.test.ts')
+    })
+
+    it('generates paths for lib/parser.js', () => {
+      const paths = generateTestFilePaths('lib/parser.js')
+
+      expect(paths).toContain('lib/parser.test.js')
+      expect(paths).toContain('lib/parser.spec.js')
+      expect(paths).toContain('lib/__tests__/parser.js')
+    })
+
+    it('generates paths for files at root level', () => {
+      const paths = generateTestFilePaths('helpers.ts')
+
+      expect(paths).toContain('helpers.test.ts')
+      expect(paths).toContain('helpers.spec.ts')
+      expect(paths).toContain('__tests__/helpers.ts')
+    })
+  })
+
+  describe('Python files', () => {
+    it('generates Python-style test paths for src/utils/helpers.py', () => {
+      const paths = generateTestFilePaths('src/utils/helpers.py')
+
+      // Python naming conventions
+      expect(paths).toContain('src/utils/helpers_test.py')
+      expect(paths).toContain('src/utils/test_helpers.py')
+
+      // __tests__ directory still applies
+      expect(paths).toContain('src/utils/__tests__/helpers.py')
+
+      // Root test directories
+      expect(paths).toContain('test/utils/helpers_test.py')
+      expect(paths).toContain('test/utils/test_helpers.py')
+    })
+  })
+
+  describe('edge cases', () => {
+    it('returns empty array for files that are already test files', () => {
+      expect(generateTestFilePaths('src/utils/helpers.test.ts')).toEqual([])
+      expect(generateTestFilePaths('src/__tests__/helpers.ts')).toEqual([])
+      expect(generateTestFilePaths('test/helpers.ts')).toEqual([])
+      expect(generateTestFilePaths('helpers_test.py')).toEqual([])
+    })
+
+    it('does not generate duplicate paths', () => {
+      const paths = generateTestFilePaths('src/utils/helpers.ts')
+      const uniquePaths = [...new Set(paths)]
+      expect(paths.length).toBe(uniquePaths.length)
+    })
+
+    it('handles deeply nested paths', () => {
+      const paths = generateTestFilePaths('src/components/forms/inputs/TextInput.tsx')
+
+      expect(paths).toContain('src/components/forms/inputs/TextInput.test.tsx')
+      expect(paths).toContain('src/components/forms/inputs/__tests__/TextInput.tsx')
+    })
+  })
+})
+
+describe('extractSourceFilesFromDiff', () => {
+  it('extracts source files from diff, excluding test files', () => {
+    const parsedDiff: ParsedDiff = {
+      modifiedLines: [],
+      fileChanges: new Map([
+        ['src/utils/helpers.ts', { additions: [1], deletions: [], modifications: [] }],
+        ['src/utils/helpers.test.ts', { additions: [1], deletions: [], modifications: [] }],
+        ['src/api/handler.ts', { additions: [1], deletions: [], modifications: [] }],
+        ['test/api/handler.test.ts', { additions: [1], deletions: [], modifications: [] }],
+      ])
+    }
+
+    const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
+
+    expect(sourceFiles).toContain('src/utils/helpers.ts')
+    expect(sourceFiles).toContain('src/api/handler.ts')
+    expect(sourceFiles).not.toContain('src/utils/helpers.test.ts')
+    expect(sourceFiles).not.toContain('test/api/handler.test.ts')
+    expect(sourceFiles).toHaveLength(2)
+  })
+
+  it('returns empty array when all files are test files', () => {
+    const parsedDiff: ParsedDiff = {
+      modifiedLines: [],
+      fileChanges: new Map([
+        ['src/utils/helpers.test.ts', { additions: [1], deletions: [], modifications: [] }],
+        ['test/api/handler.test.ts', { additions: [1], deletions: [], modifications: [] }],
+      ])
+    }
+
+    const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
+    expect(sourceFiles).toHaveLength(0)
+  })
+
+  it('returns empty array for empty diff', () => {
+    const parsedDiff: ParsedDiff = {
+      modifiedLines: [],
+      fileChanges: new Map()
+    }
+
+    const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
+    expect(sourceFiles).toHaveLength(0)
   })
 })

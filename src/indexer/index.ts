@@ -41,6 +41,10 @@ export {
   parseDiffToModifiedLines,
   chunkOverlapsModifiedLines,
   applyModifiedLineWeighting,
+  isTestFile,
+  generateTestFilePaths,
+  extractSourceFilesFromDiff,
+  findRelatedTestFiles,
 } from './context.js'
 
 // Setup wizard
