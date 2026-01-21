@@ -17,6 +17,8 @@ import {
   hasChanges,
   formatChanges,
   getChangesSummary,
+  getProjectStructureContext,
+  formatProjectStructureContext,
 } from './review/index.js'
 import {
   detectPlatform,
@@ -475,6 +477,22 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
     }
   }
 
+  // Get project structure context (always included for architectural understanding)
+  let projectStructureContext: string | undefined
+  const repoRoot = await getRepoRoot()
+
+  if (repoRoot) {
+    try {
+      logger.info('Gathering project structure context...')
+      const structureContext = await getProjectStructureContext(repoRoot, diffContent)
+      projectStructureContext = formatProjectStructureContext(structureContext)
+      logger.success('Project structure context gathered')
+    } catch (error) {
+      logger.warn('Could not gather project structure context')
+      logger.debug(`Error: ${error}`)
+    }
+  }
+
   // Retrieve semantic context if requested
   let semanticContext: string | undefined
 
@@ -550,6 +568,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       prMrInfo,
       semanticContext,
       prDescriptionSummary,
+      projectStructureContext,
       provider: options.provider,
       model: options.model,
       variant: options.variant,

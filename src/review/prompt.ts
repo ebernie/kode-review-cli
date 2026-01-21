@@ -189,13 +189,15 @@ export interface ReviewPromptOptions {
   semanticContext?: string
   /** PR/MR description summary to provide author intent context */
   prDescriptionSummary?: string
+  /** Project structure context (directory tree, README, architecture docs) */
+  projectStructureContext?: string
 }
 
 /**
  * Known structural XML tags used in prompts
  * These must be escaped in user content to prevent tag injection
  */
-const STRUCTURAL_TAGS = ['pr_mr_info', 'related_code', 'diff_content', 'author_intent']
+const STRUCTURAL_TAGS = ['pr_mr_info', 'related_code', 'diff_content', 'author_intent', 'project_structure']
 
 /**
  * Sanitize content to prevent XML tag injection
@@ -281,6 +283,17 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     parts.push('</author_intent>')
     parts.push('')
     parts.push('Use this context to understand what the author is trying to accomplish and verify the implementation matches the stated intent.')
+    parts.push('')
+  }
+
+  if (options.projectStructureContext) {
+    parts.push('## Project Structure')
+    parts.push('')
+    parts.push('This section provides an overview of the project structure to help you understand where the modified files fit in the architecture.')
+    parts.push('')
+    parts.push('<project_structure>')
+    parts.push(sanitizeXmlContent(options.projectStructureContext, 'project_structure'))
+    parts.push('</project_structure>')
     parts.push('')
   }
 

@@ -14,6 +14,8 @@ export interface ReviewOptions {
   semanticContext?: string
   /** PR/MR description summary for author intent context */
   prDescriptionSummary?: string
+  /** Project structure context (directory tree, README, architecture docs) */
+  projectStructureContext?: string
   /** Override provider */
   provider?: string
   /** Override model */
@@ -52,6 +54,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     prMrInfo: options.prMrInfo,
     semanticContext: options.semanticContext,
     prDescriptionSummary: options.prDescriptionSummary,
+    projectStructureContext: options.projectStructureContext,
   }
   const prompt = buildReviewPrompt(promptOptions)
 
@@ -137,6 +140,7 @@ export async function runReviewWithServer(
     prMrInfo: options.prMrInfo,
     semanticContext: options.semanticContext,
     prDescriptionSummary: options.prDescriptionSummary,
+    projectStructureContext: options.projectStructureContext,
   }
   const prompt = buildReviewPrompt(promptOptions)
 
