@@ -26,6 +26,15 @@ from pgvector.psycopg import register_vector
 
 from import_graph import ImportGraphBuilder, generate_repo_id as graph_generate_repo_id
 from bm25 import normalize_identifier, build_tsquery, calculate_exact_match_boost
+from hybrid import (
+    HybridSearchConfig,
+    HybridMatch,
+    combine_results,
+    extract_quoted_phrases,
+    build_exact_phrase_query,
+    DEFAULT_VECTOR_WEIGHT,
+    DEFAULT_KEYWORD_WEIGHT,
+)
 
 
 class Settings(BaseSettings):
@@ -133,6 +142,47 @@ class KeywordSearchResponse(BaseModel):
     normalized_query: str  # Shows how the query was processed
     matches: list[KeywordMatch]
     total_count: int
+
+
+class HybridSearchRequest(BaseModel):
+    """Request for hybrid search combining vector and keyword."""
+    query: str
+    repo_url: Optional[str] = None
+    branch: Optional[str] = None
+    limit: int = 10
+    vector_weight: float = DEFAULT_VECTOR_WEIGHT  # Weight for vector search (default: 0.6)
+    keyword_weight: float = DEFAULT_KEYWORD_WEIGHT  # Weight for keyword search (default: 0.4)
+    exact_match_boost: float = 3.0  # Multiplier for exact symbol matches in keyword search
+
+
+class HybridMatchResponse(BaseModel):
+    """A code chunk from hybrid search with combined scoring."""
+    file_path: str
+    content: str
+    line_start: int
+    line_end: int
+    chunk_type: Optional[str] = None
+    symbol_names: list[str] = []
+    repo_url: Optional[str] = None
+    branch: Optional[str] = None
+    # Scoring breakdown
+    vector_score: float  # Original cosine similarity (0-1)
+    vector_rank: Optional[int] = None  # Rank in vector results (1-indexed)
+    keyword_score: float  # BM25 score with exact match boost
+    keyword_rank: Optional[int] = None  # Rank in keyword results (1-indexed)
+    rrf_score: float  # Combined RRF score
+    sources: list[str]  # Which searches contributed: ['vector', 'keyword']
+
+
+class HybridSearchResponse(BaseModel):
+    """Response from a hybrid search request."""
+    query: str
+    quoted_phrases: list[str]  # Phrases extracted for exact matching
+    matches: list[HybridMatchResponse]
+    total_count: int
+    vector_weight: float  # Actual weight used
+    keyword_weight: float  # Actual weight used
+    fallback_used: bool  # True if fell back to pure vector search
 
 
 class IndexStats(BaseModel):
@@ -499,6 +549,250 @@ async def keyword_search(request: KeywordSearchRequest):
                 status_code=500,
                 detail="Full-text search index not available. Please re-run schema migration."
             )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/hybrid-search", response_model=HybridSearchResponse)
+async def hybrid_search(request: HybridSearchRequest):
+    """
+    Search the index using hybrid vector + keyword search with Reciprocal Rank Fusion.
+
+    This endpoint combines the strengths of both search methods:
+    - Vector search: Semantic understanding, conceptual similarity
+    - Keyword search: Exact identifier matches, technical terms
+
+    The results are combined using Reciprocal Rank Fusion (RRF), which:
+    - Ranks each result by position in both search results
+    - Applies configurable weights (default: 60% vector, 40% keyword)
+    - Returns a unified, deduplicated result set
+
+    Features:
+    - Quoted phrases (e.g., "getUserById") trigger exact matching
+    - Automatic fallback to pure vector search if keyword returns no results
+    - Handles camelCase and snake_case variations in keyword search
+
+    Args:
+        query: Search query (may contain quoted phrases for exact matching)
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search
+        limit: Maximum number of results (default: 10)
+        vector_weight: Weight for vector similarity (default: 0.6)
+        keyword_weight: Weight for keyword matching (default: 0.4)
+        exact_match_boost: Multiplier for exact symbol matches in keyword search (default: 3.0)
+
+    Returns:
+        HybridSearchResponse with combined results and scoring breakdown
+    """
+    try:
+        # Extract quoted phrases for exact matching
+        quoted_phrases, remaining_query = extract_quoted_phrases(request.query)
+
+        # Use the full query for vector search, but note quoted phrases
+        vector_query = request.query.replace('"', '').replace("'", "")
+
+        # Build keyword query - prioritize quoted phrases for exact matching
+        if quoted_phrases:
+            # For quoted phrases, we want exact phrase matching
+            keyword_query = ' '.join(quoted_phrases)
+        else:
+            keyword_query = request.query
+
+        # Configure hybrid search
+        config = HybridSearchConfig(
+            vector_weight=request.vector_weight,
+            keyword_weight=request.keyword_weight,
+        )
+
+        # Build WHERE clause for filtering
+        repo_id = None
+        where_conditions = []
+        where_params: list = []
+
+        if request.repo_url:
+            repo_id = generate_repo_id(request.repo_url)
+            where_conditions.append("repo_id = %s")
+            where_params.append(repo_id)
+
+        if request.branch:
+            where_conditions.append("branch = %s")
+            where_params.append(request.branch)
+
+        where_clause = ""
+        if where_conditions:
+            where_clause = " AND ".join(where_conditions)
+
+        vector_results: list[dict] = []
+        keyword_results: list[dict] = []
+        fallback_used = False
+
+        with get_connection_pool().connection() as conn:
+            register_vector(conn)
+            with conn.cursor() as cur:
+                # Step 1: Vector similarity search
+                query_embedding = compute_embedding(vector_query)
+
+                # Build vector search SQL
+                vector_params: list = [query_embedding]
+                vector_where = ""
+                if where_conditions:
+                    vector_where = "WHERE " + where_clause
+                    vector_params.extend(where_params)
+                vector_params.extend([query_embedding, request.limit * 2])
+
+                cur.execute(
+                    f"""
+                    SELECT c.id, c.file_path, c.content, c.line_start, c.line_end,
+                           c.chunk_type, c.symbol_names, c.repo_url, c.branch,
+                           1 - (embedding <=> %s::vector) AS score
+                    FROM chunks c
+                    {vector_where}
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    tuple(vector_params)
+                )
+
+                for row in cur.fetchall():
+                    vector_results.append({
+                        "id": str(row[0]),
+                        "file_path": row[1],
+                        "content": row[2],
+                        "line_start": row[3],
+                        "line_end": row[4],
+                        "chunk_type": row[5],
+                        "symbol_names": row[6] or [],
+                        "repo_url": row[7],
+                        "branch": row[8],
+                        "score": float(row[9]) if row[9] else 0.0,
+                    })
+
+                # Step 2: BM25 keyword search
+                try:
+                    normalized_query = build_tsquery(keyword_query)
+
+                    keyword_where_conditions = ["content_tsv @@ query"]
+                    if repo_id:
+                        keyword_where_conditions.append("c.repo_id = %s")
+                    if request.branch:
+                        keyword_where_conditions.append("c.branch = %s")
+
+                    keyword_sql = f"""
+                        WITH query AS (
+                            SELECT to_tsquery('simple', %s) AS q
+                        )
+                        SELECT
+                            c.id,
+                            c.file_path,
+                            c.content,
+                            c.line_start,
+                            c.line_end,
+                            c.chunk_type,
+                            c.symbol_names,
+                            c.repo_url,
+                            c.branch,
+                            ts_rank_cd(c.content_tsv, query.q, 1) AS bm25_score
+                        FROM chunks c, query
+                        WHERE c.content_tsv @@ query.q
+                          {"AND " + " AND ".join(keyword_where_conditions[1:]) if len(keyword_where_conditions) > 1 else ""}
+                        ORDER BY bm25_score DESC
+                        LIMIT %s
+                    """
+
+                    keyword_params = [normalized_query] + where_params + [request.limit * 2]
+                    cur.execute(keyword_sql, tuple(keyword_params))
+
+                    for row in cur.fetchall():
+                        symbol_names = row[6] or []
+                        bm25_score = float(row[9]) if row[9] else 0.0
+
+                        # Calculate exact match boost
+                        exact_boost = calculate_exact_match_boost(
+                            request.query,
+                            symbol_names,
+                            request.exact_match_boost
+                        )
+
+                        keyword_results.append({
+                            "id": str(row[0]),
+                            "file_path": row[1],
+                            "content": row[2],
+                            "line_start": row[3],
+                            "line_end": row[4],
+                            "chunk_type": row[5],
+                            "symbol_names": symbol_names,
+                            "repo_url": row[7],
+                            "branch": row[8],
+                            "bm25_score": bm25_score,
+                            "exact_match_boost": exact_boost,
+                            "final_score": bm25_score * exact_boost,
+                        })
+
+                except Exception:
+                    # Keyword search failed (e.g., invalid query), continue with vector only
+                    pass
+
+        # Step 3: Combine results using RRF
+        if not keyword_results and config.fallback_to_vector:
+            # Fallback: use pure vector results
+            fallback_used = True
+            combined_matches = []
+            for rank, result in enumerate(vector_results[:request.limit], start=1):
+                combined_matches.append(HybridMatch(
+                    chunk_id=result["id"],
+                    file_path=result["file_path"],
+                    content=result["content"],
+                    line_start=result["line_start"],
+                    line_end=result["line_end"],
+                    chunk_type=result["chunk_type"],
+                    symbol_names=result["symbol_names"],
+                    repo_url=result["repo_url"],
+                    branch=result["branch"],
+                    vector_score=result["score"],
+                    vector_rank=rank,
+                    keyword_score=0.0,
+                    keyword_rank=None,
+                    rrf_score=result["score"],  # Use vector score directly
+                    sources=["vector"],
+                ))
+        else:
+            # Normal: combine using RRF
+            combined_matches = combine_results(
+                vector_results,
+                keyword_results,
+                config,
+                request.limit
+            )
+
+        # Build response
+        return HybridSearchResponse(
+            query=request.query,
+            quoted_phrases=quoted_phrases,
+            matches=[
+                HybridMatchResponse(
+                    file_path=m.file_path,
+                    content=m.content,
+                    line_start=m.line_start,
+                    line_end=m.line_end,
+                    chunk_type=m.chunk_type,
+                    symbol_names=m.symbol_names,
+                    repo_url=m.repo_url,
+                    branch=m.branch,
+                    vector_score=m.vector_score,
+                    vector_rank=m.vector_rank,
+                    keyword_score=m.keyword_score,
+                    keyword_rank=m.keyword_rank,
+                    rrf_score=m.rrf_score,
+                    sources=m.sources,
+                )
+                for m in combined_matches
+            ],
+            total_count=len(combined_matches),
+            vector_weight=config.vector_weight,
+            keyword_weight=config.keyword_weight,
+            fallback_used=fallback_used,
+        )
+
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

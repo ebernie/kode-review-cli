@@ -719,3 +719,106 @@ export interface KeywordSearchOptions {
   /** Multiplier for exact function/class name matches (default: 3.0) */
   exactMatchBoost?: number
 }
+
+// ============================================================================
+// Hybrid Search Types (Vector + BM25 with RRF)
+// ============================================================================
+
+/**
+ * A code chunk from hybrid search with combined scoring
+ */
+export interface HybridMatch {
+  /** File path relative to repo root */
+  filePath: string
+
+  /** The code content */
+  content: string
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** Type of code construct (function, class, etc.) */
+  chunkType: ChunkType | null
+
+  /** Symbol names defined in this chunk */
+  symbolNames: string[]
+
+  /** Repository URL */
+  repoUrl?: string
+
+  /** Branch name */
+  branch?: string
+
+  /** Vector similarity score (0-1) from embedding search */
+  vectorScore: number
+
+  /** Rank in vector search results (1-indexed, undefined if not in vector results) */
+  vectorRank?: number
+
+  /** BM25 keyword score with exact match boost */
+  keywordScore: number
+
+  /** Rank in keyword search results (1-indexed, undefined if not in keyword results) */
+  keywordRank?: number
+
+  /** Combined RRF (Reciprocal Rank Fusion) score */
+  rrfScore: number
+
+  /** Which search methods contributed to this result: ['vector'], ['keyword'], or ['vector', 'keyword'] */
+  sources: Array<'vector' | 'keyword'>
+}
+
+/**
+ * Response from hybrid search
+ */
+export interface HybridSearchResult {
+  /** The original search query */
+  query: string
+
+  /** Quoted phrases extracted for exact matching */
+  quotedPhrases: string[]
+
+  /** Matching code chunks with combined scoring */
+  matches: HybridMatch[]
+
+  /** Total count of matches */
+  totalCount: number
+
+  /** Actual vector weight used (normalized) */
+  vectorWeight: number
+
+  /** Actual keyword weight used (normalized) */
+  keywordWeight: number
+
+  /** Whether fallback to pure vector search was used (keyword returned no results) */
+  fallbackUsed: boolean
+}
+
+/**
+ * Options for hybrid search
+ */
+export interface HybridSearchOptions {
+  /** Search query (may contain quoted phrases for exact matching) */
+  query: string
+
+  /** Optional repository URL to scope the search */
+  repoUrl?: string
+
+  /** Optional branch to scope the search */
+  branch?: string
+
+  /** Maximum number of results (default: 10) */
+  limit?: number
+
+  /** Weight for vector similarity search (default: 0.6) */
+  vectorWeight?: number
+
+  /** Weight for keyword search (default: 0.4) */
+  keywordWeight?: number
+
+  /** Multiplier for exact symbol matches in keyword search (default: 3.0) */
+  exactMatchBoost?: number
+}

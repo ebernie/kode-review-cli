@@ -10,6 +10,8 @@ import type {
   HubFilesResult,
   KeywordSearchResult,
   KeywordMatch,
+  HybridSearchResult,
+  HybridMatch,
 } from './types.js'
 
 export interface IndexRequest {
@@ -163,6 +165,35 @@ interface KeywordSearchResponse {
   normalized_query: string
   matches: KeywordMatchResponse[]
   total_count: number
+}
+
+// Hybrid Search Response Types
+
+interface HybridMatchResponse {
+  file_path: string
+  content: string
+  line_start: number
+  line_end: number
+  chunk_type: string | null
+  symbol_names: string[]
+  repo_url: string | null
+  branch: string | null
+  vector_score: number
+  vector_rank: number | null
+  keyword_score: number
+  keyword_rank: number | null
+  rrf_score: number
+  sources: string[]
+}
+
+interface HybridSearchResponse {
+  query: string
+  quoted_phrases: string[]
+  matches: HybridMatchResponse[]
+  total_count: number
+  vector_weight: number
+  keyword_weight: number
+  fallback_used: boolean
 }
 
 /**
@@ -683,6 +714,94 @@ export class IndexerClient {
         branch: match.branch ?? undefined,
       })),
       totalCount: data.total_count,
+    }
+  }
+
+  // ============================================================================
+  // Hybrid Search (Vector + BM25 with RRF)
+  // ============================================================================
+
+  /**
+   * Search for code using hybrid vector + keyword search with Reciprocal Rank Fusion.
+   *
+   * This method combines the strengths of both search methods:
+   * - Vector search: Semantic understanding, conceptual similarity
+   * - Keyword search: Exact identifier matches, technical terms
+   *
+   * The results are combined using Reciprocal Rank Fusion (RRF), which:
+   * - Ranks each result by position in both search results
+   * - Applies configurable weights (default: 60% vector, 40% keyword)
+   * - Returns a unified, deduplicated result set
+   *
+   * Features:
+   * - Quoted phrases (e.g., "getUserById") trigger exact matching
+   * - Automatic fallback to pure vector search if keyword returns no results
+   * - Handles camelCase and snake_case variations in keyword search
+   *
+   * @param query - Search query (may contain quoted phrases for exact matching)
+   * @param repoUrl - Optional repository URL to scope the search
+   * @param branch - Optional branch to scope the search
+   * @param limit - Maximum number of results (default: 10)
+   * @param vectorWeight - Weight for vector similarity (default: 0.6)
+   * @param keywordWeight - Weight for keyword matching (default: 0.4)
+   * @param exactMatchBoost - Multiplier for exact symbol matches (default: 3.0)
+   */
+  async hybridSearch(
+    query: string,
+    repoUrl?: string,
+    branch?: string,
+    limit: number = 10,
+    vectorWeight: number = 0.6,
+    keywordWeight: number = 0.4,
+    exactMatchBoost: number = 3.0
+  ): Promise<HybridSearchResult> {
+    const response = await fetch(`${this.baseUrl}/hybrid-search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        repo_url: repoUrl,
+        branch,
+        limit,
+        vector_weight: vectorWeight,
+        keyword_weight: keywordWeight,
+        exact_match_boost: exactMatchBoost,
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Hybrid search failed: ${error}`)
+    }
+
+    const data = (await response.json()) as HybridSearchResponse
+
+    // Map snake_case to camelCase
+    return {
+      query: data.query,
+      quotedPhrases: data.quoted_phrases,
+      matches: data.matches.map((match): HybridMatch => ({
+        filePath: match.file_path,
+        content: match.content,
+        lineStart: match.line_start,
+        lineEnd: match.line_end,
+        chunkType: match.chunk_type as ChunkType | null,
+        symbolNames: match.symbol_names,
+        repoUrl: match.repo_url ?? undefined,
+        branch: match.branch ?? undefined,
+        vectorScore: match.vector_score,
+        vectorRank: match.vector_rank ?? undefined,
+        keywordScore: match.keyword_score,
+        keywordRank: match.keyword_rank ?? undefined,
+        rrfScore: match.rrf_score,
+        sources: match.sources as Array<'vector' | 'keyword'>,
+      })),
+      totalCount: data.total_count,
+      vectorWeight: data.vector_weight,
+      keywordWeight: data.keyword_weight,
+      fallbackUsed: data.fallback_used,
     }
   }
 }
