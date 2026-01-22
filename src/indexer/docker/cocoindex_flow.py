@@ -36,15 +36,152 @@ from __future__ import annotations
 import os
 import hashlib
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import cocoindex
 import numpy as np
+import psycopg
 from numpy.typing import NDArray
+from pgvector.psycopg import register_vector
 
 # Import AST-based chunking
 from ast_chunker import chunk_code_ast, CodeChunk
+
+
+# =============================================================================
+# Embedding Cache Support
+# =============================================================================
+
+
+@dataclass
+class CacheStats:
+    """Statistics for embedding cache performance."""
+    hits: int = 0
+    misses: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        if self.total == 0:
+            return 0.0
+        return self.hits / self.total
+
+
+# Global cache stats for the current flow execution
+_cache_stats = CacheStats()
+
+
+def get_cache_stats() -> CacheStats:
+    """Get the current cache statistics."""
+    return _cache_stats
+
+
+def reset_cache_stats() -> None:
+    """Reset cache statistics for a new flow execution."""
+    global _cache_stats
+    _cache_stats = CacheStats()
+
+
+def compute_content_hash(content: str) -> str:
+    """
+    Compute SHA-256 hash of content for cache lookup.
+
+    Args:
+        content: The text content to hash
+
+    Returns:
+        Hexadecimal SHA-256 hash string
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def lookup_cached_embedding(
+    database_url: str,
+    content_hash: str,
+    model_name: str
+) -> list[float] | None:
+    """
+    Look up a single cached embedding by content hash.
+
+    Args:
+        database_url: PostgreSQL connection string
+        content_hash: SHA-256 content hash
+        model_name: The embedding model name
+
+    Returns:
+        Embedding as list of floats, or None if not cached
+    """
+    try:
+        conn = psycopg.connect(database_url)
+        register_vector(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE embedding_cache
+                SET last_used_at = NOW(), hit_count = hit_count + 1
+                WHERE content_hash = %s AND model_name = %s
+                RETURNING embedding
+                """,
+                (content_hash, model_name)
+            )
+            row = cur.fetchone()
+            conn.commit()
+
+        conn.close()
+
+        if row and row[0] is not None:
+            return list(row[0])
+        return None
+    except Exception:
+        return None
+
+
+def store_cached_embedding(
+    database_url: str,
+    content_hash: str,
+    embedding: list[float],
+    original_dim: int,
+    model_name: str
+) -> bool:
+    """
+    Store an embedding in the cache.
+
+    Args:
+        database_url: PostgreSQL connection string
+        content_hash: SHA-256 content hash
+        embedding: The embedding to cache (padded to 1536 dims)
+        original_dim: Original embedding dimension before padding
+        model_name: The embedding model name
+
+    Returns:
+        True if cached successfully, False otherwise
+    """
+    try:
+        conn = psycopg.connect(database_url)
+        register_vector(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO embedding_cache (content_hash, model_name, embedding, embedding_dim)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (content_hash, model_name) DO UPDATE SET
+                    last_used_at = NOW(),
+                    hit_count = embedding_cache.hit_count + 1
+                """,
+                (content_hash, model_name, embedding, original_dim)
+            )
+            conn.commit()
+
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 
 # Configuration from environment
@@ -475,6 +612,85 @@ def extract_relationships(
 
 
 # =============================================================================
+# Cached Embedding Function
+# =============================================================================
+
+
+class CachedSentenceTransformerEmbed(cocoindex.op.FunctionSpec):
+    """
+    Function spec for cached sentence transformer embedding.
+
+    This wraps SentenceTransformerEmbed with a content-hash based cache
+    to avoid re-embedding unchanged content.
+    """
+
+    model: str
+    database_url: str
+
+
+@cocoindex.op.executor_class(cache=True, behavior_version=1)
+class CachedSentenceTransformerEmbedExecutor:
+    """Executor for cached sentence transformer embedding."""
+
+    spec: CachedSentenceTransformerEmbed
+    _model: Any = None
+
+    def __call__(self, text: str) -> NDArray[np.float32]:
+        """
+        Generate embedding for text, using cache when possible.
+
+        Args:
+            text: The text to embed
+
+        Returns:
+            Embedding as numpy array (padded to 1536 dimensions)
+        """
+        global _cache_stats
+
+        # Compute content hash
+        content_hash = compute_content_hash(text)
+
+        # Try cache lookup
+        cached = lookup_cached_embedding(
+            self.spec.database_url,
+            content_hash,
+            self.spec.model
+        )
+
+        if cached is not None:
+            _cache_stats.hits += 1
+            return np.array(cached, dtype=np.float32)
+
+        # Cache miss - generate embedding
+        _cache_stats.misses += 1
+
+        # Lazy load model
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self.spec.model)
+
+        # Generate embedding
+        embedding = self._model.encode(text, show_progress_bar=False)
+        embedding_list = embedding.tolist()
+        original_dim = len(embedding_list)
+
+        # Pad to 1536 dimensions
+        if len(embedding_list) < 1536:
+            embedding_list = embedding_list + [0.0] * (1536 - len(embedding_list))
+
+        # Cache the embedding
+        store_cached_embedding(
+            self.spec.database_url,
+            content_hash,
+            embedding_list,
+            original_dim,
+            self.spec.model
+        )
+
+        return np.array(embedding_list, dtype=np.float32)
+
+
+# =============================================================================
 # Transform Flow for Reusable Embedding
 # =============================================================================
 
@@ -490,6 +706,25 @@ def text_to_embedding(
     """
     return text.transform(
         cocoindex.functions.SentenceTransformerEmbed(model=EMBEDDING_MODEL)
+    )
+
+
+@cocoindex.transform_flow()
+def text_to_embedding_cached(
+    text: cocoindex.DataSlice[str],
+) -> cocoindex.DataSlice[NDArray[np.float32]]:
+    """
+    Embed text using SentenceTransformer model with caching.
+
+    Uses content-hash based cache to skip embedding generation for
+    unchanged content.
+    """
+    database_url = os.environ.get("COCOINDEX_DATABASE_URL", "")
+    return text.transform(
+        CachedSentenceTransformerEmbed(
+            model=EMBEDDING_MODEL,
+            database_url=database_url
+        )
     )
 
 
@@ -519,12 +754,16 @@ def code_embedding_flow(
     # Pre-compute repo metadata
     repo_id = generate_repo_id(REPO_URL)
 
+    # Reset cache stats for this flow execution
+    reset_cache_stats()
+
     print(f"Initializing CodeEmbedding flow...")
     print(f"  Repository: {REPO_URL}")
     print(f"  Branch: {REPO_BRANCH}")
     print(f"  Repo ID: {repo_id}")
     print(f"  Path: {REPO_PATH}")
     print(f"  Embedding Model: {EMBEDDING_MODEL}")
+    print(f"  Embedding Cache: enabled")
 
     # Add LocalFile source with pattern-based filtering
     data_scope["source_files"] = flow_builder.add_source(
@@ -572,8 +811,8 @@ def code_embedding_flow(
 
         # Process each chunk
         with file["chunks"].row() as chunk:
-            # Generate embedding for the chunk content
-            chunk["embedding"] = text_to_embedding(chunk["content"])
+            # Generate embedding for the chunk content (with caching)
+            chunk["embedding"] = text_to_embedding_cached(chunk["content"])
 
             # Collect chunk with all metadata
             chunks_collector.collect(
@@ -785,6 +1024,7 @@ def run_full_indexing() -> dict:
     print(f"Repo ID: {repo_id}")
     print(f"Path: {REPO_PATH}")
     print(f"Model: {EMBEDDING_MODEL}")
+    print(f"Embedding Cache: enabled")
     print("=" * 60)
 
     # Initialize CocoIndex
@@ -814,6 +1054,55 @@ def run_full_indexing() -> dict:
     return result
 
 
+def print_cache_stats() -> None:
+    """Print current embedding cache statistics."""
+    stats = get_cache_stats()
+    print("Embedding Cache Statistics:")
+    print(f"  Cache hits: {stats.hits}")
+    print(f"  Cache misses: {stats.misses}")
+    print(f"  Total requests: {stats.total}")
+    print(f"  Hit rate: {stats.hit_rate:.1%}")
+
+
+def get_cache_table_stats(database_url: str) -> dict:
+    """
+    Get statistics about the embedding cache table.
+
+    Args:
+        database_url: PostgreSQL connection string
+
+    Returns:
+        Dictionary with cache table statistics
+    """
+    try:
+        conn = psycopg.connect(database_url)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) as total_entries,
+                    COUNT(DISTINCT model_name) as models,
+                    SUM(hit_count) as total_hits,
+                    MIN(created_at) as oldest_entry,
+                    MAX(last_used_at) as most_recent_use
+                FROM embedding_cache
+            """)
+            row = cur.fetchone()
+        conn.close()
+
+        if row:
+            return {
+                "total_entries": row[0] or 0,
+                "models": row[1] or 0,
+                "total_hits": row[2] or 0,
+                "oldest_entry": str(row[3]) if row[3] else None,
+                "most_recent_use": str(row[4]) if row[4] else None,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+    return {"total_entries": 0}
+
+
 # Entry point for CLI usage
 if __name__ == "__main__":
     import sys
@@ -826,6 +1115,16 @@ if __name__ == "__main__":
             sys.exit(1)
         count = export_relationships_to_postgres(database_url)
         print(f"Extracted {count} relationships")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--cache-stats":
+        # Print cache table statistics
+        database_url = os.environ.get("COCOINDEX_DATABASE_URL")
+        if not database_url:
+            print("Error: COCOINDEX_DATABASE_URL required", file=sys.stderr)
+            sys.exit(1)
+        stats = get_cache_table_stats(database_url)
+        print("Embedding Cache Table Statistics:")
+        for key, value in stats.items():
+            print(f"  {key}: {value}")
     else:
         # Run full indexing info
         run_full_indexing()

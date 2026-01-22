@@ -211,6 +211,30 @@ CREATE INDEX IF NOT EXISTS file_imports_target_idx ON file_imports (target_file,
 CREATE INDEX IF NOT EXISTS file_imports_repo_branch_idx ON file_imports (repo_id, branch);
 
 -- ============================================================================
+-- Embedding Cache Table
+-- ============================================================================
+-- Caches embeddings by content hash to avoid re-embedding unchanged content.
+-- Uses SHA-256 hash of the content as the cache key, combined with the model name
+-- to ensure embeddings are invalidated when the model changes.
+
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    content_hash TEXT NOT NULL,           -- SHA-256 hash of the content
+    model_name TEXT NOT NULL,             -- Embedding model used (e.g., 'sentence-transformers/all-MiniLM-L6-v2')
+    embedding VECTOR(1536) NOT NULL,      -- The cached embedding (padded to 1536 dims)
+    embedding_dim INTEGER NOT NULL,       -- Original embedding dimension before padding
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    hit_count INTEGER NOT NULL DEFAULT 0, -- Number of times this cache entry was used
+    PRIMARY KEY (content_hash, model_name)
+);
+
+-- Index for cleanup queries (find old/unused cache entries)
+CREATE INDEX IF NOT EXISTS embedding_cache_last_used_idx ON embedding_cache (last_used_at);
+
+-- Index for statistics queries
+CREATE INDEX IF NOT EXISTS embedding_cache_model_idx ON embedding_cache (model_name);
+
+-- ============================================================================
 -- Legacy Table (for backward compatibility during migration)
 -- ============================================================================
 -- Keep the old code_embeddings table for gradual migration.

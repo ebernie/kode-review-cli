@@ -23,9 +23,11 @@ import os
 import sys
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Generator
 
+import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
 from sentence_transformers import SentenceTransformer
@@ -33,6 +35,125 @@ from sentence_transformers import SentenceTransformer
 # Import AST-based chunking
 from ast_chunker import chunk_code_ast, CodeChunk
 from import_graph import build_and_store_import_graph
+
+
+# =============================================================================
+# Embedding Cache
+# =============================================================================
+
+
+@dataclass
+class CacheStats:
+    """Statistics for embedding cache performance."""
+    hits: int = 0
+    misses: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def hit_rate(self) -> float:
+        if self.total == 0:
+            return 0.0
+        return self.hits / self.total
+
+
+def compute_content_hash(content: str) -> str:
+    """
+    Compute SHA-256 hash of content for cache lookup.
+
+    Args:
+        content: The text content to hash
+
+    Returns:
+        Hexadecimal SHA-256 hash string
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def lookup_cached_embeddings(
+    conn: psycopg.Connection,
+    content_hashes: list[str],
+    model_name: str
+) -> dict[str, list[float]]:
+    """
+    Look up cached embeddings by content hash.
+
+    Args:
+        conn: Database connection
+        content_hashes: List of SHA-256 content hashes to look up
+        model_name: The embedding model name
+
+    Returns:
+        Dictionary mapping content_hash -> embedding (as list of floats)
+    """
+    if not content_hashes:
+        return {}
+
+    with conn.cursor() as cur:
+        # Batch lookup for efficiency
+        cur.execute(
+            """
+            UPDATE embedding_cache
+            SET last_used_at = NOW(), hit_count = hit_count + 1
+            WHERE content_hash = ANY(%s) AND model_name = %s
+            RETURNING content_hash, embedding
+            """,
+            (content_hashes, model_name)
+        )
+        rows = cur.fetchall()
+        conn.commit()
+
+    result: dict[str, list[float]] = {}
+    for content_hash, embedding in rows:
+        # Convert pgvector array to list
+        if embedding is not None:
+            result[content_hash] = list(embedding)
+
+    return result
+
+
+def store_cached_embeddings(
+    conn: psycopg.Connection,
+    embeddings_to_cache: list[tuple[str, list[float], int]],
+    model_name: str
+) -> int:
+    """
+    Store embeddings in the cache.
+
+    Args:
+        conn: Database connection
+        embeddings_to_cache: List of (content_hash, embedding, original_dim) tuples
+        model_name: The embedding model name
+
+    Returns:
+        Number of embeddings stored
+    """
+    if not embeddings_to_cache:
+        return 0
+
+    stored = 0
+    with conn.cursor() as cur:
+        for content_hash, embedding, original_dim in embeddings_to_cache:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO embedding_cache (content_hash, model_name, embedding, embedding_dim)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (content_hash, model_name) DO UPDATE SET
+                        last_used_at = NOW(),
+                        hit_count = embedding_cache.hit_count + 1
+                    """,
+                    (content_hash, model_name, embedding, original_dim)
+                )
+                stored += 1
+            except Exception as e:
+                print(f"  Warning: Failed to cache embedding for {content_hash[:8]}...: {e}", file=sys.stderr)
+
+        conn.commit()
+
+    return stored
 
 
 # Configuration from environment
@@ -154,7 +275,7 @@ def delete_existing_index(conn: psycopg.Connection, repo_id: str, branch: str) -
 
 
 def index_repository() -> dict:
-    """Main indexing function."""
+    """Main indexing function with embedding cache support."""
     repo_id = generate_repo_id(REPO_URL)
 
     print(f"Starting indexing...")
@@ -164,16 +285,12 @@ def index_repository() -> dict:
     print(f"  Path: {REPO_PATH}")
     print(f"  Model: {EMBEDDING_MODEL}")
 
-    # Load embedding model
-    print("Loading embedding model...")
-    model = SentenceTransformer(EMBEDDING_MODEL)
-
-    # Connect to database
+    # Connect to database first (needed for cache lookup)
     print("Connecting to database...")
     conn = psycopg.connect(DATABASE_URL)
     register_vector(conn)
 
-    # Ensure table exists
+    # Ensure table exists (including embedding_cache table)
     ensure_table_exists(conn)
 
     # Delete existing index for this repo/branch
@@ -218,24 +335,84 @@ def index_repository() -> dict:
         conn.close()
         return {"files": 0, "chunks": 0}
 
-    # Generate embeddings in batches
-    print("Generating embeddings...")
-    batch_size = 64
-    all_embeddings = []
+    # Compute content hashes for all chunks
+    print("Computing content hashes...")
+    chunk_hashes = [compute_content_hash(chunk.code) for chunk in all_chunks]
 
-    for i in range(0, len(all_chunks), batch_size):
-        batch = all_chunks[i:i + batch_size]
-        texts = [chunk.code for chunk in batch]
-        embeddings = model.encode(texts, show_progress_bar=False)
-        all_embeddings.extend(embeddings)
+    # Look up cached embeddings
+    print("Checking embedding cache...")
+    cached_embeddings = lookup_cached_embeddings(conn, chunk_hashes, EMBEDDING_MODEL)
 
-        if (i + batch_size) % 256 == 0:
-            print(f"  Generated embeddings for {min(i + batch_size, len(all_chunks))}/{len(all_chunks)} chunks...")
+    # Track cache statistics
+    cache_stats = CacheStats()
+
+    # Identify chunks that need new embeddings
+    chunks_to_embed: list[tuple[int, CodeChunk]] = []  # (index, chunk)
+    all_embeddings: list[list[float]] = [[] for _ in all_chunks]  # Pre-allocate
+
+    for i, (chunk, content_hash) in enumerate(zip(all_chunks, chunk_hashes)):
+        if content_hash in cached_embeddings:
+            # Cache hit - use cached embedding
+            all_embeddings[i] = cached_embeddings[content_hash]
+            cache_stats.hits += 1
+        else:
+            # Cache miss - need to generate embedding
+            chunks_to_embed.append((i, chunk))
+            cache_stats.misses += 1
+
+    print(f"  Cache hits: {cache_stats.hits}, misses: {cache_stats.misses}")
+    print(f"  Cache hit rate: {cache_stats.hit_rate:.1%}")
+
+    # Generate embeddings for cache misses
+    model = None
+    embeddings_to_cache: list[tuple[str, list[float], int]] = []
+
+    if chunks_to_embed:
+        print(f"Generating embeddings for {len(chunks_to_embed)} uncached chunks...")
+        print("Loading embedding model...")
+        model = SentenceTransformer(EMBEDDING_MODEL)
+
+        batch_size = 64
+        for batch_start in range(0, len(chunks_to_embed), batch_size):
+            batch = chunks_to_embed[batch_start:batch_start + batch_size]
+            texts = [chunk.code for _, chunk in batch]
+
+            embeddings = model.encode(texts, show_progress_bar=False)
+
+            for j, (original_idx, chunk) in enumerate(batch):
+                embedding = embeddings[j]
+                embedding_list = embedding.tolist()
+                original_dim = len(embedding_list)
+
+                # Pad to 1536 dimensions if needed
+                if len(embedding_list) < 1536:
+                    embedding_list = embedding_list + [0.0] * (1536 - len(embedding_list))
+
+                all_embeddings[original_idx] = embedding_list
+
+                # Queue for caching
+                content_hash = chunk_hashes[original_idx]
+                embeddings_to_cache.append((content_hash, embedding_list, original_dim))
+
+            if (batch_start + batch_size) % 256 == 0:
+                print(f"  Generated embeddings for {min(batch_start + batch_size, len(chunks_to_embed))}/{len(chunks_to_embed)} chunks...")
+
+        # Store new embeddings in cache
+        if embeddings_to_cache:
+            print(f"Caching {len(embeddings_to_cache)} new embeddings...")
+            cached_count = store_cached_embeddings(conn, embeddings_to_cache, EMBEDDING_MODEL)
+            print(f"  Cached {cached_count} embeddings")
+    else:
+        print("All embeddings retrieved from cache - skipping model load")
 
     # Insert into database
     print("Writing to database...")
     with conn.cursor() as cur:
-        for chunk, embedding in zip(all_chunks, all_embeddings):
+        for chunk, embedding_list in zip(all_chunks, all_embeddings):
+            # Embeddings are already lists (from cache or newly generated)
+            # For legacy table, use only first 384 dimensions
+            legacy_embedding = embedding_list[:384] if len(embedding_list) >= 384 else embedding_list
+
             # Insert into legacy code_embeddings table for backward compatibility
             cur.execute(
                 """
@@ -258,7 +435,7 @@ def index_repository() -> dict:
                     chunk.code,
                     chunk.start_line,
                     chunk.end_line,
-                    embedding.tolist()
+                    legacy_embedding
                 )
             )
 
@@ -287,11 +464,7 @@ def index_repository() -> dict:
             imports = getattr(chunk, 'imports', [])
             exports = getattr(chunk, 'exports', [])
 
-            # Pad embedding to 1536 dimensions if needed (legacy model uses 384)
-            embedding_list = embedding.tolist()
-            if len(embedding_list) < 1536:
-                embedding_list = embedding_list + [0.0] * (1536 - len(embedding_list))
-
+            # embedding_list is already padded to 1536 dimensions from cache or generation
             cur.execute(
                 """
                 INSERT INTO chunks
@@ -335,6 +508,9 @@ def index_repository() -> dict:
     print(f"Indexing complete!")
     print(f"  Files: {files_processed}")
     print(f"  Chunks: {chunks_indexed}")
+    print(f"  Cache hits: {cache_stats.hits}")
+    print(f"  Cache misses: {cache_stats.misses}")
+    print(f"  Cache hit rate: {cache_stats.hit_rate:.1%}")
 
     # Output result as JSON for CLI to parse
     result = {
@@ -347,6 +523,9 @@ def index_repository() -> dict:
         "import_edges": import_stats.get("edges", 0),
         "circular_dependencies": import_stats.get("circular_dependencies", 0),
         "hub_files": import_stats.get("hub_files", 0),
+        "cache_hits": cache_stats.hits,
+        "cache_misses": cache_stats.misses,
+        "cache_hit_rate": round(cache_stats.hit_rate, 4),
     }
 
     print(f"\n__RESULT__:{json.dumps(result)}")
