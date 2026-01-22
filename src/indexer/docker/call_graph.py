@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Call graph builder for TypeScript/JavaScript code using tree-sitter.
+Call graph builder for TypeScript/JavaScript/Python code using tree-sitter.
 
 This module provides:
-- AST-based extraction of function calls from TS/JS code
+- AST-based extraction of function calls from TS/JS/Python code
 - Graph construction: function -> [called functions]
 - Storage in the relationships table with relationship_type='calls'
-- Support for method calls on classes (e.g., this.method(), obj.method())
+- Support for method calls on classes (e.g., this.method(), self.method(), obj.method())
 
 The call graph is built by parsing the AST of each chunk and extracting
-call_expression nodes, then resolving them to target functions/methods.
+call expression nodes, then resolving them to target functions/methods.
+
+Language-specific handling:
+- TypeScript/JavaScript: call_expression nodes, "this" keyword for instance methods
+- Python: call nodes, "self"/"cls" for instance/class methods, super() for inheritance
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from typing import Generator
 
 import psycopg
 import tree_sitter_javascript
+import tree_sitter_python
 import tree_sitter_typescript
 from tree_sitter import Language, Parser, Node
 
@@ -103,6 +108,19 @@ class CallEdge:
 
 # Node types for function calls by language
 CALL_CONFIG: dict[str, dict] = {
+    # Python
+    ".py": {
+        "language": tree_sitter_python.language(),
+        "call_types": ["call"],
+        "member_expression_type": "attribute",  # Python uses "attribute" for obj.attr
+        "identifier_type": "identifier",
+        "function_types": ["function_definition"],
+        "class_types": ["class_definition"],
+        "method_types": ["function_definition"],  # Methods are just functions inside classes
+        "this_keywords": ["self", "cls"],  # self for instance methods, cls for class methods
+        "super_keyword": "super",  # Python's super() for MRO calls
+    },
+    # JavaScript
     ".js": {
         "language": tree_sitter_javascript.language(),
         "call_types": ["call_expression"],
@@ -182,6 +200,257 @@ def is_supported_language(filename: str) -> bool:
 # =============================================================================
 
 
+def _is_python_file(filename: str) -> bool:
+    """Check if a file is a Python file."""
+    return Path(filename).suffix.lower() == ".py"
+
+
+def _extract_python_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
+    """
+    Extract callee info from a Python call node.
+
+    Python call nodes have structure:
+    - call: func_name(args)  -> identifier + argument_list
+    - call: obj.method(args) -> attribute + argument_list
+    - call: super().method(args) -> chained call
+    """
+    line_number = call_node.start_point[0] + 1
+
+    # Get the function/attribute being called
+    # In Python tree-sitter, call node children are: function + argument_list
+    function_node = call_node.child_by_field_name("function")
+    if function_node is None:
+        # Fallback: look for first non-argument child
+        for child in call_node.children:
+            if child.type not in ["argument_list", "(", ")", ","]:
+                function_node = child
+                break
+
+    if function_node is None:
+        return None
+
+    # Case 1: Direct function call - func()
+    if function_node.type == "identifier":
+        callee_name = function_node.text.decode("utf-8") if function_node.text else ""
+        if callee_name:
+            # Check for super() call - it's a special dynamic pattern
+            if callee_name == "super":
+                return FunctionCall(
+                    callee_name="super",
+                    receiver=None,
+                    is_method_call=False,
+                    line_number=line_number,
+                    is_dynamic=True,  # Flag as dynamic since resolution depends on MRO
+                )
+            return FunctionCall(
+                callee_name=callee_name,
+                receiver=None,
+                is_method_call=False,
+                line_number=line_number,
+            )
+
+    # Case 2: Method call - obj.method() or self.method()
+    elif function_node.type == "attribute":
+        # Python attribute node: object.attribute
+        # Fields: "object" and "attribute"
+        object_node = function_node.child_by_field_name("object")
+        attribute_node = function_node.child_by_field_name("attribute")
+
+        if attribute_node is None or object_node is None:
+            # Fallback: manually extract from children
+            children = list(function_node.children)
+            if len(children) >= 3:
+                # Typically: object, ".", attribute
+                object_node = children[0]
+                attribute_node = children[-1]
+
+        if attribute_node is not None:
+            callee_name = attribute_node.text.decode("utf-8") if attribute_node.text else ""
+            receiver = None
+            is_dynamic = False
+
+            if object_node is not None:
+                receiver_text = object_node.text.decode("utf-8") if object_node.text else ""
+
+                # Check for self/cls keywords (Python's equivalent of "this")
+                if receiver_text in config.get("this_keywords", ["self", "cls"]):
+                    receiver = "self"  # Normalize to "self" for storage
+                # Check for super() result
+                elif object_node.type == "call":
+                    # Check if it's super() call
+                    super_func = object_node.child_by_field_name("function")
+                    if super_func and super_func.text and super_func.text.decode("utf-8") == "super":
+                        receiver = "super"
+                        is_dynamic = True  # super().method() resolution depends on MRO
+                    else:
+                        receiver = "<call_result>"
+                        is_dynamic = True
+                # Check for identifier (variable or class name)
+                elif object_node.type == "identifier":
+                    receiver = receiver_text
+                # Check for nested attribute access like obj.prop.method()
+                elif object_node.type == "attribute":
+                    # Get the root object
+                    root_obj = object_node
+                    while root_obj.type == "attribute":
+                        child_obj = root_obj.child_by_field_name("object")
+                        if child_obj is None:
+                            children = list(root_obj.children)
+                            if children:
+                                child_obj = children[0]
+                        if child_obj is None or child_obj.type != "attribute":
+                            break
+                        root_obj = child_obj
+
+                    if root_obj.child_by_field_name("object"):
+                        root_obj = root_obj.child_by_field_name("object")
+                    elif root_obj.children:
+                        root_obj = list(root_obj.children)[0]
+
+                    if root_obj:
+                        root_text = root_obj.text.decode("utf-8") if root_obj.text else None
+                        # Check if root is self/cls
+                        if root_text in config.get("this_keywords", ["self", "cls"]):
+                            receiver = "self"
+                        else:
+                            receiver = root_text
+                else:
+                    # Dynamic receiver we can't resolve
+                    receiver = "<dynamic>"
+                    is_dynamic = True
+
+            if callee_name:
+                return FunctionCall(
+                    callee_name=callee_name,
+                    receiver=receiver,
+                    is_method_call=True,
+                    line_number=line_number,
+                    is_dynamic=is_dynamic,
+                )
+
+    # Case 3: Lambda or other complex patterns
+    elif function_node.type in ["parenthesized_expression", "lambda"]:
+        return FunctionCall(
+            callee_name="<anonymous>",
+            receiver=None,
+            is_method_call=False,
+            line_number=line_number,
+            is_dynamic=True,
+        )
+
+    return None
+
+
+def _extract_js_ts_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
+    """
+    Extract callee info from a JavaScript/TypeScript call_expression node.
+    """
+    # Get the function part of the call (the thing being called)
+    function_node = call_node.child_by_field_name("function")
+    if function_node is None:
+        # Try first child as fallback
+        for child in call_node.children:
+            if child.type != "arguments":
+                function_node = child
+                break
+
+    if function_node is None:
+        return None
+
+    line_number = call_node.start_point[0] + 1  # Convert to 1-indexed
+
+    # Case 1: Direct function call - func()
+    if function_node.type == config["identifier_type"]:
+        callee_name = function_node.text.decode("utf-8") if function_node.text else ""
+        if callee_name:
+            return FunctionCall(
+                callee_name=callee_name,
+                receiver=None,
+                is_method_call=False,
+                line_number=line_number,
+            )
+
+    # Case 2: Method call - obj.method() or this.method()
+    elif function_node.type == config["member_expression_type"]:
+        # Get the property (method name)
+        property_node = function_node.child_by_field_name("property")
+        object_node = function_node.child_by_field_name("object")
+
+        if property_node is None or object_node is None:
+            # Try to extract manually from children
+            children = list(function_node.children)
+            if len(children) >= 3:
+                # Typically: object, ".", property
+                object_node = children[0]
+                property_node = children[-1]
+
+        if property_node is not None:
+            callee_name = property_node.text.decode("utf-8") if property_node.text else ""
+            receiver = None
+            is_dynamic = False
+
+            if object_node is not None:
+                receiver_text = object_node.text.decode("utf-8") if object_node.text else ""
+
+                # Check for "this" keyword
+                if receiver_text in config.get("this_keywords", ["this"]):
+                    receiver = "this"
+                # Check for identifier (variable or class name)
+                elif object_node.type == config["identifier_type"]:
+                    receiver = receiver_text
+                # Check for chained calls like obj.getService().method()
+                elif object_node.type == "call_expression":
+                    receiver = "<call_result>"
+                    is_dynamic = True
+                # Check for nested member access like obj.prop.method()
+                elif object_node.type == config["member_expression_type"]:
+                    # Get the root object
+                    root_obj = object_node
+                    while root_obj.type == config["member_expression_type"]:
+                        child_obj = root_obj.child_by_field_name("object")
+                        if child_obj is None:
+                            children = list(root_obj.children)
+                            if children:
+                                child_obj = children[0]
+                        if child_obj is None or child_obj.type != config["member_expression_type"]:
+                            break
+                        root_obj = child_obj
+
+                    if root_obj.child_by_field_name("object"):
+                        root_obj = root_obj.child_by_field_name("object")
+                    elif root_obj.children:
+                        root_obj = list(root_obj.children)[0]
+
+                    if root_obj:
+                        receiver = root_obj.text.decode("utf-8") if root_obj.text else None
+                else:
+                    # Dynamic receiver we can't resolve
+                    receiver = "<dynamic>"
+                    is_dynamic = True
+
+            if callee_name:
+                return FunctionCall(
+                    callee_name=callee_name,
+                    receiver=receiver,
+                    is_method_call=True,
+                    line_number=line_number,
+                    is_dynamic=is_dynamic,
+                )
+
+    # Case 3: Immediately invoked function expression (IIFE) or other complex patterns
+    # These are harder to resolve statically
+    elif function_node.type in ["parenthesized_expression", "arrow_function", "function"]:
+        return FunctionCall(
+            callee_name="<anonymous>",
+            receiver=None,
+            is_method_call=False,
+            line_number=line_number,
+            is_dynamic=True,
+        )
+
+    return None
+
+
 def extract_calls_from_code(
     content: str,
     filename: str,
@@ -211,113 +480,14 @@ def extract_calls_from_code(
     tree = parser.parse(source_bytes)
 
     calls: list[FunctionCall] = []
+    is_python = _is_python_file(filename)
 
     def extract_callee_info(call_node: Node) -> FunctionCall | None:
         """Extract the callee name and receiver from a call expression."""
-        # Get the function part of the call (the thing being called)
-        function_node = call_node.child_by_field_name("function")
-        if function_node is None:
-            # Try first child as fallback
-            for child in call_node.children:
-                if child.type != "arguments":
-                    function_node = child
-                    break
-
-        if function_node is None:
-            return None
-
-        line_number = call_node.start_point[0] + 1  # Convert to 1-indexed
-
-        # Case 1: Direct function call - func()
-        if function_node.type == config["identifier_type"]:
-            callee_name = function_node.text.decode("utf-8") if function_node.text else ""
-            if callee_name:
-                return FunctionCall(
-                    callee_name=callee_name,
-                    receiver=None,
-                    is_method_call=False,
-                    line_number=line_number,
-                )
-
-        # Case 2: Method call - obj.method() or this.method()
-        elif function_node.type == config["member_expression_type"]:
-            # Get the property (method name)
-            property_node = function_node.child_by_field_name("property")
-            object_node = function_node.child_by_field_name("object")
-
-            if property_node is None or object_node is None:
-                # Try to extract manually from children
-                children = list(function_node.children)
-                if len(children) >= 3:
-                    # Typically: object, ".", property
-                    object_node = children[0]
-                    property_node = children[-1]
-
-            if property_node is not None:
-                callee_name = property_node.text.decode("utf-8") if property_node.text else ""
-                receiver = None
-                is_dynamic = False
-
-                if object_node is not None:
-                    receiver_text = object_node.text.decode("utf-8") if object_node.text else ""
-
-                    # Check for "this" keyword
-                    if receiver_text in config.get("this_keywords", ["this"]):
-                        receiver = "this"
-                    # Check for identifier (variable or class name)
-                    elif object_node.type == config["identifier_type"]:
-                        receiver = receiver_text
-                    # Check for chained calls like obj.getService().method()
-                    elif object_node.type == "call_expression":
-                        receiver = "<call_result>"
-                        is_dynamic = True
-                    # Check for nested member access like obj.prop.method()
-                    elif object_node.type == config["member_expression_type"]:
-                        # Get the root object
-                        root_obj = object_node
-                        while root_obj.type == config["member_expression_type"]:
-                            child_obj = root_obj.child_by_field_name("object")
-                            if child_obj is None:
-                                children = list(root_obj.children)
-                                if children:
-                                    child_obj = children[0]
-                            if child_obj is None or child_obj.type != config["member_expression_type"]:
-                                break
-                            root_obj = child_obj
-
-                        if root_obj.child_by_field_name("object"):
-                            root_obj = root_obj.child_by_field_name("object")
-                        elif root_obj.children:
-                            root_obj = list(root_obj.children)[0]
-
-                        if root_obj:
-                            receiver = root_obj.text.decode("utf-8") if root_obj.text else None
-                    else:
-                        # Dynamic receiver we can't resolve
-                        receiver = "<dynamic>"
-                        is_dynamic = True
-
-                if callee_name:
-                    return FunctionCall(
-                        callee_name=callee_name,
-                        receiver=receiver,
-                        is_method_call=True,
-                        line_number=line_number,
-                        is_dynamic=is_dynamic,
-                    )
-
-        # Case 3: Immediately invoked function expression (IIFE) or other complex patterns
-        # These are harder to resolve statically
-        elif function_node.type in ["parenthesized_expression", "arrow_function", "function"]:
-            return FunctionCall(
-                callee_name="<anonymous>",
-                receiver=None,
-                is_method_call=False,
-                line_number=line_number,
-                is_dynamic=True,
-            )
-
-        return None
+        if is_python:
+            return _extract_python_callee_info(call_node, config)
+        else:
+            return _extract_js_ts_callee_info(call_node, config)
 
     def traverse(node: Node) -> None:
         """Recursively traverse the AST and collect calls."""
@@ -515,7 +685,8 @@ class CallGraphBuilder:
         callee_name = call.callee_name
 
         # Skip very common built-in functions that aren't defined in user code
-        builtin_names = {
+        # JavaScript/TypeScript builtins
+        js_builtins = {
             "console", "log", "error", "warn", "info", "debug",  # console methods
             "require", "import", "export",  # module system
             "setTimeout", "setInterval", "clearTimeout", "clearInterval",
@@ -529,6 +700,35 @@ class CallGraphBuilder:
             "addEventListener", "removeEventListener", "querySelector", "querySelectorAll",
             "createElement", "getElementById", "getElementsByClassName",
         }
+
+        # Python builtins
+        python_builtins = {
+            # Built-in functions
+            "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
+            "tuple", "set", "frozenset", "bytes", "bytearray", "memoryview",
+            "type", "isinstance", "issubclass", "callable", "hasattr", "getattr",
+            "setattr", "delattr", "property", "classmethod", "staticmethod",
+            "super", "object", "id", "hash", "repr", "ascii", "bin", "hex", "oct",
+            "chr", "ord", "format", "vars", "dir", "help", "input",
+            "open", "file", "read", "write", "close", "readline", "readlines",
+            "abs", "divmod", "pow", "round", "min", "max", "sum", "sorted", "reversed",
+            "enumerate", "zip", "map", "filter", "reduce", "any", "all", "next", "iter",
+            "slice", "complex", "eval", "exec", "compile", "globals", "locals",
+            "breakpoint", "exit", "quit",
+            # Common methods on built-in types
+            "append", "extend", "insert", "remove", "pop", "clear", "index", "count",
+            "sort", "copy", "keys", "values", "items", "get", "update", "setdefault",
+            "split", "join", "strip", "lstrip", "rstrip", "replace", "find", "rfind",
+            "startswith", "endswith", "upper", "lower", "title", "capitalize",
+            "format", "encode", "decode",
+            # Exception handling
+            "raise", "Exception", "BaseException", "ValueError", "TypeError",
+            "KeyError", "IndexError", "AttributeError", "ImportError", "RuntimeError",
+            # Common stdlib functions (often called without module prefix)
+            "sleep", "time", "datetime", "path", "exists", "join", "makedirs",
+        }
+
+        builtin_names = js_builtins | python_builtins
 
         if callee_name in builtin_names:
             return None
@@ -554,8 +754,8 @@ class CallGraphBuilder:
                 if cid != source_chunk.chunk_id:
                     return cid
 
-        # Case 2: Method call with "this"
-        elif call.receiver == "this":
+        # Case 2: Method call with "this" (JS/TS) or "self" (Python)
+        elif call.receiver in ("this", "self"):
             # Look for the method in chunks of the same file with chunk_type 'class' or 'method'
             for chunk in chunks:
                 if chunk.file_path == source_chunk.file_path and chunk.chunk_id != source_chunk.chunk_id:
@@ -586,7 +786,7 @@ class CallGraphBuilder:
 
     def build_call_graph(self) -> list[CallEdge]:
         """
-        Build the call graph for all TypeScript/JavaScript chunks.
+        Build the call graph for all supported language chunks (TS/JS/Python).
 
         Returns a list of CallEdge objects representing the call relationships.
         """

@@ -46,8 +46,10 @@ class TestLanguageSupport(unittest.TestCase):
         self.assertTrue(is_supported_language("test.jsx"))
         self.assertTrue(is_supported_language("test.mjs"))
 
+    def test_python_supported(self):
+        self.assertTrue(is_supported_language("test.py"))
+
     def test_unsupported_languages(self):
-        self.assertFalse(is_supported_language("test.py"))
         self.assertFalse(is_supported_language("test.go"))
         self.assertFalse(is_supported_language("test.rs"))
         self.assertFalse(is_supported_language("test.java"))
@@ -55,7 +57,7 @@ class TestLanguageSupport(unittest.TestCase):
     def test_config_exists_for_supported(self):
         self.assertIsNotNone(get_call_config("test.ts"))
         self.assertIsNotNone(get_call_config("test.js"))
-        self.assertIsNone(get_call_config("test.py"))
+        self.assertIsNotNone(get_call_config("test.py"))
 
 
 @unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
@@ -402,10 +404,13 @@ const z = x + y;
 
     def test_unsupported_language(self):
         code = '''
-def hello():
-    print("Hello")
+package main
+
+func hello() {
+    fmt.Println("Hello")
+}
 '''
-        calls = extract_calls_from_code(code, "test.py")
+        calls = extract_calls_from_code(code, "test.go")
         self.assertEqual(len(calls), 0)
 
     def test_syntax_error_partial_extraction(self):
@@ -530,6 +535,419 @@ function process(service: DataService) {
         fetch_calls = [c for c in calls if c.callee_name == "fetch"]
         self.assertEqual(len(fetch_calls), 1)
         self.assertEqual(fetch_calls[0].receiver, "service")
+
+
+# =============================================================================
+# Python Call Graph Tests
+# =============================================================================
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonDirectFunctionCalls(unittest.TestCase):
+    """Test extraction of direct function calls in Python."""
+
+    def test_simple_function_call(self):
+        code = '''
+def greet():
+    print("Hello")
+
+def main():
+    greet()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("greet", call_names)
+        self.assertIn("print", call_names)
+
+    def test_multiple_function_calls(self):
+        code = '''
+def a():
+    return 1
+
+def b():
+    return 2
+
+def c():
+    return 3
+
+def main():
+    a()
+    b()
+    c()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls if not c.is_method_call]
+        self.assertIn("a", call_names)
+        self.assertIn("b", call_names)
+        self.assertIn("c", call_names)
+
+    def test_nested_function_calls(self):
+        code = '''
+def outer(x):
+    return inner(transform(x))
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("inner", call_names)
+        self.assertIn("transform", call_names)
+
+    def test_function_call_with_arguments(self):
+        code = '''
+def process(data, options):
+    return transform(data, validate(options))
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("transform", call_names)
+        self.assertIn("validate", call_names)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonMethodCalls(unittest.TestCase):
+    """Test extraction of method calls in Python (obj.method())."""
+
+    def test_self_method_call(self):
+        code = '''
+class MyClass:
+    def helper(self):
+        return 42
+
+    def do_work(self):
+        return self.helper()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        helper_calls = [c for c in calls if c.callee_name == "helper"]
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0].receiver, "self")
+        self.assertTrue(helper_calls[0].is_method_call)
+
+    def test_object_method_call(self):
+        code = '''
+def process(service):
+    result = service.get_data()
+    return service.transform(result)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        method_calls = [c for c in calls if c.is_method_call]
+
+        method_names = [c.callee_name for c in method_calls]
+        self.assertIn("get_data", method_names)
+        self.assertIn("transform", method_names)
+
+        for call in method_calls:
+            if call.callee_name in ["get_data", "transform"]:
+                self.assertEqual(call.receiver, "service")
+
+    def test_static_method_call(self):
+        code = '''
+def create_user():
+    return UserFactory.create("test")
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        create_calls = [c for c in calls if c.callee_name == "create"]
+        self.assertEqual(len(create_calls), 1)
+        self.assertEqual(create_calls[0].receiver, "UserFactory")
+        self.assertTrue(create_calls[0].is_method_call)
+
+    def test_chained_method_calls(self):
+        code = '''
+def build_query():
+    return db.select().from_table("users").where("active", True)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("select", call_names)
+        self.assertIn("from_table", call_names)
+        self.assertIn("where", call_names)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonClassMethods(unittest.TestCase):
+    """Test extraction of class methods with cls and decorators."""
+
+    def test_classmethod_call(self):
+        code = '''
+class MyClass:
+    @classmethod
+    def create(cls, name):
+        return cls(name)
+
+    @classmethod
+    def factory(cls):
+        return cls.create("default")
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        create_calls = [c for c in calls if c.callee_name == "create"]
+        self.assertEqual(len(create_calls), 1)
+        # cls.create() should be treated like self.method()
+        self.assertEqual(create_calls[0].receiver, "self")  # normalized to "self"
+
+    def test_staticmethod_call(self):
+        code = '''
+class Utility:
+    @staticmethod
+    def helper(x):
+        return x * 2
+
+    def process(self, value):
+        return Utility.helper(value)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        helper_calls = [c for c in calls if c.callee_name == "helper"]
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0].receiver, "Utility")
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonSuperCalls(unittest.TestCase):
+    """Test extraction of super() calls for inheritance."""
+
+    def test_super_init_call(self):
+        code = '''
+class Child(Parent):
+    def __init__(self, name):
+        super().__init__(name)
+        self.name = name
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        # super() call
+        super_calls = [c for c in calls if c.callee_name == "super"]
+        self.assertEqual(len(super_calls), 1)
+        self.assertTrue(super_calls[0].is_dynamic)  # super() is dynamic
+
+        # super().__init__ call
+        init_calls = [c for c in calls if c.callee_name == "__init__"]
+        self.assertEqual(len(init_calls), 1)
+        self.assertEqual(init_calls[0].receiver, "super")
+        self.assertTrue(init_calls[0].is_dynamic)  # super().method() is dynamic
+
+    def test_super_method_call(self):
+        code = '''
+class Child(Parent):
+    def do_work(self):
+        result = super().do_work()
+        return result + self.extra_work()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        do_work_calls = [c for c in calls if c.callee_name == "do_work"]
+        # One from super().do_work()
+        super_do_work = [c for c in do_work_calls if c.receiver == "super"]
+        self.assertEqual(len(super_do_work), 1)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonFunctionDefinitions(unittest.TestCase):
+    """Test extraction of function and method definitions in Python."""
+
+    def test_function_declaration(self):
+        code = '''
+def greet(name):
+    return f"Hello, {name}!"
+
+def farewell(name):
+    return f"Goodbye, {name}!"
+'''
+        defs = extract_definitions_from_code(code, "test.py")
+        names = [d.name for d in defs]
+        self.assertIn("greet", names)
+        self.assertIn("farewell", names)
+        self.assertFalse(any(d.is_method for d in defs))
+
+    def test_class_methods(self):
+        code = '''
+class Calculator:
+    def add(self, a, b):
+        return a + b
+
+    def subtract(self, a, b):
+        return a - b
+'''
+        defs = extract_definitions_from_code(code, "test.py")
+        method_defs = [d for d in defs if d.is_method]
+        names = [d.name for d in method_defs]
+        self.assertIn("add", names)
+        self.assertIn("subtract", names)
+
+        for d in method_defs:
+            self.assertEqual(d.class_name, "Calculator")
+
+    def test_mixed_functions_and_methods(self):
+        code = '''
+def helper():
+    return 42
+
+class Service:
+    def process(self):
+        return helper()
+
+def main():
+    svc = Service()
+    svc.process()
+'''
+        defs = extract_definitions_from_code(code, "test.py")
+        function_defs = [d for d in defs if not d.is_method]
+        method_defs = [d for d in defs if d.is_method]
+
+        self.assertEqual(len(function_defs), 2)  # helper, main
+        self.assertEqual(len(method_defs), 1)  # process
+
+        func_names = [d.name for d in function_defs]
+        self.assertIn("helper", func_names)
+        self.assertIn("main", func_names)
+
+        method_names = [d.name for d in method_defs]
+        self.assertIn("process", method_names)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonAsyncCalls(unittest.TestCase):
+    """Test extraction of async/await patterns in Python."""
+
+    def test_async_await_calls(self):
+        code = '''
+async def fetch_data():
+    response = await http_client.get("/api/data")
+    data = await response.json()
+    return process_data(data)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("get", call_names)
+        self.assertIn("json", call_names)
+        self.assertIn("process_data", call_names)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonDecoratorPatterns(unittest.TestCase):
+    """Test handling of decorated functions."""
+
+    def test_decorated_function_calls(self):
+        code = '''
+@decorator
+def my_func():
+    helper()
+    return result()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        # decorator is a call too
+        self.assertIn("decorator", call_names)
+        self.assertIn("helper", call_names)
+        self.assertIn("result", call_names)
+
+    def test_decorator_with_arguments(self):
+        code = '''
+@app.route("/api")
+def endpoint():
+    return process_request()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("route", call_names)
+        self.assertIn("process_request", call_names)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonModuleCalls(unittest.TestCase):
+    """Test module-level function calls."""
+
+    def test_module_function_call(self):
+        code = '''
+import os
+
+def get_path():
+    return os.path.join("/home", "user")
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        # os.path.join - nested attribute access
+        join_calls = [c for c in calls if c.callee_name == "join"]
+        self.assertEqual(len(join_calls), 1)
+
+    def test_from_import_call(self):
+        code = '''
+from pathlib import Path
+
+def get_home():
+    return Path.home()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        home_calls = [c for c in calls if c.callee_name == "home"]
+        self.assertEqual(len(home_calls), 1)
+        self.assertEqual(home_calls[0].receiver, "Path")
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonLineNumbers(unittest.TestCase):
+    """Test that line numbers are correctly captured for Python."""
+
+    def test_line_numbers_for_calls(self):
+        code = '''def main():
+    foo()
+    bar()
+    baz()
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        foo_call = next((c for c in calls if c.callee_name == "foo"), None)
+        bar_call = next((c for c in calls if c.callee_name == "bar"), None)
+        baz_call = next((c for c in calls if c.callee_name == "baz"), None)
+
+        self.assertIsNotNone(foo_call)
+        self.assertIsNotNone(bar_call)
+        self.assertIsNotNone(baz_call)
+
+        # Lines should be in order
+        self.assertLess(foo_call.line_number, bar_call.line_number)
+        self.assertLess(bar_call.line_number, baz_call.line_number)
+
+
+@unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
+class TestPythonEdgeCases(unittest.TestCase):
+    """Test edge cases and error handling for Python."""
+
+    def test_empty_code(self):
+        calls = extract_calls_from_code("", "test.py")
+        self.assertEqual(len(calls), 0)
+
+    def test_no_calls(self):
+        code = '''
+x = 1
+y = 2
+z = x + y
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        self.assertEqual(len(calls), 0)
+
+    def test_lambda_call(self):
+        code = '''
+fn = lambda x: x * 2
+result = fn(5)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        fn_calls = [c for c in calls if c.callee_name == "fn"]
+        self.assertEqual(len(fn_calls), 1)
+
+    def test_comprehension_calls(self):
+        code = '''
+def process(items):
+    return [transform(x) for x in items if validate(x)]
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        call_names = [c.callee_name for c in calls]
+        self.assertIn("transform", call_names)
+        self.assertIn("validate", call_names)
+
+    def test_dynamic_dispatch_flag(self):
+        """Test that dynamic dispatch is properly flagged."""
+        code = '''
+def process(obj):
+    return get_handler().process(obj)
+'''
+        calls = extract_calls_from_code(code, "test.py")
+        process_calls = [c for c in calls if c.callee_name == "process"]
+        # get_handler().process() should be flagged as dynamic
+        dynamic_calls = [c for c in process_calls if c.is_dynamic]
+        self.assertEqual(len(dynamic_calls), 1)
+        self.assertEqual(dynamic_calls[0].receiver, "<call_result>")
 
 
 if __name__ == "__main__":
