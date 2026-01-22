@@ -36,6 +36,8 @@ export type {
   CallGraphDirection,
   CallGraphResult,
   CallGraphOptions,
+  // Incremental indexing types
+  IncrementalIndexOptions,
 } from './types.js'
 
 // Detector
@@ -48,6 +50,7 @@ export {
   isIndexerRunning,
   getIndexerStatus,
   indexRepository,
+  indexRepositoryIncremental,
   resetIndex,
   cleanupIndexer,
   listIndexedRepos,
@@ -55,6 +58,8 @@ export {
   extractRelationships,
   verifyExport,
 } from './docker.js'
+
+export type { IncrementalIndexResult } from './docker.js'
 
 // HTTP client
 export { IndexerClient } from './client.js'

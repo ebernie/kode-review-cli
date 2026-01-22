@@ -69,12 +69,16 @@ function ensureDockerAssets(): string {
     'Dockerfile',
     'main.py',
     'indexer.py',
+    'incremental.py',
     'cocoindex_flow.py',
     'ast_chunker.py',
     'migrate.py',
     'schema.sql',
     'requirements.txt',
     'verify_export.py',
+    'import_graph.py',
+    'hybrid.py',
+    'bm25.py',
   ]
 
   for (const file of files) {
@@ -395,6 +399,191 @@ export async function indexRepository(
 }
 
 /**
+ * Result from incremental indexing operation
+ */
+export interface IncrementalIndexResult {
+  status: string
+  repoUrl: string
+  repoId: string
+  branch: string
+  changedFiles: number
+  addedFiles: number
+  modifiedFiles: number
+  deletedFiles: number
+  chunksAdded: number
+  chunksRemoved: number
+  relationshipsInvalidated: number
+  cacheHits: number
+  cacheMisses: number
+  elapsedSeconds: number
+  error?: string
+}
+
+/**
+ * Index a repository incrementally using git diff.
+ *
+ * This is much faster than full indexing for typical PR scenarios:
+ * 1. Detects changed files using git diff or explicit file list
+ * 2. Only re-indexes changed files
+ * 3. Invalidates relationships when source files change
+ * 4. Updates file metadata
+ *
+ * Performance target: < 5s for typical PR with 10 changed files.
+ *
+ * @param repoPath - Path to the repository
+ * @param repoUrl - Repository URL
+ * @param branch - Branch to index (optional, defaults to current branch or 'main')
+ * @param options - Incremental indexing options
+ */
+export async function indexRepositoryIncremental(
+  repoPath: string,
+  repoUrl: string,
+  branch?: string,
+  options?: {
+    /** Git reference to diff against (default: HEAD~1) */
+    baseRef?: string
+    /** Explicit list of changed files (alternative to git diff) */
+    changedFiles?: string[]
+  }
+): Promise<IncrementalIndexResult> {
+  const config = getConfig()
+
+  // Resolve to absolute path
+  const absoluteRepoPath = resolve(repoPath)
+
+  // Ensure indexer services are running (PostgreSQL + API)
+  const status = await getIndexerStatus()
+  if (!status.running) {
+    await startIndexer()
+  }
+
+  const effectiveBranch = branch || 'main'
+  const baseRef = options?.baseRef || 'HEAD~1'
+
+  logger.info(`Incremental indexing: ${repoUrl}`)
+  logger.info(`Branch: ${effectiveBranch}`)
+  logger.info(`Base ref: ${baseRef}`)
+  logger.info(`Path: ${absoluteRepoPath}`)
+
+  // Build the ephemeral container command
+  const network = getDockerNetwork()
+  const image = getIndexerImage()
+  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+
+  const envVars = [
+    '-e', `COCOINDEX_DATABASE_URL=${dbUrl}`,
+    '-e', `REPO_URL=${repoUrl}`,
+    '-e', `REPO_BRANCH=${effectiveBranch}`,
+    '-e', `REPO_PATH=/repo`,
+    '-e', `EMBEDDING_MODEL=${config.indexer.embeddingModel}`,
+    '-e', `BASE_REF=${baseRef}`,
+  ]
+
+  // Add changed files list if provided
+  if (options?.changedFiles && options.changedFiles.length > 0) {
+    const changedFilesStr = options.changedFiles.join(',')
+    envVars.push('-e', `CHANGED_FILES=${changedFilesStr}`)
+  }
+
+  // Note: Uses exec from utils/exec.js which safely uses execa (no shell injection)
+  const dockerArgs = [
+    'run',
+    '--rm',
+    '--network', network,
+    '-v', `${absoluteRepoPath}:/repo:ro`,
+    ...envVars,
+    image,
+    'python', 'incremental.py'
+  ]
+
+  logger.info('Starting incremental indexer container...')
+
+  // Run the ephemeral container with shorter timeout (incremental should be fast)
+  const result = await exec('docker', dockerArgs, { timeout: 120000 }) // 2 minute timeout
+
+  if (result.exitCode !== 0) {
+    logger.error(`Indexer output:\n${result.stdout}`)
+    logger.error(`Indexer errors:\n${result.stderr}`)
+    throw new Error(`Incremental indexing failed with exit code ${result.exitCode}`)
+  }
+
+  // Parse the result from the output
+  const outputLines = result.stdout.split('\n')
+  let resultJson: {
+    status: string
+    repo_url?: string
+    repo_id?: string
+    branch?: string
+    changed_files?: number
+    added_files?: number
+    modified_files?: number
+    deleted_files?: number
+    chunks_added?: number
+    chunks_removed?: number
+    relationships_invalidated?: number
+    cache_hits?: number
+    cache_misses?: number
+    elapsed_seconds?: number
+    error?: string
+  } | null = null
+
+  for (const line of outputLines) {
+    if (line.startsWith('__RESULT__:')) {
+      try {
+        resultJson = JSON.parse(line.substring('__RESULT__:'.length))
+      } catch {
+        // Ignore parse errors
+      }
+    }
+  }
+
+  if (resultJson?.status === 'success') {
+    logger.success(
+      `Incremental indexing complete in ${resultJson.elapsed_seconds?.toFixed(2)}s: ` +
+      `${resultJson.chunks_added} chunks added, ${resultJson.chunks_removed} removed`
+    )
+
+    return {
+      status: 'success',
+      repoUrl: resultJson.repo_url || repoUrl,
+      repoId: resultJson.repo_id || '',
+      branch: resultJson.branch || effectiveBranch,
+      changedFiles: resultJson.changed_files || 0,
+      addedFiles: resultJson.added_files || 0,
+      modifiedFiles: resultJson.modified_files || 0,
+      deletedFiles: resultJson.deleted_files || 0,
+      chunksAdded: resultJson.chunks_added || 0,
+      chunksRemoved: resultJson.chunks_removed || 0,
+      relationshipsInvalidated: resultJson.relationships_invalidated || 0,
+      cacheHits: resultJson.cache_hits || 0,
+      cacheMisses: resultJson.cache_misses || 0,
+      elapsedSeconds: resultJson.elapsed_seconds || 0,
+    }
+  } else if (resultJson?.status === 'error') {
+    throw new Error(`Incremental indexing failed: ${resultJson.error}`)
+  }
+
+  // No structured result, but command succeeded
+  logger.success('Incremental indexing complete')
+  return {
+    status: 'success',
+    repoUrl,
+    repoId: '',
+    branch: effectiveBranch,
+    changedFiles: 0,
+    addedFiles: 0,
+    modifiedFiles: 0,
+    deletedFiles: 0,
+    chunksAdded: 0,
+    chunksRemoved: 0,
+    relationshipsInvalidated: 0,
+    cacheHits: 0,
+    cacheMisses: 0,
+    elapsedSeconds: 0,
+  }
+}
+
+/**
  * Reset the index for a repository
  *
  * @param repoUrl - Repository URL
@@ -501,12 +690,16 @@ export async function cleanupIndexer(): Promise<void> {
     'Dockerfile',
     'main.py',
     'indexer.py',
+    'incremental.py',
     'cocoindex_flow.py',
     'ast_chunker.py',
     'migrate.py',
     'schema.sql',
     'requirements.txt',
     'verify_export.py',
+    'import_graph.py',
+    'hybrid.py',
+    'bm25.py',
     '.env',
   ]
 

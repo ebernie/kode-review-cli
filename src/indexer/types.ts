@@ -343,6 +343,17 @@ export interface IndexerStatus {
 }
 
 /**
+ * Options for incremental indexing
+ */
+export interface IncrementalIndexOptions {
+  /** Git reference to diff against (default: HEAD~1) */
+  baseRef?: string
+
+  /** Explicit list of changed files (alternative to git diff) */
+  changedFiles?: string[]
+}
+
+/**
  * File-type strategy overrides from configuration
  */
 export interface FileTypeStrategyOverrides {
