@@ -76,10 +76,12 @@ class ASTNode:
 
 
 # Language configuration: maps file extensions to tree-sitter languages and node types
+# Note: In tree-sitter 0.21+, language bindings return PyCapsule objects that must be
+# wrapped with Language() for use with Parser
 LANGUAGE_CONFIG: dict[str, dict] = {
     # Python
     ".py": {
-        "language": tree_sitter_python.language(),
+        "language": Language(tree_sitter_python.language()),
         "function_types": ["function_definition"],
         "class_types": ["class_definition"],
         "method_types": ["function_definition"],  # Python methods are just functions inside classes
@@ -91,7 +93,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # JavaScript/TypeScript
     ".js": {
-        "language": tree_sitter_javascript.language(),
+        "language": Language(tree_sitter_javascript.language()),
         "function_types": ["function_declaration", "arrow_function", "function_expression", "generator_function_declaration"],
         "class_types": ["class_declaration", "class"],
         "method_types": ["method_definition"],
@@ -102,7 +104,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": ["export_statement"],
     },
     ".jsx": {
-        "language": tree_sitter_javascript.language(),
+        "language": Language(tree_sitter_javascript.language()),
         "function_types": ["function_declaration", "arrow_function", "function_expression", "generator_function_declaration"],
         "class_types": ["class_declaration", "class"],
         "method_types": ["method_definition"],
@@ -113,7 +115,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": ["export_statement"],
     },
     ".ts": {
-        "language": tree_sitter_typescript.language_typescript(),
+        "language": Language(tree_sitter_typescript.language_typescript()),
         "function_types": ["function_declaration", "arrow_function", "function_expression", "generator_function_declaration"],
         "class_types": ["class_declaration"],
         "method_types": ["method_definition", "public_field_definition"],
@@ -125,7 +127,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": ["export_statement"],
     },
     ".tsx": {
-        "language": tree_sitter_typescript.language_tsx(),
+        "language": Language(tree_sitter_typescript.language_tsx()),
         "function_types": ["function_declaration", "arrow_function", "function_expression", "generator_function_declaration"],
         "class_types": ["class_declaration"],
         "method_types": ["method_definition", "public_field_definition"],
@@ -138,7 +140,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # Go
     ".go": {
-        "language": tree_sitter_go.language(),
+        "language": Language(tree_sitter_go.language()),
         "function_types": ["function_declaration"],
         "class_types": ["type_declaration"],  # Go uses type declarations for structs
         "method_types": ["method_declaration"],
@@ -150,7 +152,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # Rust
     ".rs": {
-        "language": tree_sitter_rust.language(),
+        "language": Language(tree_sitter_rust.language()),
         "function_types": ["function_item"],
         "class_types": ["struct_item", "enum_item", "impl_item", "trait_item"],
         "method_types": ["function_item"],  # Methods in Rust are functions inside impl blocks
@@ -162,7 +164,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # Java
     ".java": {
-        "language": tree_sitter_java.language(),
+        "language": Language(tree_sitter_java.language()),
         "function_types": [],  # Java doesn't have standalone functions
         "class_types": ["class_declaration", "interface_declaration", "enum_declaration"],
         "method_types": ["method_declaration", "constructor_declaration"],
@@ -174,7 +176,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # C/C++
     ".c": {
-        "language": tree_sitter_c.language(),
+        "language": Language(tree_sitter_c.language()),
         "function_types": ["function_definition"],
         "class_types": ["struct_specifier", "union_specifier", "enum_specifier"],
         "method_types": [],
@@ -185,7 +187,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": [],  # C uses header files
     },
     ".h": {
-        "language": tree_sitter_c.language(),
+        "language": Language(tree_sitter_c.language()),
         "function_types": ["function_definition", "declaration"],
         "class_types": ["struct_specifier", "union_specifier", "enum_specifier"],
         "method_types": [],
@@ -196,7 +198,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": [],  # C uses header files
     },
     ".cpp": {
-        "language": tree_sitter_cpp.language(),
+        "language": Language(tree_sitter_cpp.language()),
         "function_types": ["function_definition"],
         "class_types": ["class_specifier", "struct_specifier", "enum_specifier"],
         "method_types": ["function_definition"],
@@ -207,7 +209,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
         "export_types": [],  # C++ uses header files
     },
     ".hpp": {
-        "language": tree_sitter_cpp.language(),
+        "language": Language(tree_sitter_cpp.language()),
         "function_types": ["function_definition", "declaration"],
         "class_types": ["class_specifier", "struct_specifier", "enum_specifier"],
         "method_types": ["function_definition"],
@@ -219,7 +221,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # Ruby
     ".rb": {
-        "language": tree_sitter_ruby.language(),
+        "language": Language(tree_sitter_ruby.language()),
         "function_types": ["method", "singleton_method"],
         "class_types": ["class", "module"],
         "method_types": ["method", "singleton_method"],
@@ -231,7 +233,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # PHP
     ".php": {
-        "language": tree_sitter_php.language_php(),
+        "language": Language(tree_sitter_php.language_php()),
         "function_types": ["function_definition"],
         "class_types": ["class_declaration", "interface_declaration", "trait_declaration"],
         "method_types": ["method_declaration"],
@@ -243,7 +245,7 @@ LANGUAGE_CONFIG: dict[str, dict] = {
     },
     # C#
     ".cs": {
-        "language": tree_sitter_c_sharp.language(),
+        "language": Language(tree_sitter_c_sharp.language()),
         "function_types": [],  # C# doesn't have standalone functions
         "class_types": ["class_declaration", "interface_declaration", "struct_declaration", "enum_declaration"],
         "method_types": ["method_declaration", "constructor_declaration"],
@@ -368,31 +370,35 @@ def _parse_import_path(node: Node, import_text: str, config: dict) -> list[str] 
     """
     import re
 
-    # Python: import foo or from foo import bar
-    if node.type == "import_statement":
-        # import foo, bar
-        match = re.search(r'import\s+([^\n]+)', import_text)
-        if match:
-            modules = [m.strip().split(' as ')[0].strip() for m in match.group(1).split(',')]
-            return modules
-    elif node.type == "import_from_statement":
-        # from foo import bar
-        match = re.search(r'from\s+([\w.]+)', import_text)
-        if match:
-            return match.group(1)
-
     # JavaScript/TypeScript: import x from 'path' or import 'path'
-    elif node.type == "import_statement":
-        # Look for the source string
+    # Check this FIRST before Python, because both use "import_statement" type
+    # but JS/TS has a "source" child node while Python doesn't
+    if node.type == "import_statement":
+        # Try JS/TS style first - look for the source string node
         source_node = node.child_by_field_name("source")
         if source_node:
             path = source_node.text.decode("utf-8", errors="ignore").strip("'\"")
             return path
-        # Fallback to regex
+
+        # Try regex for JS/TS style: import ... from 'path' or import 'path'
         match = re.search(r'from\s+[\'"]([^\'"]+)[\'"]', import_text)
         if match:
             return match.group(1)
         match = re.search(r'import\s+[\'"]([^\'"]+)[\'"]', import_text)
+        if match:
+            return match.group(1)
+
+        # Python style: import foo, bar (no quotes, no 'from' keyword with quotes)
+        # Only match if there are no quotes in the import text (Python style)
+        if "'" not in import_text and '"' not in import_text:
+            match = re.search(r'import\s+([^\n]+)', import_text)
+            if match:
+                modules = [m.strip().split(' as ')[0].strip() for m in match.group(1).split(',')]
+                return modules
+
+    # Python: from foo import bar
+    elif node.type == "import_from_statement":
+        match = re.search(r'from\s+([\w.]+)', import_text)
         if match:
             return match.group(1)
 

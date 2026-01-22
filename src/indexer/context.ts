@@ -12,7 +12,8 @@ import {
   type StrategyResult,
   type FileTypeStrategyOverrides as StrategyOverrides,
 } from './file-type-strategies.js'
-import { formatContextAsXml } from './xml-context.js'
+import { formatContextAsXml, formatImpactAsXml } from './xml-context.js'
+import { getImpactAnalysis } from './impact-analysis.js'
 import {
   executePipeline,
   createPipelineInput,
@@ -1608,6 +1609,20 @@ export async function getSemanticContext(
   const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
   let testChunks: WeightedCodeChunk[] = []
 
+  // Get impact analysis for modified files
+  let impactContext: string | undefined
+  if (sourceFiles.length > 0) {
+    try {
+      const impact = await getImpactAnalysis(sourceFiles, client, repoUrl, branch)
+      if (impact.warnings.length > 0 || impact.importTrees.size > 0) {
+        impactContext = formatImpactAsXml(impact)
+        logger.debug(`Impact analysis: ${impact.warnings.length} warnings, ${impact.importTrees.size} import trees`)
+      }
+    } catch (error) {
+      logger.debug(`Impact analysis failed: ${error}`)
+    }
+  }
+
   if (sourceFiles.length > 0) {
     logger.debug(`Looking for test files related to ${sourceFiles.length} modified source files`)
 
@@ -1670,7 +1685,15 @@ export async function getSemanticContext(
 
   logger.info(`Including ${parts.join(', ')}`)
 
-  return formatContext(selectedChunks)
+  // Format code context
+  const codeContext = formatContext(selectedChunks)
+
+  // Combine code context with impact analysis
+  if (impactContext) {
+    return `${codeContext}\n\n${impactContext}`
+  }
+
+  return codeContext
 }
 
 // =============================================================================
@@ -1804,6 +1827,20 @@ export async function getSemanticContextWithPipeline(
   const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
   let testChunks: WeightedCodeChunk[] = []
 
+  // Get impact analysis for modified files
+  let impactContext: string | undefined
+  if (sourceFiles.length > 0) {
+    try {
+      const impact = await getImpactAnalysis(sourceFiles, client, repoUrl, branch)
+      if (impact.warnings.length > 0 || impact.importTrees.size > 0) {
+        impactContext = formatImpactAsXml(impact)
+        logger.debug(`Impact analysis: ${impact.warnings.length} warnings, ${impact.importTrees.size} import trees`)
+      }
+    } catch (error) {
+      logger.debug(`Impact analysis failed: ${error}`)
+    }
+  }
+
   if (sourceFiles.length > 0) {
     logger.debug(`Looking for test files related to ${sourceFiles.length} modified source files`)
 
@@ -1866,8 +1903,16 @@ export async function getSemanticContextWithPipeline(
 
   logger.info(`Pipeline retrieved ${parts.join(', ')}`)
 
+  // Format code context
+  const codeContext = formatContext(selectedChunks)
+
+  // Combine code context with impact analysis
+  const finalContext = impactContext
+    ? `${codeContext}\n\n${impactContext}`
+    : codeContext
+
   return {
-    context: formatContext(selectedChunks),
+    context: finalContext,
     pipelineResult,
   }
 }

@@ -5,7 +5,7 @@
  * This enables better parsing and referencing of code sections with rich metadata.
  */
 
-import type { WeightedCodeChunk, ChunkType } from './types.js'
+import type { WeightedCodeChunk, ChunkType, ImpactAnalysisResult, ImpactWarning, ImportTree } from './types.js'
 
 /**
  * Context types for categorizing code sections
@@ -275,4 +275,173 @@ export function parseConfig(input: string): Config {
 \`\`\`
 
 When citing related code in your review, reference it by path and line numbers (e.g., "The related code in \`src/utils/parser.ts:45-67\` shows...").`
+}
+
+// ============================================================================
+// Impact Analysis XML Formatting
+// ============================================================================
+
+/**
+ * Format a single import tree entry as XML
+ */
+function formatImportTreeAsXml(filePath: string, tree: ImportTree): string {
+  const parts: string[] = []
+
+  parts.push(`  <import_tree file="${escapeXmlAttribute(filePath)}">`)
+
+  // Format direct imports (what this file imports)
+  if (tree.directImports.length > 0) {
+    const imports = tree.directImports.map(f => escapeXmlContent(f)).join(', ')
+    parts.push(`    <imports>${imports}</imports>`)
+  }
+
+  // Format direct importers (what imports this file)
+  if (tree.directImporters.length > 0) {
+    const importers = tree.directImporters.map(f => escapeXmlContent(f)).join(', ')
+    parts.push(`    <imported_by>${importers}</imported_by>`)
+  }
+
+  parts.push(`  </import_tree>`)
+
+  return parts.join('\n')
+}
+
+/**
+ * Format a single impact warning as XML
+ */
+function formatWarningAsXml(warning: ImpactWarning): string {
+  const parts: string[] = []
+
+  parts.push(`  <warning type="${escapeXmlAttribute(warning.type)}" severity="${escapeXmlAttribute(warning.severity)}" path="${escapeXmlAttribute(warning.filePath)}">`)
+  parts.push(`    ${escapeXmlContent(warning.message)}`)
+
+  // Add affected files if present
+  if (warning.details.affectedFiles && warning.details.affectedFiles.length > 0) {
+    parts.push(`    <affected_files>`)
+    for (const file of warning.details.affectedFiles) {
+      parts.push(`      <file>${escapeXmlContent(file)}</file>`)
+    }
+    parts.push(`    </affected_files>`)
+  }
+
+  // Add circular dependency cycle if present
+  if (warning.details.cycle && warning.details.cycle.length > 0) {
+    const cycleStr = warning.details.cycle.map(f => escapeXmlContent(f)).join(' → ')
+    parts.push(`    <cycle>${cycleStr}</cycle>`)
+  }
+
+  parts.push(`  </warning>`)
+
+  return parts.join('\n')
+}
+
+/**
+ * Format impact analysis results as structured XML for the review prompt.
+ *
+ * Output format:
+ * ```xml
+ * <impact>
+ *   <warning type="hub_file" severity="high" path="src/utils/helpers.ts">
+ *     This file is imported by 15 other files. Changes here have significant impact.
+ *     <affected_files>
+ *       <file>src/api/client.ts</file>
+ *       ...
+ *     </affected_files>
+ *   </warning>
+ *
+ *   <warning type="circular_dependency" severity="medium" path="src/models/user.ts">
+ *     This file is part of a circular dependency cycle.
+ *     <cycle>src/models/user.ts → src/services/auth.ts → src/models/user.ts</cycle>
+ *   </warning>
+ *
+ *   <import_tree file="src/indexer/client.ts">
+ *     <imports>src/indexer/types.ts, src/utils/logger.ts</imports>
+ *     <imported_by>src/indexer/context.ts, src/indexer/pipeline.ts</imported_by>
+ *   </import_tree>
+ * </impact>
+ * ```
+ *
+ * @param impact - Impact analysis result to format
+ * @returns Formatted XML string, or empty string if no impact info
+ */
+export function formatImpactAsXml(impact: ImpactAnalysisResult): string {
+  // Count meaningful import trees (those with actual dependencies)
+  let meaningfulTreeCount = 0
+  for (const [, tree] of impact.importTrees) {
+    if (tree.directImports.length > 0 || tree.directImporters.length > 0) {
+      meaningfulTreeCount++
+    }
+  }
+
+  // Return empty if no warnings and no meaningful import trees
+  if (impact.warnings.length === 0 && meaningfulTreeCount === 0) {
+    return ''
+  }
+
+  const parts: string[] = ['<impact>']
+
+  // Add warnings section (sorted by severity - critical first)
+  if (impact.warnings.length > 0) {
+    for (const warning of impact.warnings) {
+      parts.push(formatWarningAsXml(warning))
+      parts.push('')
+    }
+  }
+
+  // Add import trees for modified files
+  if (impact.importTrees.size > 0) {
+    for (const [filePath, tree] of impact.importTrees) {
+      // Only include trees that have meaningful dependency info
+      if (tree.directImports.length > 0 || tree.directImporters.length > 0) {
+        parts.push(formatImportTreeAsXml(filePath, tree))
+        parts.push('')
+      }
+    }
+  }
+
+  parts.push('</impact>')
+
+  return parts.join('\n').trim()
+}
+
+/**
+ * Generate XML schema documentation for the impact analysis section.
+ */
+export function getImpactSchemaDocumentation(): string {
+  return `The \`<impact>\` section provides dependency analysis for modified files:
+
+**Warning Elements** (contain impact warnings for modified files):
+- \`type="hub_file"\`: File is imported by many others - changes have high blast radius
+- \`type="circular_dependency"\`: File is part of a circular import chain
+- \`type="high_impact_change"\`: File change directly affects many dependents
+
+**Warning Attributes**:
+- \`severity\`: Impact level (critical, high, medium)
+  - critical: Hub files with 20+ importers
+  - high: Hub files with 10-19 importers or direct circular deps
+  - medium: Notable impact (5+ direct importers) or indirect circular deps
+- \`path\`: File path being analyzed
+
+**Warning Child Elements**:
+- \`<affected_files>\`: List of files that would be impacted by changes
+- \`<cycle>\`: The circular dependency chain (e.g., A → B → C → A)
+
+**Import Tree Elements** (show dependency relationships):
+- \`<imports>\`: What the modified file imports
+- \`<imported_by>\`: What files import the modified file
+
+**Example**:
+\`\`\`xml
+<impact>
+  <warning type="hub_file" severity="high" path="src/utils/helpers.ts">
+    This file is imported by 15 other files. Changes here have significant impact.
+    <affected_files>
+      <file>src/api/client.ts</file>
+      <file>src/services/auth.ts</file>
+    </affected_files>
+  </warning>
+</impact>
+\`\`\`
+
+When citing impact warnings in your review, reference the warning type and severity (e.g., "Per the hub_file warning (severity: high), changes to \`src/utils/helpers.ts\` affect 15 dependent files").`
 }

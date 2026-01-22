@@ -1052,3 +1052,63 @@ export type BackgroundIndexerEvent =
   | { type: 'job_failed'; job: IndexingJob; error: string }
   | { type: 'indexer_started' }
   | { type: 'indexer_stopped' }
+
+// ============================================================================
+// Impact Analysis Types
+// ============================================================================
+
+/**
+ * Severity level for impact warnings
+ */
+export type ImpactSeverity = 'critical' | 'high' | 'medium'
+
+/**
+ * Type of impact warning
+ */
+export type ImpactWarningType = 'hub_file' | 'circular_dependency' | 'high_impact_change'
+
+/**
+ * A warning generated during impact analysis of modified files
+ */
+export interface ImpactWarning {
+  /** Type of impact warning */
+  type: ImpactWarningType
+
+  /** Severity level of the warning */
+  severity: ImpactSeverity
+
+  /** File path that triggered this warning */
+  filePath: string
+
+  /** Human-readable description of the warning */
+  message: string
+
+  /** Additional details about the warning */
+  details: {
+    /** Number of files that import this file (for hub files) */
+    importCount?: number
+
+    /** Files involved in the circular dependency cycle */
+    cycle?: string[]
+
+    /** Files that would be affected by changes to this file */
+    affectedFiles?: string[]
+  }
+}
+
+/**
+ * Result of impact analysis for a set of modified files
+ */
+export interface ImpactAnalysisResult {
+  /** List of warnings generated during impact analysis */
+  warnings: ImpactWarning[]
+
+  /** Import trees for each modified file (key is file path) */
+  importTrees: Map<string, ImportTree>
+
+  /** Hub files that are being modified (files imported by many others) */
+  hubFiles: HubFile[]
+
+  /** Circular dependencies involving modified files */
+  circularDependencies: CircularDependency[]
+}

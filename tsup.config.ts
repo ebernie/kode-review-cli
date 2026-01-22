@@ -17,7 +17,26 @@ export default defineConfig({
     // Copy Docker assets to dist/indexer/docker/
     const srcDir = 'src/indexer/docker'
     const destDir = 'dist/indexer/docker'
-    const files = ['compose.yaml', 'Dockerfile', 'main.py', 'indexer.py', 'requirements.txt', '.env.template']
+    const files = [
+      'compose.yaml',
+      'Dockerfile',
+      'main.py',
+      'indexer.py',
+      'requirements.txt',
+      '.env.template',
+      // Additional Python modules for indexer functionality
+      'import_graph.py',
+      'call_graph.py',
+      'ast_chunker.py',
+      'bm25.py',
+      'hybrid.py',
+      'incremental.py',
+      'cocoindex_flow.py',
+      'config_parser.py',
+      'migrate.py',
+      'verify_export.py',
+      'schema.sql',
+    ]
 
     if (!existsSync(destDir)) {
       mkdirSync(destDir, { recursive: true })

@@ -116,19 +116,24 @@ class ImportGraphBuilder:
         - Relative imports (./foo, ../bar)
         - Node.js style imports (might need index.js/ts resolution)
         - Python relative imports (from .foo import bar)
+        - TypeScript .js imports that map to .ts files
         """
         all_files = self._get_all_files()
         source_dir = str(Path(source_file).parent)
 
         # Handle relative imports
         if import_path.startswith('./') or import_path.startswith('../'):
-            # Resolve relative path
-            resolved = str(Path(source_dir) / import_path)
-            resolved = str(Path(resolved).resolve())
-
-            # Normalize path (remove leading ./)
-            if resolved.startswith('./'):
-                resolved = resolved[2:]
+            # Join paths and normalize (don't use .resolve() as it makes absolute)
+            combined = Path(source_dir) / import_path
+            # Normalize the path (resolve ./ and ../ but keep relative)
+            parts = []
+            for part in combined.parts:
+                if part == '..':
+                    if parts:
+                        parts.pop()
+                elif part != '.':
+                    parts.append(part)
+            resolved = '/'.join(parts)
 
             # Try with different extensions
             candidates = self._get_path_candidates(resolved)
@@ -180,13 +185,32 @@ class ImportGraphBuilder:
     def _get_path_candidates(self, base_path: str) -> list[str]:
         """Get candidate file paths for an import, trying common extensions."""
         candidates = []
+        path = Path(base_path)
+        suffix = path.suffix.lower()
 
-        # Already has an extension
-        if Path(base_path).suffix:
+        # If path already has an extension
+        if suffix:
+            # First try the exact path
             candidates.append(base_path)
+
+            # For .js imports, also try .ts (TypeScript projects often compile to .js)
+            # This handles: import x from './foo.js' -> src/foo.ts
+            if suffix == '.js':
+                stem = str(path.with_suffix(''))
+                candidates.append(stem + '.ts')
+                candidates.append(stem + '.tsx')
+            elif suffix == '.jsx':
+                stem = str(path.with_suffix(''))
+                candidates.append(stem + '.tsx')
+                candidates.append(stem + '.ts')
+            elif suffix == '.mjs':
+                stem = str(path.with_suffix(''))
+                candidates.append(stem + '.mts')
+                candidates.append(stem + '.ts')
+
             return candidates
 
-        # Try adding extensions
+        # No extension - try adding common extensions
         for ext in self.JS_TS_EXTENSIONS + self.PYTHON_EXTENSIONS:
             candidates.append(base_path + ext)
 

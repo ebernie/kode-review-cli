@@ -79,6 +79,9 @@ function ensureDockerAssets(): string {
     'import_graph.py',
     'hybrid.py',
     'bm25.py',
+    'call_graph.py',
+    'config_parser.py',
+    '.env.template',
   ]
 
   for (const file of files) {

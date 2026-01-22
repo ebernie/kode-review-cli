@@ -51,6 +51,11 @@ Each \`<context>\` element includes attributes:
 - Use \`<test>\` sections to verify test coverage implications
 - Check \`<similar>\` sections for pattern consistency
 
+3. **Impact Analysis** (when \`<impact>\` section is present):
+   - Hub file warnings for files imported by many others (high blast radius changes)
+   - Circular dependency flags for files in import cycles
+   - Import trees showing what depends on modified files
+
 **Limitations:**
 - Semantic search shows *similar* code, not necessarily *all* related code
 - Not all files in the repository are visible
@@ -108,7 +113,24 @@ Use the **Related Code** XML sections to check for:
 When citing related code, use the XML path and line numbers:
 - GOOD: "The related code in \`src/utils/helpers.ts:45-67\` uses \`async/await\` but this function uses callbacks"
 - GOOD: "The \`<modified>\` context shows \`src/api/client.ts:120-135\` calls this function, which would break"
-- BAD: "This doesn't match project conventions"`
+- BAD: "This doesn't match project conventions"
+
+### 6. Impact Analysis (HIGH) - Dependency-Aware
+When the \`<impact>\` section is present, pay special attention to:
+- **Hub File Warnings**: Files imported by many others have high blast radius. Extra scrutiny needed for:
+  - API changes that could break dependent code
+  - Behavioral changes that affect many callers
+  - Breaking changes in signatures, types, or contracts
+- **Circular Dependencies**: Changes to files in cycles may cause initialization issues or cascading effects. Watch for:
+  - Import order dependencies
+  - Module initialization timing
+  - Potential deadlocks or recursive loads
+- **Import Tree**: Use to understand which files depend on changes and may need updates or testing
+
+When citing impact concerns:
+- GOOD: "This file is a hub (15 importers per \`<impact>\`) - the API change at line 45 could break callers"
+- GOOD: "Circular dependency warning suggests careful testing of initialization order"
+- GOOD: "Per \`<import_tree>\`, 8 files import this module - ensure backward compatibility"`
 
 /**
  * Review scope section
@@ -227,6 +249,14 @@ const STRUCTURAL_TAGS = [
   'config',
   'import',
   'context',
+  // Impact analysis tags
+  'impact',
+  'warning',
+  'affected_files',
+  'cycle',
+  'import_tree',
+  'imports',
+  'imported_by',
 ]
 
 /**
@@ -342,6 +372,7 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     parts.push('- `<modified>`: Code overlapping with modified lines (cite as high-confidence evidence)')
     parts.push('- `<test>`: Related test files (check for test coverage implications)')
     parts.push('- `<similar>`: Semantically similar code (verify pattern consistency)')
+    parts.push('- `<impact>`: Dependency warnings with `<warning>` elements for hub files and circular dependencies')
     parts.push('')
     parts.push('Each `<context>` element includes `path`, `lines`, `relevance`, and `reason` attributes.')
     if (options.prDescriptionSummary) {

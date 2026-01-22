@@ -14,6 +14,17 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY main.py .
 COPY indexer.py .
+COPY import_graph.py .
+COPY call_graph.py .
+COPY ast_chunker.py .
+COPY bm25.py .
+COPY hybrid.py .
+COPY incremental.py .
+COPY cocoindex_flow.py .
+COPY config_parser.py .
+COPY migrate.py .
+COPY verify_export.py .
+COPY schema.sql .
 
 # Expose the API port
 EXPOSE 8000

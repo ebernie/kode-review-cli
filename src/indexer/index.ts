@@ -45,6 +45,11 @@ export type {
   BackgroundIndexerConfig,
   BackgroundIndexingProgress,
   BackgroundIndexerEvent,
+  // Impact analysis types
+  ImpactSeverity,
+  ImpactWarningType,
+  ImpactWarning,
+  ImpactAnalysisResult,
 } from './types.js'
 
 // Detector
@@ -140,6 +145,8 @@ export {
   getRetrievalReason,
   groupChunksByType,
   getXmlSchemaDocumentation,
+  formatImpactAsXml,
+  getImpactSchemaDocumentation,
 } from './xml-context.js'
 
 export type {
@@ -147,6 +154,9 @@ export type {
   RelevanceLevel,
   XmlContextMetadata,
 } from './xml-context.js'
+
+// Impact analysis
+export { getImpactAnalysis } from './impact-analysis.js'
 
 // File-type strategies
 export {
