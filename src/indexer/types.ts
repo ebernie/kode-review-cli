@@ -460,6 +460,46 @@ export interface DefinitionLookupResult {
 }
 
 /**
+ * A location where a symbol is used (called, imported, or referenced)
+ */
+export interface UsageLocation {
+  /** File path relative to repo root */
+  filePath: string
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** The code content containing the usage */
+  content: string
+
+  /** Type of code construct (function, class, etc.) */
+  chunkType: ChunkType | null
+
+  /** How the symbol is used: 'calls', 'imports', or 'references' */
+  usageType: 'calls' | 'imports' | 'references'
+
+  /** Whether this is a dynamic import or lazy-loaded reference (flagged as uncertain) */
+  isDynamic: boolean
+}
+
+/**
+ * Response from a symbol usage lookup
+ */
+export interface UsageLookupResult {
+  /** The symbol that was looked up */
+  symbol: string
+
+  /** All locations where the symbol is used */
+  usages: UsageLocation[]
+
+  /** Total number of usages found */
+  totalCount: number
+}
+
+/**
  * Type of change for a modified line
  */
 export type ChangeType = 'addition' | 'deletion' | 'modification'

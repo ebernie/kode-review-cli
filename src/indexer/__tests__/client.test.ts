@@ -395,6 +395,150 @@ describe('IndexerClient', () => {
     })
   })
 
+  describe('lookupUsages', () => {
+    it('returns usage locations with snake_case to camelCase mapping', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          symbol: 'handleRequest',
+          usages: [
+            {
+              file_path: 'src/controllers/user.ts',
+              line_start: 25,
+              line_end: 30,
+              content: 'handleRequest(req, res)',
+              chunk_type: 'function',
+              usage_type: 'calls',
+              is_dynamic: false,
+            },
+            {
+              file_path: 'src/index.ts',
+              line_start: 5,
+              line_end: 5,
+              content: "import { handleRequest } from './handlers'",
+              chunk_type: 'import',
+              usage_type: 'imports',
+              is_dynamic: false,
+            },
+            {
+              file_path: 'src/lazy-loader.ts',
+              line_start: 10,
+              line_end: 12,
+              content: "const handler = await import('./handlers').then(m => m.handleRequest)",
+              chunk_type: 'function',
+              usage_type: 'imports',
+              is_dynamic: true,
+            },
+          ],
+          total_count: 3,
+        }),
+      })
+
+      const result = await client.lookupUsages('handleRequest', 'https://github.com/test/repo')
+
+      expect(result.symbol).toBe('handleRequest')
+      expect(result.totalCount).toBe(3)
+      expect(result.usages).toHaveLength(3)
+
+      // Verify call usage
+      expect(result.usages[0]).toEqual({
+        filePath: 'src/controllers/user.ts',
+        lineStart: 25,
+        lineEnd: 30,
+        content: 'handleRequest(req, res)',
+        chunkType: 'function',
+        usageType: 'calls',
+        isDynamic: false,
+      })
+
+      // Verify static import
+      expect(result.usages[1]).toEqual({
+        filePath: 'src/index.ts',
+        lineStart: 5,
+        lineEnd: 5,
+        content: "import { handleRequest } from './handlers'",
+        chunkType: 'import',
+        usageType: 'imports',
+        isDynamic: false,
+      })
+
+      // Verify dynamic import (flagged as uncertain)
+      expect(result.usages[2]).toEqual({
+        filePath: 'src/lazy-loader.ts',
+        lineStart: 10,
+        lineEnd: 12,
+        content: "const handler = await import('./handlers').then(m => m.handleRequest)",
+        chunkType: 'function',
+        usageType: 'imports',
+        isDynamic: true,
+      })
+    })
+
+    it('sends correct URL with all query parameters', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'test', usages: [], total_count: 0 }),
+      })
+
+      await client.lookupUsages('processData', 'https://github.com/test/repo', 'develop', 25)
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain(`${baseUrl}/usages/processData`)
+      expect(calledUrl).toContain('repo_url=https%3A%2F%2Fgithub.com%2Ftest%2Frepo')
+      expect(calledUrl).toContain('branch=develop')
+      expect(calledUrl).toContain('limit=25')
+      expect(mockFetch).toHaveBeenCalledWith(calledUrl, expect.objectContaining({ method: 'GET' }))
+    })
+
+    it('encodes special characters in symbol name', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'Array<T>', usages: [], total_count: 0 }),
+      })
+
+      await client.lookupUsages('Array<T>')
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain(`${baseUrl}/usages/${encodeURIComponent('Array<T>')}`)
+    })
+
+    it('returns empty result when no usages found', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'unusedFunction', usages: [], total_count: 0 }),
+      })
+
+      const result = await client.lookupUsages('unusedFunction')
+
+      expect(result.symbol).toBe('unusedFunction')
+      expect(result.usages).toHaveLength(0)
+      expect(result.totalCount).toBe(0)
+    })
+
+    it('throws error when lookup fails', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => 'Internal server error',
+      })
+
+      await expect(
+        client.lookupUsages('MyClass', 'https://github.com/test/repo')
+      ).rejects.toThrow('Failed to lookup usages: Internal server error')
+    })
+
+    it('uses default limit when not specified', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'test', usages: [], total_count: 0 }),
+      })
+
+      await client.lookupUsages('myFunction')
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain('limit=50')
+    })
+  })
+
   describe('constructor', () => {
     it('removes trailing slash from base URL', async () => {
       const clientWithSlash = new IndexerClient('http://localhost:8321/')

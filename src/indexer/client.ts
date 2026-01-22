@@ -1,4 +1,4 @@
-import type { CodeChunk, IndexStats, RepoInfo, DefinitionLookupResult, ChunkType } from './types.js'
+import type { CodeChunk, IndexStats, RepoInfo, DefinitionLookupResult, UsageLookupResult, ChunkType } from './types.js'
 
 export interface IndexRequest {
   repoUrl: string
@@ -75,6 +75,22 @@ interface DefinitionLocationResponse {
 interface DefinitionResponse {
   symbol: string
   definitions: DefinitionLocationResponse[]
+  total_count: number
+}
+
+interface UsageLocationResponse {
+  file_path: string
+  line_start: number
+  line_end: number
+  content: string
+  chunk_type: string | null
+  usage_type: string
+  is_dynamic: boolean
+}
+
+interface UsageResponse {
+  symbol: string
+  usages: UsageLocationResponse[]
   total_count: number
 }
 
@@ -317,6 +333,62 @@ export class IndexerClient {
         chunkType: def.chunk_type as ChunkType | null,
         isReexport: def.is_reexport,
         reexportSource: def.reexport_source,
+      })),
+      totalCount: data.total_count,
+    }
+  }
+
+  /**
+   * Look up all usages of a symbol in the indexed codebase.
+   *
+   * This helps assess the impact of changes by finding all locations where
+   * a symbol is called, imported, or referenced.
+   *
+   * @param symbol - The symbol name to look up (e.g., 'MyClass', 'handleRequest')
+   * @param repoUrl - Optional repository URL to scope the search
+   * @param branch - Optional branch to scope the search
+   * @param limit - Maximum number of results to return (default: 50)
+   */
+  async lookupUsages(
+    symbol: string,
+    repoUrl?: string,
+    branch?: string,
+    limit: number = 50
+  ): Promise<UsageLookupResult> {
+    const params = new URLSearchParams()
+    if (repoUrl) {
+      params.append('repo_url', repoUrl)
+    }
+    if (branch) {
+      params.append('branch', branch)
+    }
+    params.append('limit', String(limit))
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/usages/${encodeURIComponent(symbol)}${queryString ? `?${queryString}` : ''}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Failed to lookup usages: ${error}`)
+    }
+
+    const data = (await response.json()) as UsageResponse
+
+    // Map snake_case to camelCase
+    return {
+      symbol: data.symbol,
+      usages: data.usages.map((usage) => ({
+        filePath: usage.file_path,
+        lineStart: usage.line_start,
+        lineEnd: usage.line_end,
+        content: usage.content,
+        chunkType: usage.chunk_type as ChunkType | null,
+        usageType: usage.usage_type as 'calls' | 'imports' | 'references',
+        isDynamic: usage.is_dynamic,
       })),
       totalCount: data.total_count,
     }

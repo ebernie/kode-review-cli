@@ -143,6 +143,24 @@ class DefinitionResponse(BaseModel):
     total_count: int
 
 
+class UsageLocation(BaseModel):
+    """A location where a symbol is used (called, imported, or referenced)."""
+    file_path: str
+    line_start: int
+    line_end: int
+    content: str
+    chunk_type: Optional[str] = None
+    usage_type: str  # 'calls', 'imports', or 'references'
+    is_dynamic: bool = False  # Flag for dynamic imports/lazy loading
+
+
+class UsageResponse(BaseModel):
+    """Response from a symbol usage lookup."""
+    symbol: str
+    usages: list[UsageLocation]
+    total_count: int
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
@@ -517,6 +535,127 @@ async def get_definitions(
         # If tables don't exist yet, return empty result
         if "does not exist" in str(e).lower():
             return DefinitionResponse(symbol=symbol, definitions=[], total_count=0)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/usages/{symbol}", response_model=UsageResponse)
+async def get_usages(
+    symbol: str,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    Look up all usages of a symbol in the indexed codebase.
+
+    This endpoint helps assess the impact of changes by finding all locations where
+    a symbol is called, imported, or referenced.
+
+    Args:
+        symbol: The symbol name to look up (e.g., 'MyClass', 'handleRequest')
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search
+        limit: Maximum number of results to return (default: 50)
+
+    Returns:
+        UsageResponse with all locations where the symbol is used
+    """
+    try:
+        usages: list[UsageLocation] = []
+
+        # First, find all chunks where this symbol is defined
+        # We need the chunk IDs to query the relationships table
+        definition_where = ["symbol_names @> ARRAY[%s]::text[]"]
+        definition_params: list = [symbol]
+
+        repo_id = None
+        if repo_url:
+            repo_id = generate_repo_id(repo_url)
+            definition_where.append("repo_id = %s")
+            definition_params.append(repo_id)
+
+        if branch:
+            definition_where.append("branch = %s")
+            definition_params.append(branch)
+
+        definition_clause = " AND ".join(definition_where)
+
+        with get_connection_pool().connection() as conn:
+            with conn.cursor() as cur:
+                # Find chunk IDs where the symbol is defined
+                cur.execute(
+                    f"""
+                    SELECT id FROM chunks
+                    WHERE {definition_clause}
+                    """,
+                    tuple(definition_params)
+                )
+
+                target_chunk_ids = [row[0] for row in cur.fetchall()]
+
+                if not target_chunk_ids:
+                    # No definitions found, return empty result
+                    return UsageResponse(symbol=symbol, usages=[], total_count=0)
+
+                # Query relationships table for chunks that call/import/reference this symbol
+                placeholders = ",".join(["%s"] * len(target_chunk_ids))
+
+                # Build query params
+                usage_params: list = target_chunk_ids.copy()
+
+                # Add repo/branch filters for the source chunks
+                usage_where = ""
+                if repo_url:
+                    usage_where += " AND c.repo_id = %s"
+                    usage_params.append(repo_id)
+                if branch:
+                    usage_where += " AND c.branch = %s"
+                    usage_params.append(branch)
+
+                usage_params.append(limit)
+
+                cur.execute(
+                    f"""
+                    SELECT DISTINCT c.file_path, c.line_start, c.line_end, c.content,
+                           c.chunk_type, r.relationship_type, r.metadata
+                    FROM chunks c
+                    JOIN relationships r ON r.source_chunk_id = c.id
+                    WHERE r.target_chunk_id IN ({placeholders})
+                      AND r.relationship_type IN ('calls', 'imports', 'references')
+                      {usage_where}
+                    ORDER BY c.file_path, c.line_start
+                    LIMIT %s
+                    """,
+                    tuple(usage_params)
+                )
+
+                for row in cur.fetchall():
+                    metadata = row[6] if row[6] else {}
+                    # Check for dynamic import indicators in metadata
+                    is_dynamic = metadata.get('is_dynamic', False) or \
+                                 metadata.get('is_lazy', False) or \
+                                 'dynamic' in str(metadata).lower()
+
+                    usages.append(UsageLocation(
+                        file_path=row[0],
+                        line_start=row[1],
+                        line_end=row[2],
+                        content=row[3],
+                        chunk_type=row[4],
+                        usage_type=row[5],
+                        is_dynamic=is_dynamic,
+                    ))
+
+        return UsageResponse(
+            symbol=symbol,
+            usages=usages,
+            total_count=len(usages),
+        )
+
+    except Exception as e:
+        # If tables don't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return UsageResponse(symbol=symbol, usages=[], total_count=0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
