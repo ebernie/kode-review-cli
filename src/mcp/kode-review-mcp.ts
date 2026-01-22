@@ -45,7 +45,7 @@ import {
 
 interface ServerConfig {
   repoRoot: string
-  indexerUrl: string
+  indexerUrl?: string  // Optional - when not provided, only read_file tool is available
   repoUrl: string
   branch?: string
 }
@@ -74,9 +74,7 @@ function parseArgs(): ServerConfig {
   if (!config.repoRoot) {
     throw new Error('--repo is required')
   }
-  if (!config.indexerUrl) {
-    throw new Error('--indexer is required')
-  }
+  // indexerUrl is optional - if not provided, only read_file tool will be available
   if (!config.repoUrl) {
     throw new Error('--repo-url is required')
   }
@@ -90,7 +88,15 @@ function parseArgs(): ServerConfig {
 
 async function main(): Promise<void> {
   const config = parseArgs()
-  const indexerClient = new IndexerClient(config.indexerUrl)
+
+  // Conditionally create IndexerClient only when indexer URL is provided
+  const indexerClient = config.indexerUrl
+    ? new IndexerClient(config.indexerUrl)
+    : null
+
+  if (!indexerClient) {
+    console.error('Indexer URL not provided - only read_file tool will be available')
+  }
 
   // Create MCP server
   const server = new Server(
@@ -106,15 +112,20 @@ async function main(): Promise<void> {
   )
 
   // Register list_tools handler
+  // Dynamically register tools based on indexer availability
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools: Tool[] = [
-      readFileSchema as Tool,
-      searchCodeSchema as Tool,
-      findDefinitionsSchema as Tool,
-      findUsagesSchema as Tool,
-      getCallGraphSchema as Tool,
-      getImpactSchema as Tool,
-    ]
+    const tools: Tool[] = [readFileSchema as Tool]
+
+    // Only register indexer-dependent tools when indexer is available
+    if (indexerClient) {
+      tools.push(
+        searchCodeSchema as Tool,
+        findDefinitionsSchema as Tool,
+        findUsagesSchema as Tool,
+        getCallGraphSchema as Tool,
+        getImpactSchema as Tool,
+      )
+    }
 
     return { tools }
   })
@@ -134,6 +145,12 @@ async function main(): Promise<void> {
         }
 
         case 'search_code': {
+          if (!indexerClient) {
+            return {
+              content: [{ type: 'text', text: 'Error: Indexer not available. This tool requires the indexer to be running.' }],
+              isError: true,
+            }
+          }
           const input = args as unknown as SearchCodeInput
           const result = await searchCodeHandler(
             input,
@@ -147,6 +164,12 @@ async function main(): Promise<void> {
         }
 
         case 'find_definitions': {
+          if (!indexerClient) {
+            return {
+              content: [{ type: 'text', text: 'Error: Indexer not available. This tool requires the indexer to be running.' }],
+              isError: true,
+            }
+          }
           const input = args as unknown as FindDefinitionsInput
           const result = await findDefinitionsHandler(
             input,
@@ -160,6 +183,12 @@ async function main(): Promise<void> {
         }
 
         case 'find_usages': {
+          if (!indexerClient) {
+            return {
+              content: [{ type: 'text', text: 'Error: Indexer not available. This tool requires the indexer to be running.' }],
+              isError: true,
+            }
+          }
           const input = args as unknown as FindUsagesInput
           const result = await findUsagesHandler(
             input,
@@ -173,6 +202,12 @@ async function main(): Promise<void> {
         }
 
         case 'get_call_graph': {
+          if (!indexerClient) {
+            return {
+              content: [{ type: 'text', text: 'Error: Indexer not available. This tool requires the indexer to be running.' }],
+              isError: true,
+            }
+          }
           const input = args as unknown as GetCallGraphInput
           const result = await getCallGraphHandler(
             input,
@@ -186,6 +221,12 @@ async function main(): Promise<void> {
         }
 
         case 'get_impact': {
+          if (!indexerClient) {
+            return {
+              content: [{ type: 'text', text: 'Error: Indexer not available. This tool requires the indexer to be running.' }],
+              isError: true,
+            }
+          }
           const input = args as unknown as GetImpactInput
           const result = await getImpactHandler(
             input,

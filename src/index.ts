@@ -754,15 +754,18 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
   try {
     // Handle agentic review mode
     if (options.agentic) {
-      // Agentic mode requires the indexer to be running
+      // Check indexer status - optional for agentic mode
       const indexerStatus = await getIndexerStatus()
 
-      if (!indexerStatus.running || !indexerStatus.apiUrl) {
-        spinner?.fail('Indexer not running')
-        throw new Error(
-          'Agentic review requires the code indexer to be running.\n' +
-          'Start the indexer with: kode-review --setup-indexer\n' +
-          'Then index your repository with: kode-review --index'
+      // Determine indexer URL (undefined if not running)
+      let indexerUrl: string | undefined
+      if (indexerStatus.running && indexerStatus.apiUrl) {
+        indexerUrl = indexerStatus.apiUrl
+        logger.info('Indexer is running - full tool suite available')
+      } else {
+        logger.warn(
+          'Indexer not running - agentic review will have limited tools (read_file only).\n' +
+          'For full capabilities, start the indexer with: kode-review --setup-indexer'
         )
       }
 
@@ -780,7 +783,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         repoRoot: repoRoot!,
         repoUrl,
         branch: branch,
-        indexerUrl: indexerStatus.apiUrl,
+        indexerUrl,  // Optional - undefined when indexer not running
         prMrInfo,
         prDescriptionSummary,
         projectStructureContext,

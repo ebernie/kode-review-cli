@@ -27,8 +27,8 @@ export interface AgenticReviewOptions {
   repoUrl: string
   /** Current branch */
   branch?: string
-  /** Indexer API URL */
-  indexerUrl: string
+  /** Indexer API URL (optional - when not provided, only read_file tool is available) */
+  indexerUrl?: string
   /** PR/MR info as JSON string */
   prMrInfo?: string
   /** PR/MR description summary */
@@ -68,8 +68,8 @@ export interface AgenticReviewResult {
  */
 function getMcpServerCommand(
   repoRoot: string,
-  indexerUrl: string,
   repoUrl: string,
+  indexerUrl?: string,
   branch?: string
 ): string[] {
   const mcpServerPath = join(__dirname, 'mcp', 'kode-review-mcp.js')
@@ -78,9 +78,13 @@ function getMcpServerCommand(
     'node',
     mcpServerPath,
     '--repo', repoRoot,
-    '--indexer', indexerUrl,
     '--repo-url', repoUrl,
   ]
+
+  // Only add indexer argument when URL is provided
+  if (indexerUrl) {
+    command.push('--indexer', indexerUrl)
+  }
 
   if (branch) {
     command.push('--branch', branch)
@@ -150,10 +154,17 @@ export async function runAgenticReview(
     // The SDK manages the MCP server lifecycle - no need to spawn manually
     const mcpCommand = getMcpServerCommand(
       options.repoRoot,
-      options.indexerUrl,
       options.repoUrl,
+      options.indexerUrl,  // Optional - when not provided, only read_file tool is available
       options.branch
     )
+
+    // Log tool availability
+    if (options.indexerUrl) {
+      logger.debug('Full tool suite available (indexer connected)')
+    } else {
+      logger.warn('Limited tools available: only read_file (indexer not running)')
+    }
 
     logger.debug(`Registering MCP server: ${mcpCommand.join(' ')}`)
 
@@ -170,10 +181,10 @@ export async function runAgenticReview(
       })
       logger.debug('Registered MCP server with OpenCode')
     } catch (mcpError) {
-      // Fail fast if MCP registration fails - agentic mode requires tool access
+      // Fail fast if MCP registration fails - agentic mode requires at least read_file tool
       throw new Error(
         `Failed to register MCP tools with OpenCode: ${mcpError}\n` +
-        'Agentic review requires tool access. Ensure the indexer is running.'
+        'Agentic review requires tool access.'
       )
     }
 
