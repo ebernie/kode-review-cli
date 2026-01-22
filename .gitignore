@@ -36,4 +36,5 @@ build/
 *.egg
 .eggs/
 
-
+# OpenCode SDK
+config.json
