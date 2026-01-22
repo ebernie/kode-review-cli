@@ -8,6 +8,8 @@ import type {
   ImportTree,
   CircularDependenciesResult,
   HubFilesResult,
+  KeywordSearchResult,
+  KeywordMatch,
 } from './types.js'
 
 export interface IndexRequest {
@@ -138,6 +140,29 @@ interface HubFilesResponse {
   hub_files: HubFileResponse[]
   total_count: number
   threshold: number
+}
+
+// Keyword Search Response Types
+
+interface KeywordMatchResponse {
+  file_path: string
+  content: string
+  line_start: number
+  line_end: number
+  chunk_type: string | null
+  symbol_names: string[]
+  bm25_score: number
+  exact_match_boost: number
+  final_score: number
+  repo_url: string | null
+  branch: string | null
+}
+
+interface KeywordSearchResponse {
+  query: string
+  normalized_query: string
+  matches: KeywordMatchResponse[]
+  total_count: number
 }
 
 /**
@@ -588,6 +613,76 @@ export class IndexerClient {
       })),
       totalCount: data.total_count,
       threshold: data.threshold,
+    }
+  }
+
+  // ============================================================================
+  // Keyword Search (BM25)
+  // ============================================================================
+
+  /**
+   * Search for code using BM25 keyword matching.
+   *
+   * This method provides keyword-based search that complements vector similarity
+   * search by excelling at exact identifier matches and technical terms.
+   *
+   * Features:
+   * - Handles camelCase and snake_case variations automatically
+   * - Boosts exact function/class name matches by the specified multiplier
+   * - Uses PostgreSQL full-text search with BM25-style ranking
+   *
+   * @param query - Search query (identifier or keywords)
+   * @param repoUrl - Optional repository URL to scope the search
+   * @param branch - Optional branch to scope the search
+   * @param limit - Maximum number of results (default: 10)
+   * @param exactMatchBoost - Multiplier for exact symbol matches (default: 3.0)
+   */
+  async keywordSearch(
+    query: string,
+    repoUrl?: string,
+    branch?: string,
+    limit: number = 10,
+    exactMatchBoost: number = 3.0
+  ): Promise<KeywordSearchResult> {
+    const response = await fetch(`${this.baseUrl}/keyword-search`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        repo_url: repoUrl,
+        branch,
+        limit,
+        exact_match_boost: exactMatchBoost,
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Keyword search failed: ${error}`)
+    }
+
+    const data = (await response.json()) as KeywordSearchResponse
+
+    // Map snake_case to camelCase
+    return {
+      query: data.query,
+      normalizedQuery: data.normalized_query,
+      matches: data.matches.map((match): KeywordMatch => ({
+        filePath: match.file_path,
+        content: match.content,
+        lineStart: match.line_start,
+        lineEnd: match.line_end,
+        chunkType: match.chunk_type as ChunkType | null,
+        symbolNames: match.symbol_names,
+        bm25Score: match.bm25_score,
+        exactMatchBoost: match.exact_match_boost,
+        finalScore: match.final_score,
+        repoUrl: match.repo_url ?? undefined,
+        branch: match.branch ?? undefined,
+      })),
+      totalCount: data.total_count,
     }
   }
 }

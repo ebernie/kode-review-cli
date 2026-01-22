@@ -81,6 +81,79 @@ CREATE INDEX IF NOT EXISTS chunks_imports_idx ON chunks USING GIN (imports);
 CREATE INDEX IF NOT EXISTS chunks_exports_idx ON chunks USING GIN (exports);
 
 -- ============================================================================
+-- Full-Text Search Support (for BM25-style keyword search)
+-- ============================================================================
+-- tsvector column for efficient full-text search on code content
+-- This enables keyword search with ranking alongside vector similarity search
+
+-- Add tsvector column for full-text search if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chunks' AND column_name = 'content_tsv'
+    ) THEN
+        ALTER TABLE chunks ADD COLUMN content_tsv tsvector;
+    END IF;
+END $$;
+
+-- GIN index for fast full-text search
+CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING GIN (content_tsv);
+
+-- Function to generate tsvector from code content with identifier handling
+-- Handles camelCase, snake_case, and preserves code identifiers
+CREATE OR REPLACE FUNCTION code_to_tsvector(content TEXT)
+RETURNS tsvector AS $$
+DECLARE
+    normalized TEXT;
+    result tsvector;
+BEGIN
+    -- Start with the original content
+    normalized := content;
+
+    -- Split camelCase into separate words (e.g., "getUserName" -> "get User Name get_user_name")
+    -- This regex inserts spaces before uppercase letters that follow lowercase letters
+    normalized := regexp_replace(normalized, '([a-z])([A-Z])', '\1 \2', 'g');
+
+    -- Also add snake_case version of camelCase identifiers
+    -- Convert remaining camelCase to snake_case for additional matching
+    normalized := normalized || ' ' || regexp_replace(
+        regexp_replace(content, '([a-z])([A-Z])', '\1_\2', 'g'),
+        '([A-Z]+)([A-Z][a-z])', '\1_\2', 'g'
+    );
+
+    -- Convert snake_case underscores to spaces for word splitting
+    normalized := regexp_replace(normalized, '_', ' ', 'g');
+
+    -- Use 'simple' configuration to preserve code identifiers exactly
+    -- (no stemming, which could mangle variable names)
+    result := to_tsvector('simple', lower(normalized));
+
+    RETURN result;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE;
+
+-- Trigger to automatically update tsvector when content changes
+CREATE OR REPLACE FUNCTION update_chunks_tsv()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.content_tsv := code_to_tsvector(NEW.content);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS chunks_tsv_trigger ON chunks;
+CREATE TRIGGER chunks_tsv_trigger
+    BEFORE INSERT OR UPDATE OF content ON chunks
+    FOR EACH ROW
+    EXECUTE FUNCTION update_chunks_tsv();
+
+-- Backfill existing rows (run once during migration)
+-- This is idempotent - only updates rows with null content_tsv
+UPDATE chunks SET content_tsv = code_to_tsvector(content)
+WHERE content_tsv IS NULL;
+
+-- ============================================================================
 -- Relationships Table
 -- ============================================================================
 -- Captures relationships between code chunks such as:

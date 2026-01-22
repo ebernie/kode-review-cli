@@ -20,6 +20,10 @@ export type {
   CircularDependenciesResult,
   HubFile,
   HubFilesResult,
+  // Keyword search types (BM25)
+  KeywordMatch,
+  KeywordSearchResult,
+  KeywordSearchOptions,
 } from './types.js'
 
 // Detector

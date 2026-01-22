@@ -640,3 +640,82 @@ export interface HubFilesResult {
   /** The threshold used for hub detection */
   threshold: number
 }
+
+// ============================================================================
+// Keyword Search Types (BM25)
+// ============================================================================
+
+/**
+ * A code chunk matched by BM25 keyword search
+ */
+export interface KeywordMatch {
+  /** File path relative to repo root */
+  filePath: string
+
+  /** The code content */
+  content: string
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** Type of code construct (function, class, etc.) */
+  chunkType: ChunkType | null
+
+  /** Symbol names defined in this chunk */
+  symbolNames: string[]
+
+  /** Raw BM25 score from PostgreSQL full-text search */
+  bm25Score: number
+
+  /** Boost multiplier applied for exact symbol matches (1.0 = no boost, 3.0 = exact match) */
+  exactMatchBoost: number
+
+  /** Final score (bm25Score * exactMatchBoost) */
+  finalScore: number
+
+  /** Repository URL */
+  repoUrl?: string
+
+  /** Branch name */
+  branch?: string
+}
+
+/**
+ * Response from keyword search
+ */
+export interface KeywordSearchResult {
+  /** The original search query */
+  query: string
+
+  /** How the query was normalized for full-text search */
+  normalizedQuery: string
+
+  /** Matching code chunks */
+  matches: KeywordMatch[]
+
+  /** Total count of matches */
+  totalCount: number
+}
+
+/**
+ * Options for keyword search
+ */
+export interface KeywordSearchOptions {
+  /** Search query (identifier or keywords) */
+  query: string
+
+  /** Optional repository URL to scope the search */
+  repoUrl?: string
+
+  /** Optional branch to scope the search */
+  branch?: string
+
+  /** Maximum number of results (default: 10) */
+  limit?: number
+
+  /** Multiplier for exact function/class name matches (default: 3.0) */
+  exactMatchBoost?: number
+}

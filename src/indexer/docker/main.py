@@ -25,6 +25,7 @@ from psycopg_pool import ConnectionPool
 from pgvector.psycopg import register_vector
 
 from import_graph import ImportGraphBuilder, generate_repo_id as graph_generate_repo_id
+from bm25 import normalize_identifier, build_tsquery, calculate_exact_match_boost
 
 
 class Settings(BaseSettings):
@@ -100,6 +101,38 @@ class SearchResponse(BaseModel):
     """Response from a search request."""
     query: str
     chunks: list[CodeChunk]
+
+
+class KeywordSearchRequest(BaseModel):
+    """Request for BM25 keyword search."""
+    query: str
+    repo_url: Optional[str] = None
+    branch: Optional[str] = None
+    limit: int = 10
+    exact_match_boost: float = 3.0  # Multiplier for exact function/class name matches
+
+
+class KeywordMatch(BaseModel):
+    """A code chunk matched by keyword search."""
+    file_path: str
+    content: str
+    line_start: int
+    line_end: int
+    chunk_type: Optional[str] = None
+    symbol_names: list[str] = []
+    bm25_score: float
+    exact_match_boost: float
+    final_score: float
+    repo_url: Optional[str] = None
+    branch: Optional[str] = None
+
+
+class KeywordSearchResponse(BaseModel):
+    """Response from a keyword search request."""
+    query: str
+    normalized_query: str  # Shows how the query was processed
+    matches: list[KeywordMatch]
+    total_count: int
 
 
 class IndexStats(BaseModel):
@@ -342,6 +375,130 @@ async def search(request: SearchRequest):
                 return SearchResponse(query=request.query, chunks=chunks)
 
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/keyword-search", response_model=KeywordSearchResponse)
+async def keyword_search(request: KeywordSearchRequest):
+    """
+    Search the index using BM25 keyword matching.
+
+    This endpoint provides keyword-based search using PostgreSQL full-text search
+    with BM25-style ranking. It complements vector similarity search by excelling at:
+    - Exact identifier matches (function names, class names, variables)
+    - Technical terms that embedding models may not capture well
+    - Rare but important keywords in code
+
+    Features:
+    - Handles camelCase and snake_case variations automatically
+    - Boosts exact function/class name matches by the specified multiplier (default: 3x)
+    - Uses PostgreSQL ts_rank_cd for document ranking
+
+    Args:
+        query: Search query (identifier or keywords)
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search
+        limit: Maximum number of results (default: 10)
+        exact_match_boost: Multiplier for exact symbol matches (default: 3.0)
+
+    Returns:
+        KeywordSearchResponse with matched chunks and their scores
+    """
+    try:
+        # Build the normalized query for full-text search
+        normalized_query = build_tsquery(request.query)
+
+        # Build WHERE clause
+        where_conditions = ["content_tsv @@ query"]
+        where_params: list = []
+
+        if request.repo_url:
+            repo_id = generate_repo_id(request.repo_url)
+            where_conditions.append("repo_id = %s")
+            where_params.append(repo_id)
+
+        if request.branch:
+            where_conditions.append("branch = %s")
+            where_params.append(request.branch)
+
+        where_clause = " AND ".join(where_conditions)
+
+        # Execute keyword search with BM25-style ranking
+        with get_connection_pool().connection() as conn:
+            with conn.cursor() as cur:
+                # Build the query with ts_rank_cd for BM25-style scoring
+                # Normalization option 1 divides rank by 1 + log(doc length)
+                query_sql = f"""
+                    WITH query AS (
+                        SELECT to_tsquery('simple', %s) AS q
+                    )
+                    SELECT
+                        c.id,
+                        c.file_path,
+                        c.content,
+                        c.line_start,
+                        c.line_end,
+                        c.chunk_type,
+                        c.symbol_names,
+                        c.repo_url,
+                        c.branch,
+                        ts_rank_cd(c.content_tsv, query.q, 1) AS bm25_score
+                    FROM chunks c, query
+                    WHERE c.content_tsv @@ query.q
+                      {"AND " + " AND ".join(where_conditions[1:]) if len(where_conditions) > 1 else ""}
+                    ORDER BY bm25_score DESC
+                    LIMIT %s
+                """
+
+                params = [normalized_query] + where_params + [request.limit * 2]  # Fetch extra for re-ranking
+                cur.execute(query_sql, tuple(params))
+
+                matches = []
+                for row in cur.fetchall():
+                    symbol_names = row[6] or []
+                    bm25_score = float(row[9]) if row[9] else 0.0
+
+                    # Calculate exact match boost
+                    exact_boost = calculate_exact_match_boost(
+                        request.query,
+                        symbol_names,
+                        request.exact_match_boost
+                    )
+
+                    final_score = bm25_score * exact_boost
+
+                    matches.append({
+                        "file_path": row[1],
+                        "content": row[2],
+                        "line_start": row[3],
+                        "line_end": row[4],
+                        "chunk_type": row[5],
+                        "symbol_names": symbol_names,
+                        "repo_url": row[7],
+                        "branch": row[8],
+                        "bm25_score": bm25_score,
+                        "exact_match_boost": exact_boost,
+                        "final_score": final_score,
+                    })
+
+                # Sort by final score and limit
+                matches.sort(key=lambda x: x["final_score"], reverse=True)
+                matches = matches[:request.limit]
+
+                return KeywordSearchResponse(
+                    query=request.query,
+                    normalized_query=normalized_query,
+                    matches=[KeywordMatch(**m) for m in matches],
+                    total_count=len(matches),
+                )
+
+    except Exception as e:
+        # If full-text search column doesn't exist, return helpful error
+        if "content_tsv" in str(e).lower() or "does not exist" in str(e).lower():
+            raise HTTPException(
+                status_code=500,
+                detail="Full-text search index not available. Please re-run schema migration."
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 
