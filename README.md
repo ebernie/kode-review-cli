@@ -85,6 +85,9 @@ kode-review --scope pr --pr 123 --json   # JSON error output
 | `--model <id>` | Override model |
 | `--variant <name>` | Override variant (e.g., `max`, `low`) |
 | `--attach <url>` | Connect to running OpenCode server |
+| `--agentic` | Enable agent mode with dynamic codebase exploration |
+| `--max-iterations <n>` | Max tool call iterations for agent mode (default: 10) |
+| `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 120) |
 
 ---
 
@@ -111,6 +114,146 @@ kode-review --watch --quiet              # Background monitoring
 | `--watch-interactive` | Prompt to select PR/MR instead of auto-reviewing |
 
 **State file:** `~/.config/kode-review-watch/config.json`
+
+---
+
+## Agent Mode
+
+Agent mode enables dynamic codebase exploration during reviews. Instead of only seeing the diff, the AI can actively read files, search for patterns, and analyze code relationships.
+
+```bash
+# Basic agent mode (read_file tool only)
+kode-review --agentic
+
+# Agent mode with full tool suite (requires indexer)
+kode-review --agentic --with-context
+
+# With custom limits
+kode-review --agentic --max-iterations 15 --agentic-timeout 180
+```
+
+### Available Tools in Agent Mode
+
+| Tool | Description | Requires Indexer |
+|------|-------------|------------------|
+| `read_file` | Read file content from the repository | No |
+| `search_code` | Hybrid semantic + keyword search | Yes |
+| `find_definitions` | Find where symbols are defined | Yes |
+| `find_usages` | Find all usages of a symbol | Yes |
+| `get_call_graph` | Get function call relationships | Yes |
+| `get_impact` | Analyze file dependencies | Yes |
+
+### Agent Mode Options
+
+| Flag | Description |
+|------|-------------|
+| `--agentic` | Enable agent mode |
+| `--max-iterations <n>` | Max tool call iterations (default: 10) |
+| `--agentic-timeout <s>` | Timeout in seconds (default: 120, max: 600) |
+
+---
+
+## Review Mode Comparison
+
+Choose the review mode that fits your needs:
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| **Diff** | `kode-review` | Reviews the diff only |
+| **Diff + Index** | `kode-review --with-context` | Reviews diff with pre-retrieved semantic context |
+| **Agent** | `kode-review --agentic` | AI dynamically explores codebase |
+| **Agent + Index** | `kode-review --agentic --with-context` | Full agent capabilities with all tools |
+
+### Pros and Cons
+
+<details>
+<summary><strong>Diff Review (Default)</strong></summary>
+
+**Pros:**
+- Fastest execution time
+- No additional setup required
+- Predictable behavior and cost
+- Lowest token usage
+
+**Cons:**
+- Limited context - only sees the diff
+- May miss issues requiring broader codebase understanding
+- Cannot verify naming conventions or patterns
+- No impact analysis
+
+**Best for:** Quick reviews, simple changes, CI pipelines where speed matters.
+
+</details>
+
+<details>
+<summary><strong>Diff + Indexed Codebase</strong></summary>
+
+**Pros:**
+- Pre-retrieved context reduces AI decision overhead
+- Consistent, reproducible context selection
+- Better understanding of related code patterns
+- Moderate execution time
+
+**Cons:**
+- Requires Docker and indexer setup
+- Context is statically selected before review
+- May include irrelevant context or miss important context
+- Initial indexing takes time for large repos
+
+**Best for:** Standard reviews where you want better context without longer review times.
+
+</details>
+
+<details>
+<summary><strong>Agent Mode</strong></summary>
+
+**Pros:**
+- AI decides what to explore based on the changes
+- Can read specific files for full context
+- More thorough analysis for complex changes
+- Provides evidence from exploration in findings
+
+**Cons:**
+- Only `read_file` tool without indexer
+- Slower than diff-only mode
+- Less predictable execution time and cost
+- May not explore optimally without search tools
+
+**Best for:** Complex changes where file reading is sufficient, no indexer setup desired.
+
+</details>
+
+<details>
+<summary><strong>Agent Mode + Index</strong></summary>
+
+**Pros:**
+- Full tool suite: read, search, definitions, usages, call graph
+- Deepest understanding of code impact
+- Can verify patterns, find all callers, assess blast radius
+- Most thorough reviews possible
+
+**Cons:**
+- Requires Docker and indexer setup
+- Slowest execution time
+- Highest cost (more tokens used)
+- May over-explore for simple changes
+
+**Best for:** Critical code reviews, security-sensitive changes, unfamiliar codebases, architectural changes.
+
+</details>
+
+### Quick Reference
+
+| Aspect | Diff | Diff + Index | Agent | Agent + Index |
+|--------|------|--------------|-------|---------------|
+| Setup Required | None | Docker + Index | None | Docker + Index |
+| Speed | Fast | Medium | Medium | Slow |
+| Context Depth | Shallow | Medium | Medium | Deep |
+| Cost (Tokens) | Low | Medium | Medium | High |
+| Impact Analysis | No | Limited | No | Yes |
+| Pattern Verification | No | Yes | No | Yes |
+| File Reading | No | No | Yes | Yes |
+| Search Capability | No | Pre-selected | No | Yes |
 
 ---
 
