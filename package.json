@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@inquirer/prompts": "^7.0.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
     "@opencode-ai/sdk": "^1.0.0",
     "chalk": "^5.4.0",
     "commander": "^13.0.0",

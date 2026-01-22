@@ -34,16 +34,18 @@ import {
  * Time budgets for each retrieval stage in milliseconds.
  * These are soft limits - operations complete fully but won't start new queries
  * if the budget is exceeded.
+ *
+ * Total budget: 2000ms (increased from 1200ms for better retrieval quality)
  */
 export const STAGE_BUDGETS = {
   /** Stage 1: Keyword search for exact identifier matches */
-  KEYWORD_SEARCH: 100,
+  KEYWORD_SEARCH: 300,
   /** Stage 2: Vector similarity search on diff content */
-  VECTOR_SEARCH: 500,
+  VECTOR_SEARCH: 700,
   /** Stage 3: Structural lookup (definitions, usages, call graph) */
-  STRUCTURAL_LOOKUP: 500,
+  STRUCTURAL_LOOKUP: 700,
   /** Stage 4: Re-ranking and deduplication */
-  RERANK: 100,
+  RERANK: 300,
 } as const
 
 /**

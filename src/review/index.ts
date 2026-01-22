@@ -7,3 +7,14 @@ export {
   extractModifiedFilesFromDiff,
   type ProjectStructureContext,
 } from './project-structure.js'
+export {
+  runAgenticReview,
+  runAgenticReviewWithServer,
+  type AgenticReviewOptions,
+  type AgenticReviewResult,
+} from './agentic-engine.js'
+export {
+  buildAgenticPrompt,
+  AGENTIC_SYSTEM_PROMPT,
+  type AgenticPromptOptions,
+} from './agentic-prompt.js'
