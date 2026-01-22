@@ -14,6 +14,8 @@ export type {
   PrDescriptionInfo,
   DefinitionLocation,
   DefinitionLookupResult,
+  UsageLocation,
+  UsageLookupResult,
   // Import chain tracking types
   ImportTree,
   CircularDependency,
@@ -24,6 +26,16 @@ export type {
   KeywordMatch,
   KeywordSearchResult,
   KeywordSearchOptions,
+  // Hybrid search types
+  HybridMatch,
+  HybridSearchResult,
+  HybridSearchOptions,
+  // Call graph types
+  CallGraphNode,
+  CallGraphEdge,
+  CallGraphDirection,
+  CallGraphResult,
+  CallGraphOptions,
 } from './types.js'
 
 // Detector
@@ -50,6 +62,7 @@ export { IndexerClient } from './client.js'
 // Context retrieval
 export {
   getSemanticContext,
+  getSemanticContextWithPipeline,
   extractQueriesFromDiff,
   parseDiffToModifiedLines,
   chunkOverlapsModifiedLines,
@@ -62,6 +75,30 @@ export {
   extractQueriesFromPrDescription,
   extractCodeByFileFromDiff,
 } from './context.js'
+
+export type { PipelineSemanticContextOptions } from './context.js'
+
+// Multi-stage retrieval pipeline
+export {
+  executePipeline,
+  createPipelineInput,
+  pipelineResultsToWeightedChunks,
+  logPipelineMetrics,
+  extractSymbolsFromDiff,
+  STAGE_BUDGETS,
+  HIGH_CONFIDENCE_THRESHOLD,
+  STAGE_LIMITS,
+  SOURCE_WEIGHTS,
+} from './pipeline.js'
+
+export type {
+  RetrievalSource,
+  PipelineResult,
+  StageMetrics,
+  PipelineConfig,
+  PipelineExecutionResult,
+  PipelineInput,
+} from './pipeline.js'
 
 // XML context formatting
 export {

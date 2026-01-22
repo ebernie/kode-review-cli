@@ -12,6 +12,10 @@ import type {
   KeywordMatch,
   HybridSearchResult,
   HybridMatch,
+  CallGraphResult,
+  CallGraphNode,
+  CallGraphEdge,
+  CallGraphDirection,
 } from './types.js'
 
 export interface IndexRequest {
@@ -802,6 +806,142 @@ export class IndexerClient {
       vectorWeight: data.vector_weight,
       keywordWeight: data.keyword_weight,
       fallbackUsed: data.fallback_used,
+    }
+  }
+
+  // ============================================================================
+  // Call Graph Queries
+  // ============================================================================
+
+  /**
+   * Query the call graph to find callers and/or callees of a function.
+   *
+   * This enables impact analysis by traversing the call graph to find:
+   * - Functions that call the specified function (callers)
+   * - Functions that the specified function calls (callees)
+   * - Or both directions
+   *
+   * @param functionName - The function name to query (e.g., 'handleRequest', 'MyClass.method')
+   * @param repoUrl - Optional repository URL to scope the search
+   * @param branch - Optional branch to scope the search (defaults to 'main')
+   * @param direction - 'callers', 'callees', or 'both' (default: 'both')
+   * @param depth - How many levels deep to traverse (default: 2, max: 5)
+   * @param limit - Maximum number of nodes to return (default: 100)
+   */
+  async getCallGraph(
+    functionName: string,
+    repoUrl?: string,
+    branch?: string,
+    direction: CallGraphDirection = 'both',
+    depth: number = 2,
+    limit: number = 100
+  ): Promise<CallGraphResult> {
+    const params = new URLSearchParams()
+    params.append('direction', direction)
+    params.append('depth', String(Math.min(Math.max(1, depth), 5)))
+    params.append('limit', String(limit))
+
+    if (repoUrl) {
+      params.append('repo_url', repoUrl)
+    }
+    if (branch) {
+      params.append('branch', branch)
+    }
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/callgraph/${encodeURIComponent(functionName)}?${queryString}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Call graph query failed: ${error}`)
+    }
+
+    interface CallGraphNodeResponse {
+      id: string
+      name: string
+      file_path: string
+      line_start: number
+      line_end: number
+      depth: number
+      content?: string
+    }
+
+    interface CallGraphEdgeResponse {
+      source_id: string
+      target_id: string
+      callee_name: string
+      line_number?: number
+      receiver?: string
+    }
+
+    interface CallGraphResponse {
+      function: string
+      direction: string
+      depth: number
+      nodes: CallGraphNodeResponse[]
+      edges: CallGraphEdgeResponse[]
+      total_nodes: number
+      total_edges: number
+    }
+
+    const data = (await response.json()) as CallGraphResponse
+
+    // Map snake_case to camelCase
+    const nodes: CallGraphNode[] = data.nodes.map(node => ({
+      id: node.id,
+      name: node.name,
+      filePath: node.file_path,
+      lineStart: node.line_start,
+      lineEnd: node.line_end,
+      depth: node.depth,
+      content: node.content,
+    }))
+
+    const edges: CallGraphEdge[] = data.edges.map(edge => ({
+      sourceId: edge.source_id,
+      targetId: edge.target_id,
+      calleeName: edge.callee_name,
+      lineNumber: edge.line_number,
+      receiver: edge.receiver,
+    }))
+
+    // Separate callers and callees from the nodes
+    // The function itself is at depth 0
+    // For 'callers' direction, depth > 0 means callers
+    // For 'callees' direction, depth > 0 means callees
+    // For 'both' direction, we need to check edges
+    const callers: CallGraphNode[] = []
+    const callees: CallGraphNode[] = []
+
+    // Build a set of target IDs from edges (these are callees)
+    const calleeIds = new Set(edges.map(e => e.targetId))
+    const callerIds = new Set(edges.map(e => e.sourceId))
+
+    for (const node of nodes) {
+      if (node.depth === 0) continue // Skip the root function itself
+
+      if (direction === 'callers' || (direction === 'both' && callerIds.has(node.id))) {
+        callers.push(node)
+      }
+      if (direction === 'callees' || (direction === 'both' && calleeIds.has(node.id))) {
+        callees.push(node)
+      }
+    }
+
+    return {
+      function: data.function,
+      direction: data.direction as CallGraphDirection,
+      depth: data.depth,
+      nodes,
+      edges,
+      totalNodes: data.total_nodes,
+      totalEdges: data.total_edges,
+      callers,
+      callees,
     }
   }
 }

@@ -13,6 +13,15 @@ import {
   type FileTypeStrategyOverrides as StrategyOverrides,
 } from './file-type-strategies.js'
 import { formatContextAsXml } from './xml-context.js'
+import {
+  executePipeline,
+  createPipelineInput,
+  pipelineResultsToWeightedChunks,
+  logPipelineMetrics,
+  HIGH_CONFIDENCE_THRESHOLD,
+  type PipelineConfig,
+  type PipelineExecutionResult,
+} from './pipeline.js'
 
 /**
  * Weight multiplier for chunks that overlap with modified lines.
@@ -1662,4 +1671,203 @@ export async function getSemanticContext(
   logger.info(`Including ${parts.join(', ')}`)
 
   return formatContext(selectedChunks)
+}
+
+// =============================================================================
+// Multi-Stage Pipeline-based Context Retrieval
+// =============================================================================
+
+/**
+ * Extended options for pipeline-based semantic context retrieval.
+ */
+export interface PipelineSemanticContextOptions extends SemanticContextOptions {
+  /** Enable the multi-stage retrieval pipeline (default: true) */
+  usePipeline?: boolean
+
+  /** Enable early termination on high-confidence matches (default: true) */
+  enableEarlyTermination?: boolean
+
+  /** Score threshold for early termination (default: 0.9) */
+  earlyTerminationThreshold?: number
+}
+
+/**
+ * Get semantic context using the multi-stage retrieval pipeline.
+ *
+ * This function implements a progressive retrieval strategy:
+ * - Stage 1: Fast keyword search for exact matches (100ms budget)
+ * - Stage 2: Vector similarity on diff content (500ms budget)
+ * - Stage 3: Structural lookup via definitions/usages/callgraph (500ms budget)
+ * - Stage 4: Re-rank combined results by relevance (100ms budget)
+ *
+ * Early termination occurs if high-confidence matches (score > 0.9) are found,
+ * reducing latency while still providing deep context when needed.
+ *
+ * @param options - Configuration options for context retrieval
+ * @returns Formatted XML context string, or null if no context found
+ */
+export async function getSemanticContextWithPipeline(
+  options: PipelineSemanticContextOptions
+): Promise<{ context: string | null; pipelineResult?: PipelineExecutionResult }> {
+  const {
+    diffContent,
+    repoUrl,
+    branch,
+    topK,
+    maxTokens,
+    prDescription,
+    fileTypeStrategyOverrides,
+    usePipeline = true,
+    enableEarlyTermination = true,
+    earlyTerminationThreshold = HIGH_CONFIDENCE_THRESHOLD,
+  } = options
+
+  // If pipeline is disabled, fall back to legacy retrieval
+  if (!usePipeline) {
+    const context = await getSemanticContext(options)
+    return { context }
+  }
+
+  // Apply any user-configured strategy overrides
+  if (fileTypeStrategyOverrides) {
+    const overrides: StrategyOverrides = {
+      priorityWeights: fileTypeStrategyOverrides.priorityWeights,
+      disabledStrategies: fileTypeStrategyOverrides.disabledStrategies as StrategyOverrides['disabledStrategies'],
+      extensionMappings: fileTypeStrategyOverrides.extensionMappings as StrategyOverrides['extensionMappings'],
+    }
+    applyStrategyOverrides(overrides)
+  }
+
+  // Check if indexer is running
+  const running = await isIndexerRunning()
+  if (!running) {
+    logger.debug('Indexer not running, skipping semantic context')
+    return { context: null }
+  }
+
+  const apiUrl = getIndexerApiUrl()
+  const client = new IndexerClient(apiUrl)
+
+  // Check health
+  const healthy = await client.health()
+  if (!healthy) {
+    logger.debug('Indexer not healthy, skipping semantic context')
+    return { context: null }
+  }
+
+  // Parse diff and extract queries
+  const parsedDiff = parseDiffToModifiedLines(diffContent)
+  const diffQueries = extractQueriesFromDiff(diffContent)
+  const descriptionInfo = extractPrDescriptionInfo(prDescription)
+  const descriptionQueries = extractQueriesFromPrDescription(descriptionInfo)
+
+  if (diffQueries.length === 0 && descriptionQueries.length === 0) {
+    logger.debug('No queries extracted from diff or description')
+    return { context: null }
+  }
+
+  logger.debug(`Pipeline input: ${diffQueries.length} diff queries, ${descriptionQueries.length} description queries`)
+
+  // Create pipeline input
+  const pipelineInput = createPipelineInput(
+    diffContent,
+    parsedDiff,
+    diffQueries,
+    descriptionQueries
+  )
+
+  // Configure pipeline
+  const pipelineConfig: PipelineConfig = {
+    repoUrl,
+    branch,
+    maxResults: topK * 2, // Get more results for filtering
+    enableEarlyTermination,
+    earlyTerminationThreshold,
+  }
+
+  // Execute the multi-stage pipeline
+  logger.debug('Executing multi-stage retrieval pipeline')
+  const pipelineResult = await executePipeline(client, pipelineInput, pipelineConfig)
+
+  // Log pipeline metrics
+  logPipelineMetrics(pipelineResult)
+
+  if (pipelineResult.results.length === 0) {
+    logger.debug('Pipeline returned no results')
+    return { context: null, pipelineResult }
+  }
+
+  // Convert pipeline results to weighted chunks
+  let weightedChunks = pipelineResultsToWeightedChunks(pipelineResult.results)
+
+  // Find related test files for modified source files
+  const sourceFiles = extractSourceFilesFromDiff(parsedDiff)
+  let testChunks: WeightedCodeChunk[] = []
+
+  if (sourceFiles.length > 0) {
+    logger.debug(`Looking for test files related to ${sourceFiles.length} modified source files`)
+
+    // Try path-based search first
+    testChunks = await findRelatedTestFiles(sourceFiles, client, repoUrl, branch)
+
+    // If no test files found via path search, try symbol-based search
+    if (testChunks.length === 0) {
+      testChunks = await findTestFilesBySymbolSearch(sourceFiles, client, repoUrl, branch)
+    }
+
+    if (testChunks.length > 0) {
+      logger.debug(`Found ${testChunks.length} related test file chunks`)
+    }
+  }
+
+  // Combine pipeline results with test file chunks
+  const allWeightedChunks = [...weightedChunks, ...testChunks]
+
+  // Sort by weighted score (descending)
+  allWeightedChunks.sort((a, b) => b.score - a.score)
+
+  // Take top chunks up to token limit
+  const selectedChunks: WeightedCodeChunk[] = []
+  let totalTokens = 0
+  const seenInSelection = new Set<string>()
+
+  for (const chunk of allWeightedChunks) {
+    const id = `${chunk.filename}:${chunk.startLine}-${chunk.endLine}`
+    if (seenInSelection.has(id)) {
+      continue
+    }
+
+    const chunkTokens = estimateTokens(chunk.code) + 50
+    if (totalTokens + chunkTokens > maxTokens) {
+      break
+    }
+
+    seenInSelection.add(id)
+    selectedChunks.push(chunk)
+    totalTokens += chunkTokens
+
+    if (selectedChunks.length >= topK * 2) {
+      break
+    }
+  }
+
+  // Build informative log message
+  const selectedModifiedCount = selectedChunks.filter(c => c.isModifiedContext).length
+  const selectedTestCount = selectedChunks.filter(c => c.isTestFile).length
+
+  const parts = [`${selectedChunks.length} related code chunks`]
+  if (selectedModifiedCount > 0) parts.push(`${selectedModifiedCount} modified`)
+  if (selectedTestCount > 0) parts.push(`${selectedTestCount} test files`)
+  parts.push(`${totalTokens} estimated tokens`)
+
+  if (pipelineResult.earlyTerminated) {
+    parts.push('(early termination)')
+  }
+
+  logger.info(`Pipeline retrieved ${parts.join(', ')}`)
+
+  return {
+    context: formatContext(selectedChunks),
+    pipelineResult,
+  }
 }

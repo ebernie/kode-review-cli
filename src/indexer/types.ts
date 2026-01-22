@@ -822,3 +822,113 @@ export interface HybridSearchOptions {
   /** Multiplier for exact symbol matches in keyword search (default: 3.0) */
   exactMatchBoost?: number
 }
+
+// ============================================================================
+// Call Graph Types
+// ============================================================================
+
+/**
+ * A node in the call graph representing a function/method
+ */
+export interface CallGraphNode {
+  /** Chunk ID */
+  id: string
+
+  /** Function/method name */
+  name: string
+
+  /** File path relative to repo root */
+  filePath: string
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** Distance from the queried function (0 = the function itself) */
+  depth: number
+
+  /** The code content (optional, populated when available) */
+  content?: string
+}
+
+/**
+ * An edge in the call graph representing a call relationship
+ */
+export interface CallGraphEdge {
+  /** Caller chunk ID */
+  sourceId: string
+
+  /** Callee chunk ID */
+  targetId: string
+
+  /** Name of the called function */
+  calleeName: string
+
+  /** Line where the call occurs (if available) */
+  lineNumber?: number
+
+  /** Object receiver for method calls (e.g., 'this', 'myObject') */
+  receiver?: string
+}
+
+/**
+ * Direction for call graph queries
+ */
+export type CallGraphDirection = 'callers' | 'callees' | 'both'
+
+/**
+ * Response from a call graph query
+ */
+export interface CallGraphResult {
+  /** The function that was queried */
+  function: string
+
+  /** Direction of the query */
+  direction: CallGraphDirection
+
+  /** Depth of traversal */
+  depth: number
+
+  /** All nodes in the call graph */
+  nodes: CallGraphNode[]
+
+  /** All edges representing call relationships */
+  edges: CallGraphEdge[]
+
+  /** Total number of nodes found */
+  totalNodes: number
+
+  /** Total number of edges found */
+  totalEdges: number
+
+  /** Flattened list of callers (nodes that call the function) */
+  callers: CallGraphNode[]
+
+  /** Flattened list of callees (nodes that the function calls) */
+  callees: CallGraphNode[]
+}
+
+/**
+ * Options for call graph queries
+ */
+export interface CallGraphOptions {
+  /** The function name to query */
+  function: string
+
+  /** Direction: 'callers', 'callees', or 'both' (default: 'both') */
+  direction?: CallGraphDirection
+
+  /** How many levels deep to traverse (default: 2, max: 5) */
+  depth?: number
+
+  /** Repository URL to scope the search */
+  repoUrl?: string
+
+  /** Branch to scope the search (defaults to 'main') */
+  branch?: string
+
+  /** Maximum number of nodes to return (default: 100) */
+  limit?: number
+}
