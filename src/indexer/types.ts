@@ -943,3 +943,112 @@ export interface CallGraphOptions {
   /** Maximum number of nodes to return (default: 100) */
   limit?: number
 }
+
+// ============================================================================
+// Background Indexing Types
+// ============================================================================
+
+/**
+ * Priority level for background indexing jobs
+ */
+export type IndexingJobPriority = 'low' | 'normal' | 'high'
+
+/**
+ * Status of a background indexing job
+ */
+export type IndexingJobStatus = 'pending' | 'processing' | 'completed' | 'failed'
+
+/**
+ * Represents a background indexing job
+ */
+export interface IndexingJob {
+  /** Unique job identifier */
+  id: string
+
+  /** Repository URL */
+  repoUrl: string
+
+  /** Absolute path to the repository */
+  repoPath: string
+
+  /** Branch to index */
+  branch: string
+
+  /** Optional list of changed files (for incremental indexing) */
+  changedFiles?: string[]
+
+  /** Number of files changed (used for threshold checks) */
+  fileCount: number
+
+  /** Job priority */
+  priority: IndexingJobPriority
+
+  /** Current job status */
+  status: IndexingJobStatus
+
+  /** When the job was enqueued */
+  enqueuedAt: string
+
+  /** When processing started */
+  startedAt?: string
+
+  /** When processing completed */
+  completedAt?: string
+
+  /** Error message if failed */
+  error?: string
+
+  /** Result from incremental indexing */
+  result?: {
+    chunksAdded: number
+    chunksRemoved: number
+    elapsedSeconds: number
+  }
+}
+
+/**
+ * Configuration for background indexing
+ */
+export interface BackgroundIndexerConfig {
+  /** Whether background indexing is enabled */
+  enabled: boolean
+
+  /** Threshold of changed files to trigger background re-indexing (default: 100) */
+  autoQueueThreshold: number
+
+  /** Polling interval in milliseconds (default: 5000) */
+  pollInterval: number
+
+  /** Maximum concurrent jobs (default: 1) */
+  maxConcurrentJobs: number
+}
+
+/**
+ * Progress information for a running background indexing job
+ */
+export interface BackgroundIndexingProgress {
+  /** Current job being processed */
+  currentJob: IndexingJob | null
+
+  /** Number of pending jobs in queue */
+  pendingCount: number
+
+  /** Total jobs completed this session */
+  completedCount: number
+
+  /** Total jobs failed this session */
+  failedCount: number
+
+  /** Whether the background indexer is running */
+  isRunning: boolean
+}
+
+/**
+ * Event types emitted by the background indexer
+ */
+export type BackgroundIndexerEvent =
+  | { type: 'job_started'; job: IndexingJob }
+  | { type: 'job_completed'; job: IndexingJob }
+  | { type: 'job_failed'; job: IndexingJob; error: string }
+  | { type: 'indexer_started' }
+  | { type: 'indexer_stopped' }

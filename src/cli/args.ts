@@ -38,6 +38,11 @@ export interface CliOptions {
   indexBranch?: string
   indexListRepos: boolean
 
+  // Background indexer commands
+  backgroundIndexer: boolean
+  indexQueue: boolean
+  indexQueueClear: boolean
+
   // Review context
   withContext: boolean
   contextTopK: number
@@ -92,6 +97,12 @@ export function createProgram(): Command {
     .option('--index-branch <branch>', 'Branch to index (defaults to current branch)')
     .option('--index-list-repos', 'List all indexed repositories with their branches', false)
 
+  // Background indexer commands
+  program
+    .option('--background-indexer', 'Start background indexer daemon for large repo re-indexing', false)
+    .option('--index-queue', 'Show pending background indexing jobs', false)
+    .option('--index-queue-clear', 'Clear all pending background indexing jobs', false)
+
   // Review context options
   program
     .option('--with-context', 'Include semantic context in review', false)
@@ -144,6 +155,9 @@ export function parseArgs(argv: string[]): CliOptions {
     indexerCleanup: opts.indexerCleanup ?? false,
     indexBranch: opts.indexBranch,
     indexListRepos: opts.indexListRepos ?? false,
+    backgroundIndexer: opts.backgroundIndexer ?? false,
+    indexQueue: opts.indexQueue ?? false,
+    indexQueueClear: opts.indexQueueClear ?? false,
     withContext: opts.withContext ?? false,
     contextTopK,
   }

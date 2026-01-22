@@ -38,6 +38,13 @@ export type {
   CallGraphOptions,
   // Incremental indexing types
   IncrementalIndexOptions,
+  // Background indexing types
+  IndexingJob,
+  IndexingJobPriority,
+  IndexingJobStatus,
+  BackgroundIndexerConfig,
+  BackgroundIndexingProgress,
+  BackgroundIndexerEvent,
 } from './types.js'
 
 // Detector
@@ -171,3 +178,15 @@ export type {
 
 // Setup wizard
 export { setupIndexer, showIndexerStatus, handleStopIndexer, handleCleanupIndexer } from './setup.js'
+
+// Background indexing
+export { IndexingJobQueue } from './background-queue.js'
+
+export {
+  BackgroundIndexer,
+  getBackgroundIndexer,
+  shouldTriggerBackgroundIndexing,
+  maybeEnqueueBackgroundIndexing,
+  formatBackgroundIndexingNotification,
+  DEFAULT_BACKGROUND_INDEXER_CONFIG,
+} from './background-indexer.js'

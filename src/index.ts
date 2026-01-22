@@ -45,6 +45,10 @@ import {
   handleCleanupIndexer,
   listIndexedRepos,
   extractPrDescriptionInfo,
+  parseDiffToModifiedLines,
+  maybeEnqueueBackgroundIndexing,
+  getBackgroundIndexer,
+  formatBackgroundIndexingNotification,
 } from './indexer/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
@@ -172,7 +176,139 @@ async function handleIndexerCommands(options: CliOptions): Promise<boolean> {
     return true
   }
 
+  // Show background indexing queue
+  if (options.indexQueue) {
+    await showBackgroundIndexingQueue()
+    return true
+  }
+
+  // Clear background indexing queue
+  if (options.indexQueueClear) {
+    const confirmed = await confirm({
+      message: 'Clear all pending background indexing jobs?',
+      default: false,
+    })
+
+    if (confirmed) {
+      const indexer = getBackgroundIndexer()
+      indexer.clearQueue()
+      logger.success('Background indexing queue cleared')
+    }
+    return true
+  }
+
+  // Start background indexer daemon
+  if (options.backgroundIndexer) {
+    await runBackgroundIndexerDaemon()
+    return true
+  }
+
   return false
+}
+
+async function showBackgroundIndexingQueue(): Promise<void> {
+  const indexer = getBackgroundIndexer()
+  const jobs = indexer.getAllJobs()
+  const progress = indexer.getProgress()
+
+  console.log('')
+  console.log('Background Indexing Queue')
+  console.log('=' .repeat(60))
+  console.log('')
+  console.log(`Status: ${progress.isRunning ? green('Running') : 'Stopped'}`)
+  console.log(`Pending: ${progress.pendingCount}`)
+  console.log(`Completed (this session): ${progress.completedCount}`)
+  console.log(`Failed (this session): ${progress.failedCount}`)
+
+  if (progress.currentJob) {
+    console.log('')
+    console.log('Currently Processing:')
+    console.log(`  ${progress.currentJob.repoUrl}@${progress.currentJob.branch}`)
+    console.log(`  Files: ${progress.currentJob.fileCount}`)
+  }
+
+  const pendingJobs = jobs.filter(j => j.status === 'pending')
+  if (pendingJobs.length > 0) {
+    console.log('')
+    console.log('Pending Jobs:')
+    for (const job of pendingJobs) {
+      console.log(`  - ${job.repoUrl}@${job.branch} (${job.fileCount} files, priority: ${job.priority})`)
+    }
+  }
+
+  const completedJobs = jobs.filter(j => j.status === 'completed').slice(-5)
+  if (completedJobs.length > 0) {
+    console.log('')
+    console.log('Recent Completed:')
+    for (const job of completedJobs) {
+      const result = job.result
+        ? `+${job.result.chunksAdded}/-${job.result.chunksRemoved} chunks`
+        : 'no stats'
+      console.log(`  - ${job.repoUrl}@${job.branch} (${result})`)
+    }
+  }
+
+  const failedJobs = jobs.filter(j => j.status === 'failed').slice(-3)
+  if (failedJobs.length > 0) {
+    console.log('')
+    console.log('Recent Failed:')
+    for (const job of failedJobs) {
+      console.log(`  - ${job.repoUrl}@${job.branch}: ${job.error}`)
+    }
+  }
+
+  console.log('')
+  console.log('=' .repeat(60))
+}
+
+async function runBackgroundIndexerDaemon(): Promise<void> {
+  logger.info('Starting background indexer daemon...')
+  logger.info('Press Ctrl+C to stop')
+  console.log('')
+
+  const indexer = getBackgroundIndexer()
+
+  // Set up event handlers for progress display
+  indexer.on('job_started', (event) => {
+    logger.info(`Started: ${event.job.repoUrl}@${event.job.branch} (${event.job.fileCount} files)`)
+  })
+
+  indexer.on('job_completed', (event) => {
+    const result = event.job.result
+    logger.success(
+      `Completed: ${event.job.repoUrl}@${event.job.branch} ` +
+        `(+${result?.chunksAdded || 0}/-${result?.chunksRemoved || 0} chunks ` +
+        `in ${result?.elapsedSeconds?.toFixed(1) || '?'}s)`
+    )
+  })
+
+  indexer.on('job_failed', (event) => {
+    logger.error(`Failed: ${event.job.repoUrl}@${event.job.branch} - ${event.error}`)
+  })
+
+  // Start the indexer
+  indexer.start()
+
+  // Set up graceful shutdown
+  let shuttingDown = false
+
+  const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
+
+    console.log('')
+    logger.info('Shutting down background indexer...')
+    await indexer.stop()
+    process.exit(0)
+  }
+
+  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', shutdown)
+
+  // Keep the process running
+  await new Promise(() => {
+    // This promise never resolves - we wait for shutdown signal
+  })
 }
 
 async function runWatchMode(options: CliOptions, ctx: CliContext): Promise<void> {
@@ -545,6 +681,51 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         } catch (error) {
           logger.warn('Could not retrieve semantic context')
           logger.debug(`Error: ${error}`)
+        }
+
+        // Check if background re-indexing should be triggered for large repos
+        // This happens asynchronously - reviews proceed with potentially stale index
+        try {
+          const parsedDiff = parseDiffToModifiedLines(diffContent)
+          const fileCount = parsedDiff.fileChanges.size
+
+          if (fileCount > 0 && repoRoot) {
+            const branch = await getCurrentBranch()
+            const { enqueued, job } = maybeEnqueueBackgroundIndexing({
+              repoUrl,
+              repoPath: repoRoot,
+              branch: branch || 'main',
+              fileCount,
+            })
+
+            if (enqueued && job) {
+              logger.info(
+                `Large change detected (${fileCount} files). ` +
+                  'Background re-indexing queued - review proceeding with current index.'
+              )
+
+              // Start the background indexer if not already running
+              const indexer = getBackgroundIndexer()
+              if (!indexer.getProgress().isRunning) {
+                indexer.start()
+
+                // Set up notification for when indexing completes
+                indexer.once('job_completed', (event) => {
+                  if (!ctx.quiet) {
+                    console.log('')
+                    console.log(green(formatBackgroundIndexingNotification(event.job)))
+                  }
+                })
+
+                indexer.once('job_failed', (event) => {
+                  logger.warn(formatBackgroundIndexingNotification(event.job))
+                })
+              }
+            }
+          }
+        } catch (bgError) {
+          // Background indexing errors should not affect the review
+          logger.debug(`Background indexing check failed: ${bgError}`)
         }
       }
     }
