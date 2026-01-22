@@ -128,6 +128,21 @@ KODE_REVIEW_EMBEDDING_MODEL=${config.indexer.embeddingModel}
 /**
  * Run a docker compose command
  */
+/**
+ * Get environment variables for Docker commands.
+ * Removes DOCKER_DEFAULT_PLATFORM to ensure native architecture is used.
+ */
+function getDockerEnv(): Record<string, string> {
+  const env: Record<string, string> = {}
+  // Copy all env vars except DOCKER_DEFAULT_PLATFORM
+  for (const [key, value] of Object.entries(process.env)) {
+    if (key !== 'DOCKER_DEFAULT_PLATFORM' && value !== undefined) {
+      env[key] = value
+    }
+  }
+  return env
+}
+
 async function dockerCompose(
   args: string[],
   options?: { cwd?: string; interactive?: boolean }
@@ -143,11 +158,11 @@ async function dockerCompose(
   ]
 
   if (options?.interactive) {
-    const exitCode = await execInteractive('docker', fullArgs, { cwd: configDir })
+    const exitCode = await execInteractive('docker', fullArgs, { cwd: configDir, env: getDockerEnv(), extendEnv: false })
     return { exitCode, stdout: '', stderr: '' }
   }
 
-  return await exec('docker', fullArgs, { cwd: configDir })
+  return await exec('docker', fullArgs, { cwd: configDir, env: getDockerEnv(), extendEnv: false })
 }
 
 /**
@@ -368,8 +383,8 @@ export async function indexRepository(
 
   logger.info('Starting indexer container...')
 
-  // Run the ephemeral container
-  const result = await exec('docker', dockerArgs, { timeout: 600000 }) // 10 minute timeout
+  // Run the ephemeral container with clean env to ensure native architecture
+  const result = await exec('docker', dockerArgs, { timeout: 600000, env: getDockerEnv(), extendEnv: false }) // 10 minute timeout
 
   if (result.exitCode !== 0) {
     logger.error(`Indexer output:\n${result.stdout}`)
@@ -502,7 +517,7 @@ export async function indexRepositoryIncremental(
   logger.info('Starting incremental indexer container...')
 
   // Run the ephemeral container with shorter timeout (incremental should be fast)
-  const result = await exec('docker', dockerArgs, { timeout: 120000 }) // 2 minute timeout
+  const result = await exec('docker', dockerArgs, { timeout: 120000, env: getDockerEnv(), extendEnv: false }) // 2 minute timeout
 
   if (result.exitCode !== 0) {
     logger.error(`Indexer output:\n${result.stdout}`)
@@ -808,9 +823,9 @@ export async function runCocoIndexFlow(
 
   logger.info('Starting CocoIndex flow container...')
 
-  // Run the ephemeral container
+  // Run the ephemeral container with clean env to ensure native architecture
   const timeout = options?.live ? 0 : 600000 // No timeout for live mode, 10 min otherwise
-  const result = await exec('docker', dockerArgs, { timeout })
+  const result = await exec('docker', dockerArgs, { timeout, env: getDockerEnv(), extendEnv: false })
 
   if (result.exitCode !== 0) {
     logger.error(`CocoIndex output:\n${result.stdout}`)
@@ -864,7 +879,7 @@ export async function extractRelationships(
     'python', 'cocoindex_flow.py', '--extract-relationships',
   ]
 
-  const result = await exec('docker', dockerArgs, { timeout: 300000 }) // 5 minute timeout
+  const result = await exec('docker', dockerArgs, { timeout: 300000, env: getDockerEnv(), extendEnv: false }) // 5 minute timeout
 
   if (result.exitCode !== 0) {
     logger.warn(`Relationship extraction warning: ${result.stderr}`)
@@ -913,7 +928,7 @@ export async function verifyExport(
     'python', 'verify_export.py', '--skip-search',
   ]
 
-  const result = await exec('docker', dockerArgs, { timeout: 60000 })
+  const result = await exec('docker', dockerArgs, { timeout: 60000, env: getDockerEnv(), extendEnv: false })
 
   logger.info(result.stdout)
 
