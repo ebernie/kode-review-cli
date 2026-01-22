@@ -63,6 +63,23 @@ export {
   extractCodeByFileFromDiff,
 } from './context.js'
 
+// XML context formatting
+export {
+  formatContextAsXml,
+  formatChunkAsXml,
+  getContextType,
+  getRelevanceLevel,
+  getRetrievalReason,
+  groupChunksByType,
+  getXmlSchemaDocumentation,
+} from './xml-context.js'
+
+export type {
+  ContextType,
+  RelevanceLevel,
+  XmlContextMetadata,
+} from './xml-context.js'
+
 // File-type strategies
 export {
   getFileType,

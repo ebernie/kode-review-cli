@@ -28,20 +28,33 @@ const CONTEXT_LIMITATIONS_WITH_CONTEXT = `
 You have access to two types of context for this review:
 
 1. **The Diff**: The actual code changes being reviewed (primary focus)
-2. **Related Code**: Semantically similar code from the repository that may help you understand patterns, conventions, and how the changes integrate with the existing codebase
+2. **Related Code**: Semantically similar code from the repository in structured XML format
 
-**Important notes about Related Code:**
-- This is retrieved via semantic search - it shows code *similar* to the changes, not necessarily *all* related code
-- Use it to understand existing patterns and verify consistency
-- It may include callers, similar implementations, or related utilities
-- If something seems inconsistent with related code, flag it - but acknowledge the context is partial
+**XML Context Structure:**
+The related code is organized in XML sections with metadata:
+- \`<modified>\`: Code chunks that overlap with lines being modified (highest relevance)
+- \`<test>\`: Related test files for the modified source files
+- \`<similar>\`: Semantically similar code found via vector search
+- \`<definition>\`: Type, interface, or function definitions
+- \`<config>\`: Configuration files
 
-**You still cannot see:**
-- All files in the repository (only semantically related snippets)
-- Configuration files unless they appear in the diff or related code
-- Test files unless they appear in the diff or related code
+Each \`<context>\` element includes attributes:
+- \`path\`: File path relative to repository root
+- \`lines\`: Line range (e.g., "45-67")
+- \`relevance\`: Importance level (high, medium, low)
+- \`reason\`: Why this context was retrieved
+- \`score\`: Similarity score (0-1)
 
-When referencing related code in your review, cite it explicitly (e.g., "The related code shows a similar pattern in utils.ts...")`
+**How to use Related Code:**
+- Reference code by path and line numbers (e.g., "In \`src/utils/parser.ts:45-67\`...")
+- Prioritize \`<modified>\` sections - these show code directly affected by changes
+- Use \`<test>\` sections to verify test coverage implications
+- Check \`<similar>\` sections for pattern consistency
+
+**Limitations:**
+- Semantic search shows *similar* code, not necessarily *all* related code
+- Not all files in the repository are visible
+- If something seems inconsistent, flag it but acknowledge the context is partial`
 
 /**
  * Review criteria without semantic context
@@ -84,15 +97,17 @@ Analyze the code for the following, in order of priority:
 const REVIEW_CRITERIA_WITH_CONTEXT = `
 
 ### 5. Codebase Consistency (MEDIUM) - Context-Aware
-Use the **Related Code** section to check for:
-- **Pattern violations**: Does the new code follow established patterns visible in related code?
+Use the **Related Code** XML sections to check for:
+- **Pattern violations**: Does the new code follow established patterns visible in \`<similar>\` sections?
 - **API consistency**: Do new functions/methods match the style of similar existing ones?
 - **Naming conventions**: Are names consistent with how similar concepts are named elsewhere?
 - **Error handling patterns**: Does error handling match the project's established approach?
-- **Breaking changes**: Could changes break existing callers visible in the related code?
+- **Breaking changes**: Could changes break existing callers visible in the \`<modified>\` context?
+- **Test coverage**: Do \`<test>\` sections indicate adequate test coverage for the changes?
 
-When you find inconsistencies with the related code, cite the specific example:
-- GOOD: "The related code in \`utils.ts\` uses \`async/await\` but this function uses callbacks"
+When citing related code, use the XML path and line numbers:
+- GOOD: "The related code in \`src/utils/helpers.ts:45-67\` uses \`async/await\` but this function uses callbacks"
+- GOOD: "The \`<modified>\` context shows \`src/api/client.ts:120-135\` calls this function, which would break"
 - BAD: "This doesn't match project conventions"`
 
 /**
@@ -147,10 +162,11 @@ Confidence: HIGH|MEDIUM|LOW
  */
 const CONFIDENCE_GUIDELINES_WITH_CONTEXT = `
 **Confidence Adjustments with Related Code:**
-- **Upgrade to HIGH** if related code confirms the issue (e.g., you see the pattern done correctly elsewhere)
-- **Upgrade to HIGH** if related code shows callers that would break
-- **Downgrade to LOW** if related code shows intentional variation (e.g., different approach for good reason)
-- **Cite your evidence**: "Confidence HIGH because related code in \`auth.ts\` shows the correct pattern"`
+- **Upgrade to HIGH** if \`<modified>\` or \`<similar>\` sections confirm the issue (pattern done correctly elsewhere)
+- **Upgrade to HIGH** if \`<modified>\` context shows callers that would break
+- **Downgrade to LOW** if related code shows intentional variation (different approach for good reason)
+- **Cite your evidence with path:lines**: "Confidence HIGH because \`src/auth/handler.ts:78-92\` shows the correct pattern"
+- **Reference test coverage**: "Confidence MEDIUM - no related tests found in \`<test>\` sections"`
 
 /**
  * Base confidence guidelines (no semantic context)
@@ -197,7 +213,21 @@ export interface ReviewPromptOptions {
  * Known structural XML tags used in prompts
  * These must be escaped in user content to prevent tag injection
  */
-const STRUCTURAL_TAGS = ['pr_mr_info', 'related_code', 'diff_content', 'author_intent', 'project_structure']
+const STRUCTURAL_TAGS = [
+  'pr_mr_info',
+  'related_code',
+  'diff_content',
+  'author_intent',
+  'project_structure',
+  // XML context section tags
+  'modified',
+  'similar',
+  'test',
+  'definition',
+  'config',
+  'import',
+  'context',
+]
 
 /**
  * Sanitize content to prevent XML tag injection
@@ -308,9 +338,14 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
   if (options.semanticContext) {
     parts.push('## Related Code Context')
     parts.push('')
-    parts.push('The following code snippets are semantically related to the changes being reviewed.')
+    parts.push('The following code is organized in structured XML sections:')
+    parts.push('- `<modified>`: Code overlapping with modified lines (cite as high-confidence evidence)')
+    parts.push('- `<test>`: Related test files (check for test coverage implications)')
+    parts.push('- `<similar>`: Semantically similar code (verify pattern consistency)')
+    parts.push('')
+    parts.push('Each `<context>` element includes `path`, `lines`, `relevance`, and `reason` attributes.')
     if (options.prDescriptionSummary) {
-      parts.push('Chunks marked [PR_INTENT] were retrieved based on the PR description.')
+      parts.push('Context with `reason` mentioning "PR/MR description" was retrieved based on the author\'s stated intent.')
     }
     parts.push('')
     parts.push('<related_code>')

@@ -12,6 +12,7 @@ import {
   type StrategyResult,
   type FileTypeStrategyOverrides as StrategyOverrides,
 } from './file-type-strategies.js'
+import { formatContextAsXml } from './xml-context.js'
 
 /**
  * Weight multiplier for chunks that overlap with modified lines.
@@ -1075,38 +1076,14 @@ function estimateTokens(text: string): number {
 
 /**
  * Format code chunks for inclusion in the prompt.
- * Weighted chunks are annotated to indicate they contain modified code, are test files,
- * or match PR description intent.
+ *
+ * Uses structured XML format with metadata attributes for better LLM parsing:
+ * - Chunks are wrapped in <context> tags with type, path, relevance, lines, and reason attributes
+ * - Chunks are grouped by section: <modified>, <similar>, <test>, <definition>, <config>
+ * - This enables the LLM to better reference and cite specific code sections
  */
 function formatContext(chunks: WeightedCodeChunk[]): string {
-  if (chunks.length === 0) {
-    return ''
-  }
-
-  const parts: string[] = []
-
-  for (const chunk of chunks) {
-    // Build annotations array
-    const annotations: string[] = []
-    if (chunk.isModifiedContext) {
-      annotations.push('MODIFIED')
-    }
-    if (chunk.isTestFile) {
-      annotations.push('TEST_FILE')
-    }
-    if (chunk.matchesDescriptionIntent) {
-      annotations.push('PR_INTENT')
-    }
-
-    const annotationStr = annotations.length > 0 ? ` [${annotations.join(', ')}]` : ''
-    parts.push(`### ${chunk.filename} (lines ${chunk.startLine}-${chunk.endLine})${annotationStr}`)
-    parts.push('```')
-    parts.push(chunk.code)
-    parts.push('```')
-    parts.push('')
-  }
-
-  return parts.join('\n')
+  return formatContextAsXml(chunks)
 }
 
 /**
