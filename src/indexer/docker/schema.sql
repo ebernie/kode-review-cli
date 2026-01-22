@@ -102,14 +102,24 @@ CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING GIN (content_t
 
 -- Function to generate tsvector from code content with identifier handling
 -- Handles camelCase, snake_case, and preserves code identifiers
+-- Truncates content to avoid exceeding PostgreSQL's tsvector size limit (~1MB)
 CREATE OR REPLACE FUNCTION code_to_tsvector(content TEXT)
 RETURNS tsvector AS $$
 DECLARE
     normalized TEXT;
+    truncated_content TEXT;
     result tsvector;
+    max_content_length CONSTANT INTEGER := 400000;  -- ~400KB to stay safely under 1MB after expansion
 BEGIN
-    -- Start with the original content
-    normalized := content;
+    -- Truncate content if too large to avoid tsvector size limit
+    IF length(content) > max_content_length THEN
+        truncated_content := left(content, max_content_length);
+    ELSE
+        truncated_content := content;
+    END IF;
+
+    -- Start with the truncated content
+    normalized := truncated_content;
 
     -- Split camelCase into separate words (e.g., "getUserName" -> "get User Name get_user_name")
     -- This regex inserts spaces before uppercase letters that follow lowercase letters
@@ -118,7 +128,7 @@ BEGIN
     -- Also add snake_case version of camelCase identifiers
     -- Convert remaining camelCase to snake_case for additional matching
     normalized := normalized || ' ' || regexp_replace(
-        regexp_replace(content, '([a-z])([A-Z])', '\1_\2', 'g'),
+        regexp_replace(truncated_content, '([a-z])([A-Z])', '\1_\2', 'g'),
         '([A-Z]+)([A-Z][a-z])', '\1_\2', 'g'
     );
 
