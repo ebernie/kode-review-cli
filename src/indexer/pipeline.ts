@@ -18,6 +18,13 @@ import type {
   ParsedDiff,
 } from './types.js'
 import { logger } from '../utils/logger.js'
+import {
+  diversifyPipelineResults,
+  DEFAULT_DIVERSITY_FACTOR,
+  MAX_CHUNKS_PER_FILE,
+  type DiversificationConfig,
+  type DiversificationMetrics,
+} from './diversification.js'
 
 // =============================================================================
 // Pipeline Configuration
@@ -140,6 +147,23 @@ export interface PipelineConfig {
   earlyTerminationThreshold: number
   /** Time budgets per stage (use defaults if not specified) */
   stageBudgets?: Partial<typeof STAGE_BUDGETS>
+
+  // Diversification settings
+  /**
+   * Enable result diversification (default: true).
+   * When enabled, uses MMR to reduce redundancy in results.
+   */
+  enableDiversification?: boolean
+  /**
+   * Diversity factor for MMR (0 = pure relevance, 1 = max diversity).
+   * Default: 0.3 (balanced)
+   */
+  diversityFactor?: number
+  /**
+   * Maximum chunks per file (default: 3).
+   * Prevents any single file from dominating context.
+   */
+  maxChunksPerFile?: number
 }
 
 /**
@@ -156,6 +180,8 @@ export interface PipelineExecutionResult {
   earlyTerminated: boolean
   /** Reason for early termination if applicable */
   earlyTerminationReason?: string
+  /** Diversification metrics (if diversification was applied) */
+  diversificationMetrics?: DiversificationMetrics
 }
 
 /**
@@ -668,6 +694,64 @@ function shouldTerminateEarly(
 }
 
 /**
+ * Apply diversification to pipeline results.
+ *
+ * Stage 5: Diversification (optional)
+ * - Limits results per file to maxChunksPerFile
+ * - Uses MMR to reduce redundancy
+ * - Ensures category representation (modified, test, types, similar)
+ */
+function executeDiversificationStage(
+  results: PipelineResult[],
+  config: PipelineConfig
+): {
+  results: PipelineResult[]
+  metrics: StageMetrics
+  diversificationMetrics: DiversificationMetrics
+} {
+  const startTime = performance.now()
+
+  // Resolve diversification config
+  const diversityConfig: Partial<DiversificationConfig> = {
+    diversityFactor: config.diversityFactor ?? DEFAULT_DIVERSITY_FACTOR,
+    maxChunksPerFile: config.maxChunksPerFile ?? MAX_CHUNKS_PER_FILE,
+  }
+
+  // Apply diversification
+  const diversificationResult = diversifyPipelineResults(
+    results,
+    config.maxResults,
+    diversityConfig
+  )
+
+  // Map diversified chunks back to pipeline results
+  const diversifiedIds = new Set(
+    diversificationResult.results.map(c => `${c.filename}:${c.startLine}-${c.endLine}`)
+  )
+
+  const diversifiedResults = results.filter(r => {
+    const id = `${r.chunk.filename}:${r.chunk.startLine}-${r.chunk.endLine}`
+    return diversifiedIds.has(id)
+  })
+
+  // Sort by score to maintain consistent ordering
+  diversifiedResults.sort((a, b) => b.weightedScore - a.weightedScore)
+
+  const durationMs = performance.now() - startTime
+
+  return {
+    results: diversifiedResults,
+    metrics: {
+      name: 'diversification',
+      durationMs,
+      resultCount: diversifiedResults.length,
+      skipped: false,
+    },
+    diversificationMetrics: diversificationResult.metrics,
+  }
+}
+
+/**
  * Execute the complete multi-stage retrieval pipeline.
  *
  * Runs stages in order:
@@ -675,6 +759,7 @@ function shouldTerminateEarly(
  * 2. Vector similarity (semantic matches)
  * 3. Structural lookups (definitions, usages, call graph)
  * 4. Re-ranking (combine and score)
+ * 5. Diversification (reduce redundancy, ensure variety)
  *
  * Early termination occurs if high-confidence matches are found after stages 1-2.
  */
@@ -689,6 +774,10 @@ export async function executePipeline(
   const seenIds = new Set<string>()
   let earlyTerminated = false
   let earlyTerminationReason: string | undefined
+  let diversificationMetrics: DiversificationMetrics | undefined
+
+  // Resolve diversification setting (default: enabled)
+  const enableDiversification = config.enableDiversification !== false
 
   // Resolve budgets with defaults
   const budgets = {
@@ -715,6 +804,15 @@ export async function executePipeline(
       const rerankStage = executeRerankStage(allResults, input, config)
       stageMetrics.push(rerankStage.metrics)
 
+      // Apply diversification if enabled
+      let finalResults = rerankStage.results
+      if (enableDiversification) {
+        const diversifyStage = executeDiversificationStage(rerankStage.results, config)
+        stageMetrics.push(diversifyStage.metrics)
+        finalResults = diversifyStage.results
+        diversificationMetrics = diversifyStage.diversificationMetrics
+      }
+
       // Add skipped stage metrics
       stageMetrics.push({
         name: 'vector',
@@ -732,11 +830,12 @@ export async function executePipeline(
       })
 
       return {
-        results: rerankStage.results,
+        results: finalResults,
         stageMetrics,
         totalDurationMs: performance.now() - overallStart,
         earlyTerminated,
         earlyTerminationReason,
+        diversificationMetrics,
       }
     }
   }
@@ -759,6 +858,15 @@ export async function executePipeline(
       const rerankStage = executeRerankStage(allResults, input, config)
       stageMetrics.push(rerankStage.metrics)
 
+      // Apply diversification if enabled
+      let finalResults = rerankStage.results
+      if (enableDiversification) {
+        const diversifyStage = executeDiversificationStage(rerankStage.results, config)
+        stageMetrics.push(diversifyStage.metrics)
+        finalResults = diversifyStage.results
+        diversificationMetrics = diversifyStage.diversificationMetrics
+      }
+
       // Add skipped stage metric
       stageMetrics.push({
         name: 'structural',
@@ -769,11 +877,12 @@ export async function executePipeline(
       })
 
       return {
-        results: rerankStage.results,
+        results: finalResults,
         stageMetrics,
         totalDurationMs: performance.now() - overallStart,
         earlyTerminated,
         earlyTerminationReason,
+        diversificationMetrics,
       }
     }
   }
@@ -795,12 +904,23 @@ export async function executePipeline(
   const rerankStage = executeRerankStage(allResults, input, config)
   stageMetrics.push(rerankStage.metrics)
 
+  // Stage 5: Diversification (optional)
+  let finalResults = rerankStage.results
+  if (enableDiversification) {
+    logger.debug('Pipeline Stage 5: Diversification')
+    const diversifyStage = executeDiversificationStage(rerankStage.results, config)
+    stageMetrics.push(diversifyStage.metrics)
+    finalResults = diversifyStage.results
+    diversificationMetrics = diversifyStage.diversificationMetrics
+  }
+
   return {
-    results: rerankStage.results,
+    results: finalResults,
     stageMetrics,
     totalDurationMs: performance.now() - overallStart,
     earlyTerminated,
     earlyTerminationReason,
+    diversificationMetrics,
   }
 }
 
@@ -948,4 +1068,20 @@ export function logPipelineMetrics(result: PipelineExecutionResult): void {
     .map(([source, count]) => `${source}: ${count}`)
     .join(', ')
   logger.debug(`  Sources: ${sourceBreakdown}`)
+
+  // Log diversification metrics if available
+  if (result.diversificationMetrics) {
+    const dm = result.diversificationMetrics
+    const categoryStr = Object.entries(dm.categoryBreakdown)
+      .filter(([_, count]) => count > 0)
+      .map(([cat, count]) => `${cat}: ${count}`)
+      .join(', ')
+
+    logger.debug(
+      `  Diversification: ${dm.inputCount} -> ${dm.outputCount} results ` +
+      `(${dm.removedByFileLimit} by file limit, ${dm.removedByMmr} by MMR)`
+    )
+    logger.debug(`  Categories: ${categoryStr}`)
+    logger.debug(`  Files represented: ${dm.filesRepresented}, avg similarity: ${dm.averageSimilarity.toFixed(3)}`)
+  }
 }

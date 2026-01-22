@@ -100,6 +100,25 @@ export type {
   PipelineInput,
 } from './pipeline.js'
 
+// Result diversification
+export {
+  diversifyResults,
+  diversifyPipelineResults,
+  computeChunkSimilarity,
+  classifyChunkCategory,
+  getDefaultDiversificationConfig,
+  DEFAULT_DIVERSITY_FACTOR,
+  MAX_CHUNKS_PER_FILE,
+  MIN_RESULTS_PER_CATEGORY,
+} from './diversification.js'
+
+export type {
+  DiversificationConfig,
+  DiversificationResult,
+  DiversificationMetrics,
+  ContextCategory,
+} from './diversification.js'
+
 // XML context formatting
 export {
   formatContextAsXml,
