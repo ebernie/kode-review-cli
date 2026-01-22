@@ -1,5 +1,8 @@
 fastapi>=0.109.0
 uvicorn>=0.27.0
+# Use CPU-only PyTorch to reduce image size from ~5GB to ~1.5GB
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
 sentence-transformers>=2.2.0
 psycopg[binary,pool]>=3.1.0
 pgvector>=0.2.4

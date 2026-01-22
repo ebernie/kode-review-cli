@@ -1,0 +1,14 @@
+{
+  "id": "58ccf2fd-80e1-4101-9a00-8dd6774298ee",
+  "status": "completed",
+  "startedAt": "2026-01-22T00:54:34.228Z",
+  "updatedAt": "2026-01-22T02:32:04.604Z",
+  "agentPlugin": "claude",
+  "trackerPlugin": "json",
+  "currentIteration": 15,
+  "maxIterations": 20,
+  "totalTasks": 0,
+  "tasksCompleted": 15,
+  "cwd": "/home/vmuser/kode-review-cli",
+  "endedAt": "2026-01-22T02:32:04.604Z"
+}

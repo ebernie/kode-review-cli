@@ -1,0 +1,558 @@
+{
+  "name": "Enhanced Semantic Context for Code Review",
+  "description": "Implement a comprehensive semantic context enhancement system leveraging CocoIndex's multi-language tree-sitter integration to build structural relationships alongside vector embeddings, stored in Postgres for unified querying.",
+  "branchName": "ralph/enhanced-semantic-context",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Set up Postgres schema with pgvector",
+      "description": "As a developer, I want the database schema set up so that chunks and relationships can be stored with vector embeddings.",
+      "acceptanceCriteria": [
+        "Create chunks table with: id (UUID), file_path, content, embedding (VECTOR(1536)), language, chunk_type, symbol_names[], line_start, line_end, imports[], exports[], created_at",
+        "Create relationships table with: source_chunk_id, target_chunk_id, relationship_type, composite primary key",
+        "Create files table with: file_path, last_modified, size, language, complexity_score",
+        "Add GIN index on symbol_names for fast lookup",
+        "Add pgvector index on embedding column",
+        "Migration script runs successfully",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-002",
+      "title": "Create CocoIndex flow for file ingestion",
+      "description": "As a developer, I want a CocoIndex flow that reads repository files so that they can be processed for indexing.",
+      "acceptanceCriteria": [
+        "Create CocoIndex flow definition in Python",
+        "Configure LocalFiles source with appropriate file extensions",
+        "Implement language detection using CocoIndex's DetectProgrammingLanguage",
+        "Flow can be run via CLI command",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-001"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-003",
+      "title": "Implement function-boundary chunking",
+      "description": "As a reviewer, I want code chunked at function/class boundaries so that context is semantically coherent.",
+      "acceptanceCriteria": [
+        "Use tree-sitter AST to identify function/class boundaries",
+        "Never split a function across chunks",
+        "Include docstrings/comments with their associated code",
+        "Handle nested functions (include in parent or separate based on size threshold of 50 lines)",
+        "Fallback to line-based chunking (500 lines max) for non-parseable files",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-002"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-004",
+      "title": "Extract symbols and relationships from AST",
+      "description": "As a developer, I want symbol extraction during parsing so that definitions and usages can be tracked.",
+      "acceptanceCriteria": [
+        "Extract function names, class names, method names from AST",
+        "Extract import statements and resolve to file paths where possible",
+        "Extract export statements",
+        "Store symbols in chunk metadata (symbol_names array)",
+        "Store import/export arrays in chunk metadata",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-003"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-005",
+      "title": "Generate embeddings and export to Postgres",
+      "description": "As a developer, I want embeddings generated and stored so that vector similarity search works.",
+      "acceptanceCriteria": [
+        "Integrate embedding generation into CocoIndex flow",
+        "Export chunks with embeddings to Postgres chunks table",
+        "Export relationships to Postgres relationships table",
+        "Verify data can be queried after export",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-004"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-006",
+      "title": "Add config file detection",
+      "description": "As a reviewer, I want relevant config files included in context so that the LLM understands project conventions.",
+      "acceptanceCriteria": [
+        "Detect and auto-include: tsconfig.json, eslint.config.*, .prettierrc, package.json (partial)",
+        "Detect language-specific configs: pyproject.toml, go.mod, Cargo.toml",
+        "Extract and store key settings as metadata (strict mode, lint rules, key dependencies)",
+        "Config files marked with chunk_type='config'",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-007",
+      "title": "Include modified lines as high-priority context",
+      "description": "As a reviewer, I want the actual modified lines weighted higher in context retrieval so that the LLM sees the exact changes being reviewed.",
+      "acceptanceCriteria": [
+        "Parse git diff to extract modified line content",
+        "Embed modified lines with a 2x weight multiplier in retrieval scoring",
+        "Context window prioritizes showing modified code before similar code",
+        "Works for additions, deletions, and modifications",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-008",
+      "title": "Implement automatic test file retrieval",
+      "description": "As a reviewer, I want related test files automatically included in context so that the LLM can verify test coverage and suggest missing tests.",
+      "acceptanceCriteria": [
+        "For src/foo/bar.ts, automatically find test/foo/bar.test.ts, src/foo/__tests__/bar.spec.ts, etc.",
+        "Support common test naming conventions: .test., .spec., _test., test_",
+        "Support test directory patterns: __tests__/, tests/, test/, spec/",
+        "Include test files in context with 'TEST_FILE' metadata tag",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-009",
+      "title": "Expand query extraction from diffs",
+      "description": "As a reviewer, I want richer query extraction from diffs so that semantic search finds more relevant context.",
+      "acceptanceCriteria": [
+        "Extract function/class names from modified lines",
+        "Extract imported module names from diff",
+        "Extract type annotations and interface names",
+        "Extract string literals that look like identifiers (event names, config keys)",
+        "Generate multiple semantic queries per diff hunk",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-007"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-010",
+      "title": "Integrate PR/MR description into context",
+      "description": "As a reviewer, I want the PR description included in semantic queries so that context retrieval understands the intent behind changes.",
+      "acceptanceCriteria": [
+        "Fetch PR/MR description via GitHub/GitLab CLI (gh pr view, glab mr view)",
+        "Extract key terms and intent from description",
+        "Use description to bias context retrieval toward relevant subsystems",
+        "Include description summary in LLM prompt header",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-009"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-011",
+      "title": "Add project structure context",
+      "description": "As a reviewer, I want project structure included in context so that the LLM understands where files fit in the architecture.",
+      "acceptanceCriteria": [
+        "Generate condensed directory tree (max 50 lines)",
+        "Highlight path from root to modified files",
+        "Include README.md summary if present (first 500 chars)",
+        "Include ARCHITECTURE.md or similar if present",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-012",
+      "title": "Implement file-type specific retrieval strategies",
+      "description": "As a reviewer, I want context retrieval optimized per file type so that reviews are more accurate.",
+      "acceptanceCriteria": [
+        "TypeScript/JavaScript: Prioritize type definitions, imported modules",
+        "Python: Include __init__.py, base classes, decorators",
+        "Go: Include interface definitions, package documentation",
+        "CSS/SCSS: Include variable definitions, mixins",
+        "Strategy configurable per file extension in config",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-013",
+      "title": "Create API endpoint for definition lookup",
+      "description": "As a reviewer, I want to look up where symbols are defined so that breaking changes are caught.",
+      "acceptanceCriteria": [
+        "Add GET /definitions/{symbol} endpoint to indexer API",
+        "Query Postgres for chunks containing symbol in symbol_names",
+        "Return file path, line number, chunk content",
+        "Handle re-exports by following import chains",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-004"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-014",
+      "title": "Create API endpoint for usage lookup",
+      "description": "As a reviewer, I want to find all usages of a symbol so that I can assess impact of changes.",
+      "acceptanceCriteria": [
+        "Add GET /usages/{symbol} endpoint to indexer API",
+        "Query relationships table for 'calls' and 'imports' relationship types",
+        "Return list of files and line numbers where symbol is used",
+        "Handle dynamic imports and lazy loading (flag as uncertain)",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-013"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-015",
+      "title": "Build import chain tracking",
+      "description": "As a reviewer, I want import dependency chains included so that I understand how changes propagate.",
+      "acceptanceCriteria": [
+        "Build import graph during indexing (store in relationships table)",
+        "For modified file, compute 2-level import tree (what imports it, what it imports)",
+        "Detect and highlight circular dependencies",
+        "Flag 'hub' files with import count > 10",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-014"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-016",
+      "title": "Build call graph for TypeScript/JavaScript",
+      "description": "As a reviewer, I want a call graph built for TS/JS files so that impact analysis is accurate.",
+      "acceptanceCriteria": [
+        "Use tree-sitter to parse function calls from AST",
+        "Build graph: function -> [called functions]",
+        "Store in relationships table with relationship_type='calls'",
+        "Handle method calls on classes",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-004"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-017",
+      "title": "Extend call graph to Python",
+      "description": "As a reviewer, I want call graph support for Python so that multi-language repos are covered.",
+      "acceptanceCriteria": [
+        "Use tree-sitter Python grammar to parse function calls",
+        "Handle class methods and decorators",
+        "Handle dynamic dispatch (flag as uncertain)",
+        "Store in same relationships table format",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-016"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-018",
+      "title": "Extend call graph to Go, Java, Rust",
+      "description": "As a reviewer, I want call graph support for Go, Java, and Rust so that more languages are covered.",
+      "acceptanceCriteria": [
+        "Add tree-sitter grammars for Go, Java, Rust",
+        "Parse function/method calls from each language's AST",
+        "Handle interface implementations in Go",
+        "Handle trait implementations in Rust",
+        "Store in same relationships table format",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-017"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-019",
+      "title": "Create call graph query API endpoint",
+      "description": "As a reviewer, I want to query the call graph so that I can find all callers/callees of a function.",
+      "acceptanceCriteria": [
+        "Add GET /callgraph/{function} endpoint",
+        "Support query param 'direction' (callers, callees, both)",
+        "Support query param 'depth' for transitive relationships (default 2)",
+        "Return graph structure with nodes and edges",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 19,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-018"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-020",
+      "title": "Implement keyword search with BM25",
+      "description": "As a reviewer, I want keyword search alongside vector search so that exact identifier matches are found.",
+      "acceptanceCriteria": [
+        "Implement BM25 scoring for keyword search on chunk content",
+        "Add full-text search index to Postgres",
+        "Exact function name matches boost score by 3x",
+        "Handle camelCase/snake_case variations",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 20,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-021",
+      "title": "Implement hybrid search combining vector and keyword",
+      "description": "As a reviewer, I want combined vector and keyword search so that both semantic and exact matches are found.",
+      "acceptanceCriteria": [
+        "Combine vector similarity and BM25 scores using reciprocal rank fusion (RRF)",
+        "Configurable weighting: default 60% vector, 40% keyword",
+        "Support quoted phrases for exact matching",
+        "Fallback to pure vector if keyword search returns nothing",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 21,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-020"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-022",
+      "title": "Implement structured XML context format",
+      "description": "As a reviewer, I want context delivered to the LLM in structured XML so that it can better parse and reference code sections.",
+      "acceptanceCriteria": [
+        "Wrap code sections in <context type='...' path='...' relevance='...'> tags",
+        "Include metadata: file path, line numbers, retrieval reason",
+        "Separate sections: <modified>, <similar>, <definitions>, <tests>, <config>",
+        "Update LLM prompt in src/review/prompt.ts to reference XML structure",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 22,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-021"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-023",
+      "title": "Implement multi-stage retrieval pipeline",
+      "description": "As a reviewer, I want a multi-stage retrieval process so that context is progressively refined.",
+      "acceptanceCriteria": [
+        "Stage 1: Fast keyword search for exact matches (100ms budget)",
+        "Stage 2: Vector similarity on diff content (500ms budget)",
+        "Stage 3: Structural lookup via definitions/usages/callgraph (500ms budget)",
+        "Stage 4: Re-rank combined results by relevance (100ms budget)",
+        "Early termination if high-confidence matches found (score > 0.9)",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 23,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-022",
+        "US-019"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-024",
+      "title": "Implement result diversification",
+      "description": "As a reviewer, I want diverse context results so that I see different aspects of the codebase.",
+      "acceptanceCriteria": [
+        "Limit results per file to 3 chunks max",
+        "Ensure representation from: modified files, test files, type definitions, similar code",
+        "Implement MMR (Maximal Marginal Relevance) to reduce redundancy",
+        "Configurable diversity factor (0 = pure relevance, 1 = max diversity, default 0.3)",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 24,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-023"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-025",
+      "title": "Implement embedding cache with content hash",
+      "description": "As a reviewer, I want embeddings cached so that unchanged files aren't re-embedded.",
+      "acceptanceCriteria": [
+        "Cache embeddings with content hash (SHA-256) as key",
+        "Store cache in Postgres or local file",
+        "Skip embedding generation if content hash matches cached entry",
+        "Cache hit rate logged for monitoring",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 25,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-005"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-026",
+      "title": "Implement incremental indexing on git diff",
+      "description": "As a reviewer, I want fast incremental updates so that indexing doesn't slow down reviews.",
+      "acceptanceCriteria": [
+        "Use git diff to identify changed files since last index",
+        "Only re-index changed files",
+        "Invalidate relationship entries when source file changes",
+        "Update file metadata (last_modified) on change",
+        "Target: < 5s for typical PR with 10 changed files",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 26,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-025"
+      ],
+      "completionNotes": "Completed by agent"
+    },
+    {
+      "id": "US-027",
+      "title": "Add background re-indexing for large repos",
+      "description": "As a reviewer, I want background re-indexing so that large repos don't block reviews.",
+      "acceptanceCriteria": [
+        "Trigger background re-index when > 100 files changed",
+        "Show progress indicator during background indexing",
+        "Reviews can proceed with stale index while background updates",
+        "Notify when background index completes",
+        "bun run typecheck passes",
+        "bun run lint passes"
+      ],
+      "priority": 27,
+      "passes": true,
+      "notes": "",
+      "dependsOn": [
+        "US-026"
+      ],
+      "completionNotes": "Completed by agent"
+    }
+  ],
+  "metadata": {
+    "updatedAt": "2026-01-22T02:31:43.148Z"
+  }
+}
