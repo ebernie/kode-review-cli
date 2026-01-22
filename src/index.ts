@@ -13,6 +13,8 @@ import { runOnboardingWizard, runProviderSetup, setupVcs } from './onboarding/in
 import {
   runReview,
   runReviewWithServer,
+  runAgenticReview,
+  runAgenticReviewWithServer,
   getLocalChanges,
   hasChanges,
   formatChanges,
@@ -42,6 +44,7 @@ import {
   resetIndex,
   getSemanticContext,
   isIndexerRunning,
+  getIndexerStatus,
   handleCleanupIndexer,
   listIndexedRepos,
   extractPrDescriptionInfo,
@@ -735,43 +738,119 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
   if (!ctx.quiet) {
     console.log('')
     console.log(cyan('========================================'))
-    console.log(cyan('           CODE REVIEW OUTPUT           '))
+    if (options.agentic) {
+      console.log(cyan('      AGENTIC CODE REVIEW OUTPUT        '))
+    } else {
+      console.log(cyan('           CODE REVIEW OUTPUT           '))
+    }
     console.log(cyan('========================================'))
     console.log('')
   }
 
-  const spinner = ctx.quiet ? null : ora('Running code review...').start()
+  const spinner = ctx.quiet ? null : ora(
+    options.agentic ? 'Running agentic code review...' : 'Running code review...'
+  ).start()
 
   try {
-    const reviewOptions = {
-      diffContent,
-      context: contextParts.join('\n'),
-      prMrInfo,
-      semanticContext,
-      prDescriptionSummary,
-      projectStructureContext,
-      provider: options.provider,
-      model: options.model,
-      variant: options.variant,
-    }
+    // Handle agentic review mode
+    if (options.agentic) {
+      // Check indexer status - optional for agentic mode
+      const indexerStatus = await getIndexerStatus()
 
-    let result
+      // Determine indexer URL (undefined if not running)
+      let indexerUrl: string | undefined
+      if (indexerStatus.running && indexerStatus.apiUrl) {
+        indexerUrl = indexerStatus.apiUrl
+        logger.info('Indexer is running - full tool suite available')
+      } else {
+        logger.warn(
+          'Indexer not running - agentic review will have limited tools (read_file only).\n' +
+          'For full capabilities, start the indexer with: kode-review --setup-indexer'
+        )
+      }
 
-    if (options.attach) {
-      result = await runReviewWithServer(options.attach, reviewOptions)
+      const repoUrl = await getRepoUrl()
+      if (!repoUrl) {
+        spinner?.fail('Could not determine repository URL')
+        throw new Error(
+          'Could not determine repository URL. Ensure you have a git remote configured.'
+        )
+      }
+
+      const agenticOptions = {
+        diffContent,
+        context: contextParts.join('\n'),
+        repoRoot: repoRoot!,
+        repoUrl,
+        branch: branch,
+        indexerUrl,  // Optional - undefined when indexer not running
+        prMrInfo,
+        prDescriptionSummary,
+        projectStructureContext,
+        provider: options.provider,
+        model: options.model,
+        variant: options.variant,
+        maxIterations: options.maxIterations,
+        timeout: options.agenticTimeout,
+      }
+
+      let result
+
+      if (options.attach) {
+        result = await runAgenticReviewWithServer(options.attach, agenticOptions)
+      } else {
+        result = await runAgenticReview(agenticOptions)
+      }
+
+      spinner?.stop()
+
+      console.log(result.content)
+
+      if (!ctx.quiet) {
+        console.log('')
+        if (result.toolCallCount > 0) {
+          console.log(cyan(`Tool calls made: ${result.toolCallCount}`))
+        }
+        if (result.truncated) {
+          console.log(cyan(`Note: Review was truncated (${result.truncationReason})`))
+        }
+        console.log('')
+        console.log(green('========================================'))
+        console.log(green('       AGENTIC REVIEW COMPLETE          '))
+        console.log(green('========================================'))
+      }
     } else {
-      result = await runReview(reviewOptions)
-    }
+      // Standard review mode
+      const reviewOptions = {
+        diffContent,
+        context: contextParts.join('\n'),
+        prMrInfo,
+        semanticContext,
+        prDescriptionSummary,
+        projectStructureContext,
+        provider: options.provider,
+        model: options.model,
+        variant: options.variant,
+      }
 
-    spinner?.stop()
+      let result
 
-    console.log(result.content)
+      if (options.attach) {
+        result = await runReviewWithServer(options.attach, reviewOptions)
+      } else {
+        result = await runReview(reviewOptions)
+      }
 
-    if (!ctx.quiet) {
-      console.log('')
-      console.log(green('========================================'))
-      console.log(green('           REVIEW COMPLETE             '))
-      console.log(green('========================================'))
+      spinner?.stop()
+
+      console.log(result.content)
+
+      if (!ctx.quiet) {
+        console.log('')
+        console.log(green('========================================'))
+        console.log(green('           REVIEW COMPLETE             '))
+        console.log(green('========================================'))
+      }
     }
   } catch (error) {
     spinner?.fail('Review failed')

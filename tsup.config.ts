@@ -3,7 +3,10 @@ import { copyFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  entry: [
+    'src/index.ts',
+    'src/mcp/kode-review-mcp.ts', // MCP server entry point for agentic mode
+  ],
   format: ['esm'],
   target: 'node18',
   dts: true,

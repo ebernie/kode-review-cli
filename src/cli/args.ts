@@ -46,6 +46,11 @@ export interface CliOptions {
   // Review context
   withContext: boolean
   contextTopK: number
+
+  // Agentic review mode
+  agentic: boolean
+  maxIterations: number
+  agenticTimeout: number
 }
 
 export function createProgram(): Command {
@@ -108,6 +113,12 @@ export function createProgram(): Command {
     .option('--with-context', 'Include semantic context in review', false)
     .option('--context-top-k <n>', 'Number of similar code chunks to include (default: 5)', '5')
 
+  // Agentic review mode
+  program
+    .option('--agentic', 'Enable agentic review with file/indexer tool access', false)
+    .option('--max-iterations <n>', 'Max tool call iterations for agentic mode (default: 10)', '10')
+    .option('--agentic-timeout <s>', 'Timeout in seconds for agentic mode (default: 120)', '120')
+
   return program
 }
 
@@ -129,6 +140,20 @@ export function parseArgs(argv: string[]): CliOptions {
   const contextTopK = parseInt(contextTopKRaw, 10)
   if (isNaN(contextTopK) || contextTopK < 1 || contextTopK > 20) {
     throw new Error(`Invalid context-top-k: "${contextTopKRaw}". Must be a number between 1 and 20.`)
+  }
+
+  // Validate max iterations for agentic mode
+  const maxIterationsRaw = opts.maxIterations ?? '10'
+  const maxIterations = parseInt(maxIterationsRaw, 10)
+  if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 50) {
+    throw new Error(`Invalid max-iterations: "${maxIterationsRaw}". Must be a number between 1 and 50.`)
+  }
+
+  // Validate agentic timeout
+  const agenticTimeoutRaw = opts.agenticTimeout ?? '120'
+  const agenticTimeout = parseInt(agenticTimeoutRaw, 10)
+  if (isNaN(agenticTimeout) || agenticTimeout < 30 || agenticTimeout > 600) {
+    throw new Error(`Invalid agentic-timeout: "${agenticTimeoutRaw}". Must be a number between 30 and 600 seconds.`)
   }
 
   return {
@@ -160,5 +185,8 @@ export function parseArgs(argv: string[]): CliOptions {
     indexQueueClear: opts.indexQueueClear ?? false,
     withContext: opts.withContext ?? false,
     contextTopK,
+    agentic: opts.agentic ?? false,
+    maxIterations,
+    agenticTimeout,
   }
 }
