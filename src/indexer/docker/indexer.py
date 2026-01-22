@@ -32,6 +32,7 @@ from sentence_transformers import SentenceTransformer
 
 # Import AST-based chunking
 from ast_chunker import chunk_code_ast, CodeChunk
+from import_graph import build_and_store_import_graph
 
 
 # Configuration from environment
@@ -318,6 +319,17 @@ def index_repository() -> dict:
 
         conn.commit()
 
+    # Build import graph after indexing
+    print("Building import graph...")
+    try:
+        import_stats = build_and_store_import_graph(conn, REPO_URL, REPO_BRANCH)
+        print(f"  Import edges: {import_stats['edges']}")
+        print(f"  Circular dependencies: {import_stats['circular_dependencies']}")
+        print(f"  Hub files (>10 imports): {import_stats['hub_files']}")
+    except Exception as e:
+        print(f"  Warning: Could not build import graph: {e}")
+        import_stats = {"edges": 0, "circular_dependencies": 0, "hub_files": 0}
+
     conn.close()
 
     print(f"Indexing complete!")
@@ -331,7 +343,10 @@ def index_repository() -> dict:
         "repo_id": repo_id,
         "branch": REPO_BRANCH,
         "files": files_processed,
-        "chunks": chunks_indexed
+        "chunks": chunks_indexed,
+        "import_edges": import_stats.get("edges", 0),
+        "circular_dependencies": import_stats.get("circular_dependencies", 0),
+        "hub_files": import_stats.get("hub_files", 0),
     }
 
     print(f"\n__RESULT__:{json.dumps(result)}")

@@ -554,3 +554,89 @@ export interface WeightedCodeChunk extends CodeChunk {
   /** Whether this chunk matches PR description intent */
   matchesDescriptionIntent?: boolean
 }
+
+// ============================================================================
+// Import Chain Tracking Types
+// ============================================================================
+
+/**
+ * 2-level import tree for a file showing its dependencies and dependents
+ */
+export interface ImportTree {
+  /** The file this tree is for */
+  targetFile: string
+
+  /** Files this file directly imports (level 1) */
+  directImports: string[]
+
+  /** Files that directly import this file (level 1) */
+  directImporters: string[]
+
+  /** Files that direct imports import (level 2) */
+  indirectImports: string[]
+
+  /** Files that import the direct importers (level 2) */
+  indirectImporters: string[]
+}
+
+/**
+ * Information about a circular dependency in the codebase
+ */
+export interface CircularDependency {
+  /** Files in the cycle, in order (last element repeats first to show the cycle) */
+  cycle: string[]
+
+  /** Type of cycle: 'direct' (A->B->A) or 'indirect' (A->B->C->A) */
+  cycleType: 'direct' | 'indirect'
+}
+
+/**
+ * Response from circular dependencies detection
+ */
+export interface CircularDependenciesResult {
+  /** Repository URL */
+  repoUrl: string
+
+  /** Branch analyzed */
+  branch: string
+
+  /** List of circular dependencies found */
+  circularDependencies: CircularDependency[]
+
+  /** Total count of circular dependencies */
+  totalCount: number
+}
+
+/**
+ * Information about a hub file (imported by many other files)
+ */
+export interface HubFile {
+  /** File path */
+  filePath: string
+
+  /** Number of files that import this file */
+  importCount: number
+
+  /** Sample of files that import this hub file (up to 10) */
+  importers: string[]
+}
+
+/**
+ * Response from hub file detection
+ */
+export interface HubFilesResult {
+  /** Repository URL */
+  repoUrl: string
+
+  /** Branch analyzed */
+  branch: string
+
+  /** List of hub files found */
+  hubFiles: HubFile[]
+
+  /** Total count of hub files */
+  totalCount: number
+
+  /** The threshold used for hub detection */
+  threshold: number
+}

@@ -24,6 +24,8 @@ from sentence_transformers import SentenceTransformer
 from psycopg_pool import ConnectionPool
 from pgvector.psycopg import register_vector
 
+from import_graph import ImportGraphBuilder, generate_repo_id as graph_generate_repo_id
+
 
 class Settings(BaseSettings):
     """Application settings from environment variables."""
@@ -166,6 +168,47 @@ class HealthResponse(BaseModel):
     status: str
     database: str
     embedding_model: str
+
+
+# Import Chain Tracking Models
+
+class ImportTreeResponse(BaseModel):
+    """2-level import tree for a file."""
+    target_file: str
+    direct_imports: list[str]  # What this file imports
+    direct_importers: list[str]  # What imports this file
+    indirect_imports: list[str]  # What direct imports import (level 2)
+    indirect_importers: list[str]  # What imports direct importers (level 2)
+
+
+class CircularDependencyInfo(BaseModel):
+    """Information about a circular dependency."""
+    cycle: list[str]  # Files in the cycle, in order
+    cycle_type: str  # 'direct' (A->B->A) or 'indirect' (A->B->C->A)
+
+
+class CircularDependenciesResponse(BaseModel):
+    """Response listing circular dependencies in the codebase."""
+    repo_url: str
+    branch: str
+    circular_dependencies: list[CircularDependencyInfo]
+    total_count: int
+
+
+class HubFileInfo(BaseModel):
+    """Information about a hub file (imported by many others)."""
+    file_path: str
+    import_count: int  # Number of files that import this file
+    importers: list[str]  # Sample of importing files (up to 10)
+
+
+class HubFilesResponse(BaseModel):
+    """Response listing hub files in the codebase."""
+    repo_url: str
+    branch: str
+    hub_files: list[HubFileInfo]
+    total_count: int
+    threshold: int  # The threshold used for hub detection
 
 
 # Endpoints
@@ -656,6 +699,180 @@ async def get_usages(
         # If tables don't exist yet, return empty result
         if "does not exist" in str(e).lower():
             return UsageResponse(symbol=symbol, usages=[], total_count=0)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Import Chain Tracking Endpoints
+
+@app.get("/import-tree/{file_path:path}", response_model=ImportTreeResponse)
+async def get_import_tree(
+    file_path: str,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = None,
+):
+    """
+    Get the 2-level import tree for a file.
+
+    Returns:
+    - What the file directly imports (level 1)
+    - What imports the file directly (level 1)
+    - What the direct imports import (level 2)
+    - What imports the direct importers (level 2)
+
+    This helps understand how changes to a file propagate through the codebase.
+
+    Args:
+        file_path: The file path to get the import tree for
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search (defaults to 'main')
+    """
+    effective_branch = branch or "main"
+
+    try:
+        if not repo_url:
+            raise HTTPException(status_code=400, detail="repo_url is required")
+
+        repo_id = generate_repo_id(repo_url)
+
+        with get_connection_pool().connection() as conn:
+            builder = ImportGraphBuilder(conn, repo_id, effective_branch)
+            tree = builder.get_import_tree(file_path)
+
+            return ImportTreeResponse(
+                target_file=tree.target_file,
+                direct_imports=tree.direct_imports,
+                direct_importers=tree.direct_importers,
+                indirect_imports=tree.indirect_imports,
+                indirect_importers=tree.indirect_importers,
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If table doesn't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return ImportTreeResponse(
+                target_file=file_path,
+                direct_imports=[],
+                direct_importers=[],
+                indirect_imports=[],
+                indirect_importers=[],
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/circular-dependencies", response_model=CircularDependenciesResponse)
+async def get_circular_dependencies(
+    repo_url: str,
+    branch: Optional[str] = None,
+    max_cycle_length: int = 10,
+):
+    """
+    Detect circular dependencies in the import graph.
+
+    Circular dependencies can cause issues with:
+    - Module initialization order
+    - Code complexity and maintainability
+    - Bundle size (in JavaScript/TypeScript)
+
+    Args:
+        repo_url: Repository URL to analyze
+        branch: Optional branch (defaults to 'main')
+        max_cycle_length: Maximum cycle length to detect (default: 10)
+
+    Returns:
+        List of circular dependency chains found
+    """
+    effective_branch = branch or "main"
+
+    try:
+        repo_id = generate_repo_id(repo_url)
+
+        with get_connection_pool().connection() as conn:
+            builder = ImportGraphBuilder(conn, repo_id, effective_branch)
+            cycles = builder.detect_circular_dependencies(max_cycle_length)
+
+            return CircularDependenciesResponse(
+                repo_url=repo_url,
+                branch=effective_branch,
+                circular_dependencies=[
+                    CircularDependencyInfo(
+                        cycle=c.cycle,
+                        cycle_type=c.cycle_type,
+                    )
+                    for c in cycles
+                ],
+                total_count=len(cycles),
+            )
+
+    except Exception as e:
+        # If table doesn't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return CircularDependenciesResponse(
+                repo_url=repo_url,
+                branch=effective_branch,
+                circular_dependencies=[],
+                total_count=0,
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/hub-files", response_model=HubFilesResponse)
+async def get_hub_files(
+    repo_url: str,
+    branch: Optional[str] = None,
+    threshold: int = 10,
+    limit: int = 50,
+):
+    """
+    Find 'hub' files that are imported by many other files.
+
+    Hub files are high-impact files where changes could affect many dependents.
+    They may warrant extra scrutiny during code review.
+
+    Args:
+        repo_url: Repository URL to analyze
+        branch: Optional branch (defaults to 'main')
+        threshold: Minimum number of importers to be considered a hub (default: 10)
+        limit: Maximum number of hub files to return (default: 50)
+
+    Returns:
+        List of hub files with their import counts and sample importers
+    """
+    effective_branch = branch or "main"
+
+    try:
+        repo_id = generate_repo_id(repo_url)
+
+        with get_connection_pool().connection() as conn:
+            builder = ImportGraphBuilder(conn, repo_id, effective_branch)
+            hubs = builder.find_hub_files(threshold=threshold, limit=limit)
+
+            return HubFilesResponse(
+                repo_url=repo_url,
+                branch=effective_branch,
+                hub_files=[
+                    HubFileInfo(
+                        file_path=h.file_path,
+                        import_count=h.import_count,
+                        importers=h.importers,
+                    )
+                    for h in hubs
+                ],
+                total_count=len(hubs),
+                threshold=threshold,
+            )
+
+    except Exception as e:
+        # If table doesn't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return HubFilesResponse(
+                repo_url=repo_url,
+                branch=effective_branch,
+                hub_files=[],
+                total_count=0,
+                threshold=threshold,
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 

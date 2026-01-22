@@ -108,6 +108,36 @@ CREATE INDEX IF NOT EXISTS relationships_target_idx ON relationships (target_chu
 CREATE INDEX IF NOT EXISTS relationships_type_idx ON relationships (relationship_type);
 
 -- ============================================================================
+-- File Imports Table (for import chain tracking)
+-- ============================================================================
+-- Tracks file-level import relationships for building import graphs.
+-- This enables:
+-- - 2-level import tree computation (what imports it, what it imports)
+-- - Circular dependency detection
+-- - Hub file identification (files with many dependents)
+
+CREATE TABLE IF NOT EXISTS file_imports (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_file TEXT NOT NULL REFERENCES files(file_path) ON DELETE CASCADE,
+    target_file TEXT NOT NULL REFERENCES files(file_path) ON DELETE CASCADE,
+    import_type TEXT NOT NULL DEFAULT 'static',  -- 'static', 'dynamic', 're-export'
+    imported_symbols TEXT[] DEFAULT '{}',  -- Specific symbols imported
+    repo_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (source_file, target_file, repo_id, branch)
+);
+
+-- Index for finding what a file imports (outgoing edges)
+CREATE INDEX IF NOT EXISTS file_imports_source_idx ON file_imports (source_file, repo_id, branch);
+
+-- Index for finding what imports a file (incoming edges)
+CREATE INDEX IF NOT EXISTS file_imports_target_idx ON file_imports (target_file, repo_id, branch);
+
+-- Index for filtering by repository and branch
+CREATE INDEX IF NOT EXISTS file_imports_repo_branch_idx ON file_imports (repo_id, branch);
+
+-- ============================================================================
 -- Legacy Table (for backward compatibility during migration)
 -- ============================================================================
 -- Keep the old code_embeddings table for gradual migration.

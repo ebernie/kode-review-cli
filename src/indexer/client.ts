@@ -1,4 +1,14 @@
-import type { CodeChunk, IndexStats, RepoInfo, DefinitionLookupResult, UsageLookupResult, ChunkType } from './types.js'
+import type {
+  CodeChunk,
+  IndexStats,
+  RepoInfo,
+  DefinitionLookupResult,
+  UsageLookupResult,
+  ChunkType,
+  ImportTree,
+  CircularDependenciesResult,
+  HubFilesResult,
+} from './types.js'
 
 export interface IndexRequest {
   repoUrl: string
@@ -92,6 +102,42 @@ interface UsageResponse {
   symbol: string
   usages: UsageLocationResponse[]
   total_count: number
+}
+
+// Import Chain Tracking Response Types
+
+interface ImportTreeResponse {
+  target_file: string
+  direct_imports: string[]
+  direct_importers: string[]
+  indirect_imports: string[]
+  indirect_importers: string[]
+}
+
+interface CircularDependencyResponse {
+  cycle: string[]
+  cycle_type: string
+}
+
+interface CircularDependenciesResponse {
+  repo_url: string
+  branch: string
+  circular_dependencies: CircularDependencyResponse[]
+  total_count: number
+}
+
+interface HubFileResponse {
+  file_path: string
+  import_count: number
+  importers: string[]
+}
+
+interface HubFilesResponse {
+  repo_url: string
+  branch: string
+  hub_files: HubFileResponse[]
+  total_count: number
+  threshold: number
 }
 
 /**
@@ -391,6 +437,157 @@ export class IndexerClient {
         isDynamic: usage.is_dynamic,
       })),
       totalCount: data.total_count,
+    }
+  }
+
+  // ============================================================================
+  // Import Chain Tracking Methods
+  // ============================================================================
+
+  /**
+   * Get the 2-level import tree for a file.
+   *
+   * Returns what the file imports (and what those import),
+   * and what imports the file (and what imports those).
+   * This helps understand how changes to a file propagate through the codebase.
+   *
+   * @param filePath - The file path to get the import tree for
+   * @param repoUrl - Repository URL to scope the search
+   * @param branch - Optional branch to scope the search (defaults to 'main')
+   */
+  async getImportTree(
+    filePath: string,
+    repoUrl: string,
+    branch?: string
+  ): Promise<ImportTree> {
+    const params = new URLSearchParams()
+    params.append('repo_url', repoUrl)
+    if (branch) {
+      params.append('branch', branch)
+    }
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/import-tree/${encodeURIComponent(filePath)}?${queryString}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Failed to get import tree: ${error}`)
+    }
+
+    const data = (await response.json()) as ImportTreeResponse
+
+    // Map snake_case to camelCase
+    return {
+      targetFile: data.target_file,
+      directImports: data.direct_imports,
+      directImporters: data.direct_importers,
+      indirectImports: data.indirect_imports,
+      indirectImporters: data.indirect_importers,
+    }
+  }
+
+  /**
+   * Detect circular dependencies in the import graph.
+   *
+   * Circular dependencies can cause issues with module initialization order,
+   * code complexity, and bundle size (in JavaScript/TypeScript).
+   *
+   * @param repoUrl - Repository URL to analyze
+   * @param branch - Optional branch (defaults to 'main')
+   * @param maxCycleLength - Maximum cycle length to detect (default: 10)
+   */
+  async getCircularDependencies(
+    repoUrl: string,
+    branch?: string,
+    maxCycleLength: number = 10
+  ): Promise<CircularDependenciesResult> {
+    const params = new URLSearchParams()
+    params.append('repo_url', repoUrl)
+    if (branch) {
+      params.append('branch', branch)
+    }
+    params.append('max_cycle_length', String(maxCycleLength))
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/circular-dependencies?${queryString}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Failed to get circular dependencies: ${error}`)
+    }
+
+    const data = (await response.json()) as CircularDependenciesResponse
+
+    // Map snake_case to camelCase
+    return {
+      repoUrl: data.repo_url,
+      branch: data.branch,
+      circularDependencies: data.circular_dependencies.map((cd) => ({
+        cycle: cd.cycle,
+        cycleType: cd.cycle_type as 'direct' | 'indirect',
+      })),
+      totalCount: data.total_count,
+    }
+  }
+
+  /**
+   * Find 'hub' files that are imported by many other files.
+   *
+   * Hub files are high-impact files where changes could affect many dependents.
+   * They may warrant extra scrutiny during code review.
+   *
+   * @param repoUrl - Repository URL to analyze
+   * @param branch - Optional branch (defaults to 'main')
+   * @param threshold - Minimum number of importers to be considered a hub (default: 10)
+   * @param limit - Maximum number of hub files to return (default: 50)
+   */
+  async getHubFiles(
+    repoUrl: string,
+    branch?: string,
+    threshold: number = 10,
+    limit: number = 50
+  ): Promise<HubFilesResult> {
+    const params = new URLSearchParams()
+    params.append('repo_url', repoUrl)
+    if (branch) {
+      params.append('branch', branch)
+    }
+    params.append('threshold', String(threshold))
+    params.append('limit', String(limit))
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/hub-files?${queryString}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Failed to get hub files: ${error}`)
+    }
+
+    const data = (await response.json()) as HubFilesResponse
+
+    // Map snake_case to camelCase
+    return {
+      repoUrl: data.repo_url,
+      branch: data.branch,
+      hubFiles: data.hub_files.map((hf) => ({
+        filePath: hf.file_path,
+        importCount: hf.import_count,
+        importers: hf.importers,
+      })),
+      totalCount: data.total_count,
+      threshold: data.threshold,
     }
   }
 }

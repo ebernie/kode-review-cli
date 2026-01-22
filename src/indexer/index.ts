@@ -14,6 +14,12 @@ export type {
   PrDescriptionInfo,
   DefinitionLocation,
   DefinitionLookupResult,
+  // Import chain tracking types
+  ImportTree,
+  CircularDependency,
+  CircularDependenciesResult,
+  HubFile,
+  HubFilesResult,
 } from './types.js'
 
 // Detector
