@@ -211,6 +211,38 @@ class HubFilesResponse(BaseModel):
     threshold: int  # The threshold used for hub detection
 
 
+# Call Graph Query Models
+
+class CallGraphNode(BaseModel):
+    """A node in the call graph representing a function/method."""
+    id: str  # Chunk ID
+    name: str  # Function/method name
+    file_path: str
+    line_start: int
+    line_end: int
+    depth: int  # Distance from the queried function (0 = the function itself)
+
+
+class CallGraphEdge(BaseModel):
+    """An edge in the call graph representing a call relationship."""
+    source_id: str  # Caller chunk ID
+    target_id: str  # Callee chunk ID
+    callee_name: str  # Name of the called function
+    line_number: Optional[int] = None  # Line where the call occurs
+    receiver: Optional[str] = None  # Object receiver for method calls
+
+
+class CallGraphResponse(BaseModel):
+    """Response from a call graph query."""
+    function: str
+    direction: str  # 'callers', 'callees', or 'both'
+    depth: int
+    nodes: list[CallGraphNode]
+    edges: list[CallGraphEdge]
+    total_nodes: int
+    total_edges: int
+
+
 # Endpoints
 
 @app.on_event("startup")
@@ -872,6 +904,269 @@ async def get_hub_files(
                 hub_files=[],
                 total_count=0,
                 threshold=threshold,
+            )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Call Graph Query Endpoint
+
+@app.get("/callgraph/{function}", response_model=CallGraphResponse)
+async def get_callgraph(
+    function: str,
+    direction: str = "both",
+    depth: int = 2,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = None,
+    limit: int = 100,
+):
+    """
+    Query the call graph to find callers and/or callees of a function.
+
+    This endpoint enables impact analysis by traversing the call graph to find:
+    - Functions that call the specified function (callers)
+    - Functions that the specified function calls (callees)
+    - Or both directions
+
+    The depth parameter controls how many levels of transitive relationships
+    to include (e.g., depth=2 includes direct callers and their callers).
+
+    Args:
+        function: The function name to query (e.g., 'handleRequest', 'MyClass.method')
+        direction: 'callers' (who calls this), 'callees' (what this calls), or 'both'
+        depth: How many levels deep to traverse (default: 2, max: 5)
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search (defaults to 'main')
+        limit: Maximum number of nodes to return (default: 100)
+
+    Returns:
+        CallGraphResponse with nodes and edges representing the call graph
+    """
+    effective_branch = branch or "main"
+
+    # Validate direction parameter
+    if direction not in ("callers", "callees", "both"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid direction '{direction}'. Must be 'callers', 'callees', or 'both'."
+        )
+
+    # Clamp depth to reasonable bounds
+    depth = max(1, min(depth, 5))
+
+    try:
+        if not repo_url:
+            raise HTTPException(status_code=400, detail="repo_url is required")
+
+        repo_id = generate_repo_id(repo_url)
+
+        nodes: list[CallGraphNode] = []
+        edges: list[CallGraphEdge] = []
+        seen_node_ids: set[str] = set()
+        seen_edge_keys: set[tuple[str, str]] = set()
+
+        with get_connection_pool().connection() as conn:
+            with conn.cursor() as cur:
+                # Step 1: Find chunks where the function is defined
+                cur.execute(
+                    """
+                    SELECT id, file_path, line_start, line_end, symbol_names
+                    FROM chunks
+                    WHERE repo_id = %s
+                      AND branch = %s
+                      AND symbol_names @> ARRAY[%s]::text[]
+                    """,
+                    (repo_id, effective_branch, function)
+                )
+
+                root_chunks = cur.fetchall()
+
+                if not root_chunks:
+                    # Function not found in the index
+                    return CallGraphResponse(
+                        function=function,
+                        direction=direction,
+                        depth=depth,
+                        nodes=[],
+                        edges=[],
+                        total_nodes=0,
+                        total_edges=0,
+                    )
+
+                # Add root nodes (the function itself at depth 0)
+                for row in root_chunks:
+                    chunk_id = str(row[0])
+                    if chunk_id not in seen_node_ids:
+                        seen_node_ids.add(chunk_id)
+                        nodes.append(CallGraphNode(
+                            id=chunk_id,
+                            name=function,
+                            file_path=row[1],
+                            line_start=row[2],
+                            line_end=row[3],
+                            depth=0,
+                        ))
+
+                root_chunk_ids = [str(row[0]) for row in root_chunks]
+
+                # Step 2: BFS traversal for callers
+                if direction in ("callers", "both"):
+                    current_level_ids = root_chunk_ids.copy()
+
+                    for current_depth in range(1, depth + 1):
+                        if not current_level_ids or len(nodes) >= limit:
+                            break
+
+                        # Find all callers of the current level
+                        placeholders = ",".join(["%s"] * len(current_level_ids))
+                        cur.execute(
+                            f"""
+                            SELECT DISTINCT
+                                r.source_chunk_id,
+                                r.target_chunk_id,
+                                c.file_path,
+                                c.line_start,
+                                c.line_end,
+                                c.symbol_names,
+                                r.metadata
+                            FROM relationships r
+                            JOIN chunks c ON c.id = r.source_chunk_id
+                            WHERE r.relationship_type = 'calls'
+                              AND r.target_chunk_id IN ({placeholders})
+                              AND c.repo_id = %s
+                              AND c.branch = %s
+                            ORDER BY c.file_path, c.line_start
+                            """,
+                            tuple(current_level_ids) + (repo_id, effective_branch)
+                        )
+
+                        next_level_ids = []
+                        for row in cur.fetchall():
+                            source_id = str(row[0])
+                            target_id = str(row[1])
+                            metadata = row[6] if row[6] else {}
+
+                            # Add edge if not seen
+                            edge_key = (source_id, target_id)
+                            if edge_key not in seen_edge_keys:
+                                seen_edge_keys.add(edge_key)
+                                edges.append(CallGraphEdge(
+                                    source_id=source_id,
+                                    target_id=target_id,
+                                    callee_name=metadata.get("callee_name", function),
+                                    line_number=metadata.get("line_number"),
+                                    receiver=metadata.get("receiver"),
+                                ))
+
+                            # Add node if not seen
+                            if source_id not in seen_node_ids and len(nodes) < limit:
+                                seen_node_ids.add(source_id)
+                                symbol_names = row[5] or []
+                                # Use first symbol name or a generic label
+                                node_name = symbol_names[0] if symbol_names else f"<chunk:{source_id[:8]}>"
+                                nodes.append(CallGraphNode(
+                                    id=source_id,
+                                    name=node_name,
+                                    file_path=row[2],
+                                    line_start=row[3],
+                                    line_end=row[4],
+                                    depth=current_depth,
+                                ))
+                                next_level_ids.append(source_id)
+
+                        current_level_ids = next_level_ids
+
+                # Step 3: BFS traversal for callees
+                if direction in ("callees", "both"):
+                    current_level_ids = root_chunk_ids.copy()
+
+                    for current_depth in range(1, depth + 1):
+                        if not current_level_ids or len(nodes) >= limit:
+                            break
+
+                        # Find all callees of the current level
+                        placeholders = ",".join(["%s"] * len(current_level_ids))
+                        cur.execute(
+                            f"""
+                            SELECT DISTINCT
+                                r.source_chunk_id,
+                                r.target_chunk_id,
+                                t.file_path,
+                                t.line_start,
+                                t.line_end,
+                                t.symbol_names,
+                                r.metadata
+                            FROM relationships r
+                            JOIN chunks t ON t.id = r.target_chunk_id
+                            WHERE r.relationship_type = 'calls'
+                              AND r.source_chunk_id IN ({placeholders})
+                              AND t.repo_id = %s
+                              AND t.branch = %s
+                            ORDER BY t.file_path, t.line_start
+                            """,
+                            tuple(current_level_ids) + (repo_id, effective_branch)
+                        )
+
+                        next_level_ids = []
+                        for row in cur.fetchall():
+                            source_id = str(row[0])
+                            target_id = str(row[1])
+                            metadata = row[6] if row[6] else {}
+
+                            # Add edge if not seen
+                            edge_key = (source_id, target_id)
+                            if edge_key not in seen_edge_keys:
+                                seen_edge_keys.add(edge_key)
+                                edges.append(CallGraphEdge(
+                                    source_id=source_id,
+                                    target_id=target_id,
+                                    callee_name=metadata.get("callee_name", ""),
+                                    line_number=metadata.get("line_number"),
+                                    receiver=metadata.get("receiver"),
+                                ))
+
+                            # Add node if not seen
+                            if target_id not in seen_node_ids and len(nodes) < limit:
+                                seen_node_ids.add(target_id)
+                                symbol_names = row[5] or []
+                                # Use callee_name from metadata or first symbol
+                                node_name = metadata.get("callee_name") or (
+                                    symbol_names[0] if symbol_names else f"<chunk:{target_id[:8]}>"
+                                )
+                                nodes.append(CallGraphNode(
+                                    id=target_id,
+                                    name=node_name,
+                                    file_path=row[2],
+                                    line_start=row[3],
+                                    line_end=row[4],
+                                    depth=current_depth,
+                                ))
+                                next_level_ids.append(target_id)
+
+                        current_level_ids = next_level_ids
+
+        return CallGraphResponse(
+            function=function,
+            direction=direction,
+            depth=depth,
+            nodes=nodes,
+            edges=edges,
+            total_nodes=len(nodes),
+            total_edges=len(edges),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If table doesn't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return CallGraphResponse(
+                function=function,
+                direction=direction,
+                depth=depth,
+                nodes=[],
+                edges=[],
+                total_nodes=0,
+                total_edges=0,
             )
         raise HTTPException(status_code=500, detail=str(e))
 
