@@ -420,6 +420,46 @@ export interface RepoInfo {
 }
 
 /**
+ * A location where a symbol is defined
+ */
+export interface DefinitionLocation {
+  /** File path relative to repo root */
+  filePath: string
+
+  /** Starting line number (1-indexed) */
+  lineStart: number
+
+  /** Ending line number (1-indexed) */
+  lineEnd: number
+
+  /** The code content containing the definition */
+  content: string
+
+  /** Type of code construct (function, class, etc.) */
+  chunkType: ChunkType | null
+
+  /** Whether this is a re-export rather than the original definition */
+  isReexport: boolean
+
+  /** If this is a re-export, the source file it's re-exported from */
+  reexportSource: string | null
+}
+
+/**
+ * Response from a symbol definition lookup
+ */
+export interface DefinitionLookupResult {
+  /** The symbol that was looked up */
+  symbol: string
+
+  /** All locations where the symbol is defined or re-exported */
+  definitions: DefinitionLocation[]
+
+  /** Total number of definitions found */
+  totalCount: number
+}
+
+/**
  * Type of change for a modified line
  */
 export type ChangeType = 'addition' | 'deletion' | 'modification'

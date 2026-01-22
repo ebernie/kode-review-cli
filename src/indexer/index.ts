@@ -12,6 +12,8 @@ export type {
   WeightedCodeChunk,
   ChangeType,
   PrDescriptionInfo,
+  DefinitionLocation,
+  DefinitionLookupResult,
 } from './types.js'
 
 // Detector

@@ -1,4 +1,4 @@
-import type { CodeChunk, IndexStats, RepoInfo } from './types.js'
+import type { CodeChunk, IndexStats, RepoInfo, DefinitionLookupResult, ChunkType } from './types.js'
 
 export interface IndexRequest {
   repoUrl: string
@@ -60,6 +60,22 @@ interface RepoInfoResponse {
 
 interface ReposResponse {
   repos: RepoInfoResponse[]
+}
+
+interface DefinitionLocationResponse {
+  file_path: string
+  line_start: number
+  line_end: number
+  content: string
+  chunk_type: string | null
+  is_reexport: boolean
+  reexport_source: string | null
+}
+
+interface DefinitionResponse {
+  symbol: string
+  definitions: DefinitionLocationResponse[]
+  total_count: number
 }
 
 /**
@@ -245,5 +261,64 @@ export class IndexerClient {
       totalChunks: repo.total_chunks,
       totalFiles: repo.total_files,
     }))
+  }
+
+  /**
+   * Look up where a symbol is defined in the indexed codebase.
+   *
+   * This helps catch breaking changes by finding all locations where
+   * a symbol (function, class, variable, etc.) is defined or re-exported.
+   *
+   * @param symbol - The symbol name to look up (e.g., 'MyClass', 'handleRequest')
+   * @param repoUrl - Optional repository URL to scope the search
+   * @param branch - Optional branch to scope the search
+   * @param includeReexports - Whether to follow import chains for re-exports (default: true)
+   * @param limit - Maximum number of results to return (default: 20)
+   */
+  async lookupDefinitions(
+    symbol: string,
+    repoUrl?: string,
+    branch?: string,
+    includeReexports: boolean = true,
+    limit: number = 20
+  ): Promise<DefinitionLookupResult> {
+    const params = new URLSearchParams()
+    if (repoUrl) {
+      params.append('repo_url', repoUrl)
+    }
+    if (branch) {
+      params.append('branch', branch)
+    }
+    params.append('include_reexports', String(includeReexports))
+    params.append('limit', String(limit))
+
+    const queryString = params.toString()
+    const url = `${this.baseUrl}/definitions/${encodeURIComponent(symbol)}${queryString ? `?${queryString}` : ''}`
+
+    const response = await fetch(url, {
+      method: 'GET',
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      throw new Error(`Failed to lookup definitions: ${error}`)
+    }
+
+    const data = (await response.json()) as DefinitionResponse
+
+    // Map snake_case to camelCase
+    return {
+      symbol: data.symbol,
+      definitions: data.definitions.map((def) => ({
+        filePath: def.file_path,
+        lineStart: def.line_start,
+        lineEnd: def.line_end,
+        content: def.content,
+        chunkType: def.chunk_type as ChunkType | null,
+        isReexport: def.is_reexport,
+        reexportSource: def.reexport_source,
+      })),
+      totalCount: data.total_count,
+    }
   }
 }

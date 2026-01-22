@@ -125,6 +125,24 @@ class ReposResponse(BaseModel):
     repos: list[RepoInfo]
 
 
+class DefinitionLocation(BaseModel):
+    """A location where a symbol is defined."""
+    file_path: str
+    line_start: int
+    line_end: int
+    content: str
+    chunk_type: Optional[str] = None
+    is_reexport: bool = False
+    reexport_source: Optional[str] = None
+
+
+class DefinitionResponse(BaseModel):
+    """Response from a symbol definition lookup."""
+    symbol: str
+    definitions: list[DefinitionLocation]
+    total_count: int
+
+
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str
@@ -366,6 +384,139 @@ async def list_repos():
         # If table doesn't exist yet, return empty list
         if "does not exist" in str(e).lower():
             return ReposResponse(repos=[])
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/definitions/{symbol}", response_model=DefinitionResponse)
+async def get_definitions(
+    symbol: str,
+    repo_url: Optional[str] = None,
+    branch: Optional[str] = None,
+    include_reexports: bool = True,
+    limit: int = 20,
+):
+    """
+    Look up where a symbol is defined in the indexed codebase.
+
+    This endpoint helps catch breaking changes by finding all locations where
+    a symbol (function, class, variable, etc.) is defined or re-exported.
+
+    Args:
+        symbol: The symbol name to look up (e.g., 'MyClass', 'handleRequest')
+        repo_url: Optional repository URL to scope the search
+        branch: Optional branch to scope the search
+        include_reexports: Whether to follow import chains for re-exports (default: True)
+        limit: Maximum number of results to return (default: 20)
+
+    Returns:
+        DefinitionResponse with all locations where the symbol is defined or re-exported
+    """
+    try:
+        definitions: list[DefinitionLocation] = []
+
+        # Build WHERE clause for filtering
+        where_conditions = ["symbol_names @> ARRAY[%s]::text[]"]
+        where_params: list = [symbol]
+
+        if repo_url:
+            repo_id = generate_repo_id(repo_url)
+            where_conditions.append("repo_id = %s")
+            where_params.append(repo_id)
+
+        if branch:
+            where_conditions.append("branch = %s")
+            where_params.append(branch)
+
+        where_clause = " AND ".join(where_conditions)
+
+        with get_connection_pool().connection() as conn:
+            with conn.cursor() as cur:
+                # Query for direct definitions
+                cur.execute(
+                    f"""
+                    SELECT file_path, line_start, line_end, content, chunk_type, id
+                    FROM chunks
+                    WHERE {where_clause}
+                    ORDER BY file_path, line_start
+                    LIMIT %s
+                    """,
+                    tuple(where_params + [limit])
+                )
+
+                direct_chunk_ids = []
+                for row in cur.fetchall():
+                    definitions.append(DefinitionLocation(
+                        file_path=row[0],
+                        line_start=row[1],
+                        line_end=row[2],
+                        content=row[3],
+                        chunk_type=row[4],
+                        is_reexport=False,
+                        reexport_source=None,
+                    ))
+                    direct_chunk_ids.append(row[5])
+
+                # If we want re-exports, follow the relationship chain
+                if include_reexports and direct_chunk_ids:
+                    # Find chunks that import from the chunks containing this symbol
+                    # This catches re-exports like: export { MyClass } from './source'
+                    placeholders = ",".join(["%s"] * len(direct_chunk_ids))
+                    reexport_query_params: list = direct_chunk_ids.copy()
+
+                    # Add repo/branch filters if specified
+                    reexport_where = ""
+                    if repo_url:
+                        reexport_where += " AND c.repo_id = %s"
+                        reexport_query_params.append(repo_id)
+                    if branch:
+                        reexport_where += " AND c.branch = %s"
+                        reexport_query_params.append(branch)
+
+                    # Calculate remaining limit for re-exports
+                    remaining_limit = limit - len(definitions)
+                    if remaining_limit > 0:
+                        reexport_query_params.append(remaining_limit)
+
+                        cur.execute(
+                            f"""
+                            SELECT c.file_path, c.line_start, c.line_end, c.content, c.chunk_type,
+                                   src.file_path as source_file
+                            FROM chunks c
+                            JOIN relationships r ON r.source_chunk_id = c.id
+                            JOIN chunks src ON src.id = r.target_chunk_id
+                            WHERE r.target_chunk_id IN ({placeholders})
+                              AND r.relationship_type IN ('imports', 'references')
+                              AND c.exports @> ARRAY[%s]::text[]
+                              {reexport_where}
+                            ORDER BY c.file_path, c.line_start
+                            LIMIT %s
+                            """,
+                            tuple(reexport_query_params[:len(direct_chunk_ids)] +
+                                  [symbol] +
+                                  reexport_query_params[len(direct_chunk_ids):])
+                        )
+
+                        for row in cur.fetchall():
+                            definitions.append(DefinitionLocation(
+                                file_path=row[0],
+                                line_start=row[1],
+                                line_end=row[2],
+                                content=row[3],
+                                chunk_type=row[4],
+                                is_reexport=True,
+                                reexport_source=row[5],
+                            ))
+
+        return DefinitionResponse(
+            symbol=symbol,
+            definitions=definitions,
+            total_count=len(definitions),
+        )
+
+    except Exception as e:
+        # If tables don't exist yet, return empty result
+        if "does not exist" in str(e).lower():
+            return DefinitionResponse(symbol=symbol, definitions=[], total_count=0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
