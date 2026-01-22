@@ -14,6 +14,7 @@ bun run lint           # ESLint
 bun test               # Run tests once (vitest run)
 bun run test:watch     # Watch mode for tests (vitest)
 bun test src/indexer   # Run tests for a specific module
+bun test src/indexer/__tests__/client.test.ts  # Run a single test file
 ```
 
 **Run the CLI locally:**
@@ -39,10 +40,10 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 | `src/cli/` | CLI argument parsing (Commander), colors (Chalk), interactive context |
 | `src/config/` | Zod schemas, Conf-based persistent config store (~/.config/kode-review/) |
 | `src/onboarding/` | Setup wizard, Antigravity OAuth, VCS CLI detection |
-| `src/review/` | OpenCode SDK integration, prompt construction, git diff extraction |
+| `src/review/` | OpenCode SDK integration, prompt construction, git diff extraction, project structure analysis |
 | `src/vcs/` | GitHub/GitLab CLI wrappers (`gh`/`glab`), platform detection from git remote |
 | `src/watch/` | Polling-based PR/MR monitoring with persistent state tracking |
-| `src/indexer/` | Docker-based semantic code indexer (PostgreSQL + pgvector + FastAPI) |
+| `src/indexer/` | Semantic code indexer with multi-stage retrieval pipeline |
 | `src/utils/` | Logger with quiet mode, command execution wrapper (`execa`) |
 
 ### Key Patterns
@@ -70,11 +71,33 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 
 ### Indexer Architecture
 
-The indexer (`src/indexer/`) provides semantic code search via Docker containers:
-- **PostgreSQL + pgvector** for vector storage
-- **FastAPI server** for indexing and search endpoints
-- Uses `sentence-transformers/all-MiniLM-L6-v2` for embeddings by default
-- Configuration in `IndexerConfigSchema` (ports, chunk sizes, file patterns)
+The indexer (`src/indexer/`) provides semantic code search:
+
+**Core Components:**
+- `client.ts` - HTTP client for indexer API (search, keyword, hybrid, definitions, usages, call graph)
+- `docker.ts` - Docker Compose management for PostgreSQL + pgvector + FastAPI containers
+- `context.ts` - Extracts semantic context from diffs for review prompts
+
+**Multi-Stage Retrieval Pipeline** (`pipeline.ts`):
+1. **Stage 1**: Keyword search for exact identifier matches (100ms budget)
+2. **Stage 2**: Vector similarity search on diff content (500ms budget)
+3. **Stage 3**: Structural lookup - definitions, usages, call graph (500ms budget)
+4. **Stage 4**: Re-ranking and deduplication (100ms budget)
+
+Early termination occurs when high-confidence matches (score > 0.9) are found.
+
+**Supporting Modules:**
+- `diversification.ts` - Prevents redundant results (max chunks per file, category distribution)
+- `file-type-strategies.ts` - Language-specific query extraction (TypeScript, Python, Go, etc.)
+- `xml-context.ts` - Formats context chunks as structured XML for prompts
+- `background-indexer.ts` - Async job queue for large repository re-indexing
+- `background-queue.ts` - Priority-based job queue with persistence
+
+**Indexer Types** (`types.ts`):
+- `CodeChunk`, `WeightedCodeChunk` - Base units of indexed code
+- `HybridSearchResult` - Combined vector + BM25 keyword search
+- `CallGraphResult` - Function call relationships
+- `ImportTree`, `CircularDependency` - Dependency analysis
 
 ## Technical Stack
 
