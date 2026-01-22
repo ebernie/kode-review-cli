@@ -9,6 +9,24 @@ export const VcsConfigSchema = z.object({
 })
 
 /**
+ * File-type strategy configuration for optimized context retrieval
+ */
+export const FileTypeStrategyOverridesSchema = z.object({
+  /** Override priority weight for specific file types */
+  priorityWeights: z.record(z.string(), z.number()).optional(),
+
+  /** Disable specific strategies */
+  disabledStrategies: z.array(z.enum([
+    'typescript', 'javascript', 'python', 'go', 'css', 'scss', 'rust', 'java', 'generic'
+  ])).optional(),
+
+  /** Custom extension mappings (e.g., { '.mts': 'typescript' }) */
+  extensionMappings: z.record(z.string(), z.enum([
+    'typescript', 'javascript', 'python', 'go', 'css', 'scss', 'rust', 'java', 'generic'
+  ])).optional(),
+}).default({})
+
+/**
  * Indexer configuration for semantic code search
  */
 export const IndexerConfigSchema = z.object({
@@ -51,6 +69,9 @@ export const IndexerConfigSchema = z.object({
     '**/node_modules/**', '**/dist/**', '**/build/**',
     '**/.git/**', '**/vendor/**', '**/target/**',
   ]),
+
+  /** File-type specific retrieval strategy overrides */
+  fileTypeStrategies: FileTypeStrategyOverridesSchema,
 })
 
 /**
@@ -100,6 +121,7 @@ export type Config = z.infer<typeof ConfigSchema>
 export type VcsConfig = z.infer<typeof VcsConfigSchema>
 export type AntigravityModel = z.infer<typeof AntigravityModelSchema>
 export type IndexerConfigType = z.infer<typeof IndexerConfigSchema>
+export type FileTypeStrategyOverridesType = z.infer<typeof FileTypeStrategyOverridesSchema>
 
 /**
  * Default configuration

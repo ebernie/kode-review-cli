@@ -48,7 +48,36 @@ export {
   findRelatedTestFiles,
   extractPrDescriptionInfo,
   extractQueriesFromPrDescription,
+  extractCodeByFileFromDiff,
 } from './context.js'
+
+// File-type strategies
+export {
+  getFileType,
+  getStrategyForFile,
+  extractPriorityQueries,
+  extractQueriesUsingStrategy,
+  generateRelatedFilePaths,
+  applyStrategyOverrides,
+  FILE_TYPE_STRATEGIES,
+  typescriptStrategy,
+  javascriptStrategy,
+  pythonStrategy,
+  goStrategy,
+  cssStrategy,
+  scssStrategy,
+  genericStrategy,
+} from './file-type-strategies.js'
+
+export type {
+  FileTypeStrategy,
+  FileTypeStrategyConfig,
+  PriorityPattern,
+  QueryPattern,
+  RelatedFilePattern,
+  StrategyResult,
+  FileTypeStrategyOverrides,
+} from './file-type-strategies.js'
 
 // Setup wizard
 export { setupIndexer, showIndexerStatus, handleStopIndexer, handleCleanupIndexer } from './setup.js'

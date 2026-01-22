@@ -343,6 +343,20 @@ export interface IndexerStatus {
 }
 
 /**
+ * File-type strategy overrides from configuration
+ */
+export interface FileTypeStrategyOverrides {
+  /** Override priority weight for specific file types */
+  priorityWeights?: Record<string, number>
+
+  /** Disable specific strategies */
+  disabledStrategies?: string[]
+
+  /** Custom extension mappings (e.g., { '.mts': 'typescript' }) */
+  extensionMappings?: Record<string, string>
+}
+
+/**
  * Options for retrieving semantic context
  */
 export interface SemanticContextOptions {
@@ -363,6 +377,9 @@ export interface SemanticContextOptions {
 
   /** PR/MR description to extract intent and bias context retrieval */
   prDescription?: string
+
+  /** File-type strategy overrides from configuration */
+  fileTypeStrategyOverrides?: FileTypeStrategyOverrides
 }
 
 /**

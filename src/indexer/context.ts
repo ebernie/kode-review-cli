@@ -2,6 +2,16 @@ import { IndexerClient } from './client.js'
 import { getIndexerApiUrl, isIndexerRunning } from './docker.js'
 import { logger } from '../utils/logger.js'
 import type { CodeChunk, SemanticContextOptions, ModifiedLine, ParsedDiff, WeightedCodeChunk, PrDescriptionInfo } from './types.js'
+import {
+  getStrategyForFile,
+  extractPriorityQueries,
+  extractQueriesUsingStrategy,
+  generateRelatedFilePaths,
+  applyStrategyOverrides,
+  getFileType,
+  type StrategyResult,
+  type FileTypeStrategyOverrides as StrategyOverrides,
+} from './file-type-strategies.js'
 
 /**
  * Weight multiplier for chunks that overlap with modified lines.
@@ -31,6 +41,11 @@ const DESCRIPTION_WEIGHT_MULTIPLIER = 1.3
  * Maximum number of queries to extract from PR description.
  */
 const MAX_DESCRIPTION_QUERIES = 8
+
+/**
+ * Maximum number of file-type strategy priority queries to extract.
+ */
+const MAX_FILE_TYPE_PRIORITY_QUERIES = 10
 
 /**
  * Test file naming patterns - file must contain one of these patterns to be a test file.
@@ -1250,6 +1265,184 @@ async function findTestFilesBySymbolSearch(
 }
 
 /**
+ * Extract code content grouped by file from a diff.
+ * This is used to provide code context for file-type strategy analysis.
+ */
+export function extractCodeByFileFromDiff(diffContent: string): Map<string, string> {
+  const codeByFile = new Map<string, string>()
+  const lines = diffContent.split('\n')
+
+  let currentFile = ''
+  let currentCode: string[] = []
+
+  for (const line of lines) {
+    // Match file header
+    const fileMatch = line.match(/^diff --git a\/(.+) b\/(.+)$/)
+    if (fileMatch) {
+      // Save previous file's code
+      if (currentFile && currentCode.length > 0) {
+        codeByFile.set(currentFile, currentCode.join('\n'))
+      }
+      currentFile = fileMatch[2]
+      currentCode = []
+      continue
+    }
+
+    // Skip file headers and metadata
+    if (line.startsWith('+++') || line.startsWith('---') ||
+        line.startsWith('index ') || line.startsWith('@@') ||
+        line.startsWith('new file') || line.startsWith('deleted file') ||
+        line.startsWith('Binary')) {
+      continue
+    }
+
+    // Collect code content (both additions and context)
+    if (currentFile && (line.startsWith('+') || line.startsWith(' '))) {
+      currentCode.push(line.slice(1))
+    }
+  }
+
+  // Don't forget the last file
+  if (currentFile && currentCode.length > 0) {
+    codeByFile.set(currentFile, currentCode.join('\n'))
+  }
+
+  return codeByFile
+}
+
+/**
+ * Apply file-type specific strategies to enhance context retrieval.
+ *
+ * This function:
+ * 1. Identifies the file type for each modified file
+ * 2. Extracts priority queries (type definitions, imports, base classes, etc.)
+ * 3. Searches for related files (e.g., __init__.py, index.ts, _variables.scss)
+ * 4. Returns additional queries and priority chunk IDs
+ */
+async function applyFileTypeStrategies(
+  parsedDiff: ParsedDiff,
+  codeByFile: Map<string, string>,
+  client: IndexerClient,
+  repoUrl: string,
+  branch?: string
+): Promise<StrategyResult> {
+  const additionalQueries: string[] = []
+  const priorityChunkIds = new Set<string>()
+  const relatedFilesSearched: string[] = []
+
+  // Track which strategies are being used for logging
+  const strategiesUsed = new Map<string, number>()
+
+  // Process each modified file
+  for (const filename of parsedDiff.fileChanges.keys()) {
+    const strategy = getStrategyForFile(filename)
+    const fileType = getFileType(filename)
+
+    // Skip generic files (no special handling)
+    if (fileType === 'generic') {
+      continue
+    }
+
+    // Track strategy usage
+    strategiesUsed.set(fileType, (strategiesUsed.get(fileType) || 0) + 1)
+
+    const code = codeByFile.get(filename) || ''
+
+    if (code.length === 0) {
+      continue
+    }
+
+    // Extract priority queries (type definitions, base classes, etc.)
+    const priorityQueries = extractPriorityQueries(code, strategy)
+    for (const { query } of priorityQueries.slice(0, MAX_FILE_TYPE_PRIORITY_QUERIES)) {
+      if (!additionalQueries.includes(query)) {
+        additionalQueries.push(query)
+      }
+    }
+
+    // Extract additional queries using strategy-specific patterns
+    const strategyQueries = extractQueriesUsingStrategy(code, strategy)
+    for (const query of strategyQueries.slice(0, 5)) {
+      if (!additionalQueries.includes(query)) {
+        additionalQueries.push(query)
+      }
+    }
+
+    // Search for related files (e.g., __init__.py, types.ts, _variables.scss)
+    const relatedPaths = generateRelatedFilePaths(filename, strategy)
+    for (const relatedPath of relatedPaths.slice(0, 5)) {
+      if (relatedFilesSearched.includes(relatedPath)) {
+        continue
+      }
+      relatedFilesSearched.push(relatedPath)
+
+      try {
+        const results = await client.search(`file:${relatedPath}`, repoUrl, 2, branch)
+        for (const chunk of results) {
+          const id = `${chunk.filename}:${chunk.startLine}-${chunk.endLine}`
+          priorityChunkIds.add(id)
+        }
+      } catch {
+        // Ignore search errors for related files
+      }
+    }
+  }
+
+  // Log strategy usage
+  if (strategiesUsed.size > 0) {
+    const strategyLog = Array.from(strategiesUsed.entries())
+      .map(([type, count]) => `${type}: ${count}`)
+      .join(', ')
+    logger.debug(`File-type strategies applied: ${strategyLog}`)
+  }
+
+  if (additionalQueries.length > 0) {
+    logger.debug(`File-type strategies generated ${additionalQueries.length} additional queries`)
+  }
+
+  if (relatedFilesSearched.length > 0) {
+    logger.debug(`File-type strategies searched ${relatedFilesSearched.length} related files`)
+  }
+
+  return {
+    additionalQueries,
+    priorityChunkIds,
+    relatedFilesSearched,
+  }
+}
+
+/**
+ * Apply file-type strategy weighting to chunks.
+ * Chunks that match priority files (type definitions, base classes, etc.) get boosted.
+ */
+function applyFileTypeStrategyWeighting(
+  chunks: WeightedCodeChunk[],
+  strategyResult: StrategyResult
+): WeightedCodeChunk[] {
+  if (strategyResult.priorityChunkIds.size === 0) {
+    return chunks
+  }
+
+  return chunks.map(chunk => {
+    const id = `${chunk.filename}:${chunk.startLine}-${chunk.endLine}`
+
+    if (strategyResult.priorityChunkIds.has(id)) {
+      // Get the strategy for this chunk's file type
+      const strategy = getStrategyForFile(chunk.filename)
+      const priorityWeight = strategy.priorityWeight
+
+      return {
+        ...chunk,
+        score: chunk.score * priorityWeight,
+        weightMultiplier: chunk.weightMultiplier * priorityWeight,
+      }
+    }
+
+    return chunk
+  })
+}
+
+/**
  * Get semantic context for a code review.
  *
  * Extracts queries from the diff, searches the index, and formats
@@ -1263,11 +1456,28 @@ async function findTestFilesBySymbolSearch(
  *
  * PR/MR description is used to bias context retrieval toward relevant
  * subsystems with a 1.3x weight multiplier.
+ *
+ * File-type specific strategies are applied to prioritize relevant context:
+ * - TypeScript/JavaScript: type definitions, imported modules
+ * - Python: __init__.py, base classes, decorators
+ * - Go: interface definitions, package documentation
+ * - CSS/SCSS: variable definitions, mixins
  */
 export async function getSemanticContext(
   options: SemanticContextOptions
 ): Promise<string | null> {
-  const { diffContent, repoUrl, branch, topK, maxTokens, prDescription } = options
+  const { diffContent, repoUrl, branch, topK, maxTokens, prDescription, fileTypeStrategyOverrides } = options
+
+  // Apply any user-configured strategy overrides
+  if (fileTypeStrategyOverrides) {
+    // Convert the config type to the strategy type
+    const overrides: StrategyOverrides = {
+      priorityWeights: fileTypeStrategyOverrides.priorityWeights,
+      disabledStrategies: fileTypeStrategyOverrides.disabledStrategies as StrategyOverrides['disabledStrategies'],
+      extensionMappings: fileTypeStrategyOverrides.extensionMappings as StrategyOverrides['extensionMappings'],
+    }
+    applyStrategyOverrides(overrides)
+  }
 
   // Check if indexer is running
   const running = await isIndexerRunning()
@@ -1300,6 +1510,18 @@ export async function getSemanticContext(
     logger.debug(`Extracted ${descriptionQueries.length} queries from PR description`)
   }
 
+  // Extract code content by file for file-type strategy analysis
+  const codeByFile = extractCodeByFileFromDiff(diffContent)
+
+  // Apply file-type specific strategies to get additional queries and priority chunks
+  const strategyResult = await applyFileTypeStrategies(
+    parsedDiff,
+    codeByFile,
+    client,
+    repoUrl,
+    branch
+  )
+
   // Combine diff and description queries, keeping track of which are from description
   const descriptionQuerySet = new Set(descriptionQueries.map(q => q.toLowerCase()))
   const allQueries = [...diffQueries]
@@ -1311,12 +1533,20 @@ export async function getSemanticContext(
     }
   }
 
+  // Add file-type strategy queries that aren't already included
+  for (const query of strategyResult.additionalQueries) {
+    if (!allQueries.some(q => q.toLowerCase() === query.toLowerCase())) {
+      allQueries.push(query)
+    }
+  }
+
   if (allQueries.length === 0) {
-    logger.debug('No queries extracted from diff or description')
+    logger.debug('No queries extracted from diff, description, or file-type strategies')
     return null
   }
 
-  logger.debug(`Total queries: ${allQueries.length} (${diffQueries.length} from diff, ${descriptionQueries.length} from description)`)
+  const ftQueryCount = strategyResult.additionalQueries.length
+  logger.debug(`Total queries: ${allQueries.length} (${diffQueries.length} from diff, ${descriptionQueries.length} from description, ${ftQueryCount} from file-type strategies)`)
 
   // Search for each query and collect results
   // Track which chunks came from description queries for weighting
@@ -1373,12 +1603,19 @@ export async function getSemanticContext(
     return chunk
   })
 
+  // Apply file-type strategy weighting for priority chunks (type definitions, etc.)
+  weightedChunks = applyFileTypeStrategyWeighting(weightedChunks, strategyResult)
+
   // Count how many chunks are from modified context and description intent
   const modifiedCount = weightedChunks.filter(c => c.isModifiedContext).length
   const descriptionCount = weightedChunks.filter(c => c.matchesDescriptionIntent).length
+  const priorityCount = strategyResult.priorityChunkIds.size
   logger.debug(`Found ${modifiedCount} chunks overlapping with modified lines (weighted 2x)`)
   if (descriptionCount > 0) {
     logger.debug(`Found ${descriptionCount} chunks matching PR description intent (weighted 1.3x)`)
+  }
+  if (priorityCount > 0) {
+    logger.debug(`Found ${priorityCount} priority chunks from file-type strategies`)
   }
 
   // Find related test files for modified source files
