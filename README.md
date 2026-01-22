@@ -8,7 +8,7 @@ AI-powered code review CLI using OpenCode SDK with Antigravity support.
 - **Antigravity Integration**: Free access to Claude and Gemini models via Google OAuth
 - **Multi-Platform VCS**: Supports GitHub PRs and GitLab MRs
 - **Interactive & Agent Modes**: Works interactively or in CI/automation pipelines
-- **Onboarding Wizard**: Guided setup for providers and VCS integration
+- **Watch Mode**: Continuous monitoring for PRs/MRs where you're a reviewer
 - **Semantic Code Indexer**: Optional Docker-based code indexing for contextual reviews
 
 ## Requirements
@@ -26,8 +26,6 @@ AI-powered code review CLI using OpenCode SDK with Antigravity support.
 - **Optional:** [Docker](https://www.docker.com/products/docker-desktop/) (required for semantic code indexer)
 
 ## Installation
-
-Install from source (not yet published to npm):
 
 ```bash
 # Clone the repository
@@ -54,36 +52,28 @@ kode-review --scope local
 # Review a specific PR/MR
 kode-review --scope pr --pr 123
 
-# Review both local changes and PR/MR
-kode-review --scope both
+# Review with semantic context (requires indexer setup)
+kode-review --with-context
 ```
+
+---
 
 ## Usage
 
 ### Interactive Mode (Default)
 
-When run in a terminal, `kode-review` provides an interactive experience:
-
-1. First run triggers the onboarding wizard
-2. Prompts for scope selection when multiple options are available
-3. Shows colored output with progress indicators
+When run in a terminal, `kode-review` provides an interactive experience with colored output and progress indicators. First run triggers the onboarding wizard.
 
 ### Agent/CI Mode
 
-For automation and coding agents, use non-interactive flags:
+For automation, use non-interactive flags:
 
 ```bash
-# Quiet mode - minimal output
-kode-review --scope local --quiet
-
-# JSON mode - errors as JSON
-kode-review --scope pr --pr 123 --json
-
-# Override model for single run
-kode-review --provider google --model antigravity-claude-sonnet-4-5-thinking --variant max
+kode-review --scope local --quiet        # Minimal output
+kode-review --scope pr --pr 123 --json   # JSON error output
 ```
 
-### CLI Options
+### Review Options
 
 | Flag | Description |
 |------|-------------|
@@ -95,140 +85,126 @@ kode-review --provider google --model antigravity-claude-sonnet-4-5-thinking --v
 | `--model <id>` | Override model |
 | `--variant <name>` | Override variant (e.g., `max`, `low`) |
 | `--attach <url>` | Connect to running OpenCode server |
-| `-w, --watch` | Watch mode: monitor for PRs/MRs where you are a reviewer |
-| `--watch-interval <sec>` | Polling interval in seconds (default: 300) |
-| `--watch-interactive` | Prompt to select PR/MR instead of auto-reviewing |
-| `--setup` | Re-run full onboarding wizard |
-| `--setup-provider` | Re-configure provider/model only |
-| `--setup-vcs` | Re-configure GitHub/GitLab only |
-| `--reset` | Reset all configuration |
-| `--setup-indexer` | Interactive indexer setup wizard |
-| `--index` | Index/update current repository |
-| `--index-status` | Show indexer status |
-| `--index-reset` | Drop and rebuild index for current repo |
-| `--with-context` | Include semantic context in review |
-| `--context-top-k <n>` | Number of similar code chunks to include (default: 5) |
+
+---
 
 ## Watch Mode
 
-Watch mode monitors for PRs/MRs where you are assigned as a reviewer across all repositories.
+Monitor for PRs/MRs where you are assigned as a reviewer.
 
 ```bash
-# Start watching with default 5-minute polling interval
-kode-review --watch
-
-# Custom polling interval (1 minute)
-kode-review --watch --watch-interval 60
-
-# Interactive mode - prompt to select which PR/MR to review
-kode-review --watch --watch-interactive
-
-# Quiet mode for background monitoring
-kode-review --watch --quiet
+kode-review --watch                      # Default 5-minute polling
+kode-review --watch --watch-interval 60  # 1-minute polling
+kode-review --watch --watch-interactive  # Prompt to select PR/MR
+kode-review --watch --quiet              # Background monitoring
 ```
 
 **Features:**
 - Polls both GitHub and GitLab simultaneously (if both CLIs are authenticated)
-- Persists reviewed PR/MR state to disk to avoid duplicates across restarts
-- Auto-detects VCS CLI authentication on first run
-- Graceful shutdown on Ctrl+C (waits for current review to complete)
-- Retries transient errors (network, timeout) in the next poll cycle
+- Persists reviewed state to avoid duplicates across restarts
+- Graceful shutdown on Ctrl+C
+
+| Flag | Description |
+|------|-------------|
+| `-w, --watch` | Enable watch mode |
+| `--watch-interval <sec>` | Polling interval in seconds (default: 300) |
+| `--watch-interactive` | Prompt to select PR/MR instead of auto-reviewing |
 
 **State file:** `~/.config/kode-review-watch/config.json`
 
-## Semantic Code Indexer
+---
 
-The semantic code indexer is an **optional** feature that provides contextual information during code reviews. When reviewing a diff, the tool queries an index to find related code from your codebase, helping the AI reviewer understand the broader context.
+## Configuration
 
-### Requirements
+Configuration is stored in `~/.config/kode-review/config.json`.
 
-- **Docker Desktop** (macOS/Windows) or **Docker Engine** (Linux)
-- Docker Compose v2 (included with Docker Desktop)
+### First-Time Setup
 
-### Setup
-
-Run the interactive setup wizard:
+The first run triggers an interactive onboarding wizard, or run manually:
 
 ```bash
-kode-review --setup-indexer
+kode-review --setup           # Full wizard
+kode-review --setup-provider  # Provider/model only
+kode-review --setup-vcs       # GitHub/GitLab only
+kode-review --reset           # Reset all configuration
 ```
 
-This will:
-1. Check Docker prerequisites
-2. Build and start the indexer containers (PostgreSQL + API)
-3. Enable the indexer feature in your configuration
+### Provider Configuration
+
+**Antigravity (Recommended)** - Free access to premium models via Google OAuth:
+- Claude Sonnet 4.5 / Opus 4.5 (thinking variants: `low`, `max`)
+- Gemini 3 Pro (thinking variants: `low`, `high`)
+- Gemini 3 Flash (thinking variants: `minimal`, `low`, `medium`, `high`)
+
+**Standard Providers** - Anthropic, Google, OpenAI, or OpenCode Zen (requires direct authentication)
+
+### VCS Integration
+
+GitHub CLI (`gh`) and GitLab CLI (`glab`) are detected automatically. This enables reviewing PRs/MRs directly and auto-detecting the platform from git remote.
+
+---
+
+## Semantic Code Indexer
+
+The semantic code indexer is **optional**. It provides contextual information during reviews by finding related code from your codebase.
+
+**Requirements:** Docker Desktop (macOS/Windows) or Docker Engine (Linux)
+
+### Quick Start
+
+```bash
+# 1. Set up the indexer (one-time)
+kode-review --setup-indexer
+
+# 2. Index your repository
+cd /path/to/your/repo
+kode-review --index
+
+# 3. Review with context
+kode-review --with-context
+kode-review --scope pr --pr 123 --with-context
+```
+
+### Indexer Options
+
+| Flag | Description |
+|------|-------------|
+| `--setup-indexer` | Interactive setup wizard |
+| `--index` | Index/update current repository |
+| `--index-status` | Show indexer status |
+| `--index-reset` | Drop and rebuild index for current repo |
+| `--index-list-repos` | List all indexed repositories |
+| `--indexer-cleanup` | Remove containers, volumes, and all data |
+| `--with-context` | Include semantic context in review |
+| `--context-top-k <n>` | Number of code chunks to include (default: 5) |
+| `--index-branch <branch>` | Branch to index (default: current) |
+| `--index-watch` | Continuous indexing (watch mode) |
+| `--background-indexer` | Background daemon for large repos |
+| `--index-queue` | Show pending background jobs |
+| `--index-queue-clear` | Clear pending background jobs |
+
+<details>
+<summary><strong>How It Works</strong></summary>
 
 The indexer runs as two Docker containers:
 - **PostgreSQL with pgvector** - Stores code embeddings for semantic search
 - **FastAPI server** - Handles indexing and search requests
 
-### Indexing a Repository
-
-Before using semantic context in reviews, you need to index your repository:
-
-```bash
-# Navigate to your repository
-cd /path/to/your/repo
-
-# Index the repository
-kode-review --index
-```
-
-The indexer will:
-- Scan files matching configured patterns (TypeScript, JavaScript, Python, Go, Rust, Java, etc.)
-- Split code into overlapping chunks
-- Generate embeddings using SentenceTransformers
-- Store in PostgreSQL for fast similarity search
-
-**Re-index** after significant code changes:
-```bash
-kode-review --index
-```
-
-**Reset and rebuild** the index completely:
-```bash
-kode-review --index-reset
-kode-review --index
-```
-
-### Using Semantic Context in Reviews
-
-Once your repository is indexed, include semantic context in reviews:
-
-```bash
-# Review with semantic context
-kode-review --with-context
-
-# Review a PR with context
-kode-review --scope pr --pr 123 --with-context
-
-# Adjust number of related code chunks (default: 5)
-kode-review --with-context --context-top-k 10
-```
-
-When `--with-context` is enabled, the tool:
+When `--with-context` is enabled:
 1. Extracts function names, class names, and imports from the diff
 2. Searches the index for semantically similar code
 3. Includes the most relevant chunks in the review prompt
-4. The AI reviewer uses this context to understand how changes fit into your codebase
 
-### Checking Status
+The indexer scans: TypeScript, JavaScript, Python, Go, Rust, Java, C/C++, C#
 
-View the indexer status and configuration:
+Excludes: `node_modules`, `dist`, `build`, `.git`, `vendor`, `target`
 
-```bash
-kode-review --index-status
-```
+</details>
 
-This shows:
-- Whether containers are running
-- Health check status
-- Configuration settings (ports, embedding model, etc.)
-- Indexed repository statistics
+<details>
+<summary><strong>Configuration Reference</strong></summary>
 
-### Configuration
-
-The indexer stores configuration in `~/.config/kode-review/config.json`:
+Settings in `~/.config/kode-review/config.json`:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -240,92 +216,80 @@ The indexer stores configuration in `~/.config/kode-review/config.json`:
 | `indexer.topK` | `5` | Default search results |
 | `indexer.maxContextTokens` | `4000` | Max tokens for context |
 
-### File Patterns
+</details>
 
-By default, the indexer includes common source files:
-- TypeScript/JavaScript: `**/*.ts`, `**/*.tsx`, `**/*.js`, `**/*.jsx`
-- Python: `**/*.py`
-- Go: `**/*.go`
-- Rust: `**/*.rs`
-- Java: `**/*.java`
-- C/C++: `**/*.c`, `**/*.cpp`, `**/*.h`
-- C#: `**/*.cs`
+<details>
+<summary><strong>Upgrading the Indexer</strong></summary>
 
-And excludes:
-- `**/node_modules/**`
-- `**/dist/**`, `**/build/**`
-- `**/.git/**`
-- `**/vendor/**`, `**/target/**`
+After pulling new versions of `kode-review`:
 
-### Stopping the Indexer
-
-The indexer containers continue running in the background. To stop them:
-
+**Quick Upgrade (preserves data):**
 ```bash
-docker compose -p kode-review-indexer down
+kode-review --setup-indexer
 ```
 
-### Troubleshooting
+**Full Reset (when you see schema errors or 500s):**
+```bash
+kode-review --indexer-cleanup
+kode-review --setup-indexer
+kode-review --index
+```
+
+**Force fresh Docker build:**
+```bash
+docker compose -p kode-review-indexer down
+docker compose -p kode-review-indexer build --no-cache
+docker compose -p kode-review-indexer up -d
+```
+
+**Verify upgrade:**
+```bash
+kode-review --index-status
+kode-review --index-list-repos
+```
+
+</details>
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 **Indexer won't start:**
 - Ensure Docker is running: `docker info`
-- Check if ports 8321 and 5436 are available
+- Check ports 8321/5436 are available
 - View logs: `docker compose -p kode-review-indexer logs`
 
 **Context not appearing in reviews:**
 - Verify indexer is running: `kode-review --index-status`
 - Ensure repository is indexed: `kode-review --index`
-- Check the indexer is enabled in config
 
-**Re-indexing different repository:**
-When you run `--index` in a different repository, the indexer containers will automatically restart with the new repository mounted.
+**API shows "Unhealthy" or 500 errors:**
+1. Check logs: `docker compose -p kode-review-indexer logs kode-review-api`
+2. If schema errors, perform full reset (see Upgrading above)
+3. Check memory: `docker stats`
 
-## Onboarding
+**Schema errors ("column does not exist"):**
+```bash
+kode-review --indexer-cleanup
+kode-review --setup-indexer
+kode-review --index
+```
 
-The first run of `kode-review` triggers an interactive onboarding wizard. You can also run it manually with `kode-review --setup`.
+**Port conflicts:**
+1. Find process: `fuser 8321/tcp` (Linux) or `lsof -i :8321` (macOS)
+2. Change ports in config:
+   ```json
+   { "indexer": { "apiPort": 8322, "dbPort": 5437 } }
+   ```
+3. Re-run: `kode-review --setup-indexer`
 
-### Step 1: Provider Selection
+**Stop indexer containers:**
+```bash
+docker compose -p kode-review-indexer down
+```
 
-Choose your LLM provider:
+</details>
 
-- **Antigravity (Recommended)** - Free access to premium models via Google OAuth
-- **Standard Providers** - Anthropic, Google, OpenAI, or OpenCode Zen (requires direct authentication)
-
-### Step 2: VCS Integration
-
-The wizard detects GitHub CLI (`gh`) and GitLab CLI (`glab`) and checks their authentication status. This enables:
-
-- Reviewing PRs/MRs directly
-- Auto-detecting the platform from git remote
-
-## Configuration
-
-Configuration is stored in `~/.config/kode-review/config.json`.
-
-### Antigravity Setup
-
-Antigravity provides free access to premium models via Google OAuth:
-
-**Available Models:**
-- Claude Sonnet 4.5 / Opus 4.5 (with thinking variants: `low`, `max`)
-- Gemini 3 Pro (with thinking variants: `low`, `high`)
-- Gemini 3 Flash (with thinking variants: `minimal`, `low`, `medium`, `high`)
-
-When you select Antigravity during onboarding:
-
-1. Installs the `opencode-antigravity-auth@beta` plugin into OpenCode
-2. Opens browser for Google OAuth authentication
-3. Prompts for model selection
-4. Prompts for thinking variant (budget level) if applicable
-
-### VCS Integration
-
-GitHub and GitLab CLI tools are detected automatically. If authenticated, you can:
-
-- Review PRs/MRs directly
-- Auto-detect which platform based on git remote
-
-To set up later: `kode-review --setup-vcs`
+---
 
 ## Review Output
 
@@ -333,19 +297,11 @@ Reviews include:
 
 - **Summary**: Overview of changes and quality
 - **Issues Found**: Categorized by severity (CRITICAL, HIGH, MEDIUM, LOW)
-  - Security issues
-  - Bugs & logic errors
-  - Code quality problems
-  - Convention violations
+  - Security issues, bugs, code quality problems, convention violations
 - **Positive Observations**: Things done well
 - **Final Verdict**: APPROVE, REQUEST_CHANGES, or NEEDS_DISCUSSION with merge recommendation
 
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `OPENCODE_SERVER_URL` | Attach to running OpenCode server |
-| `OPENCODE_MODEL` | Default model override |
+---
 
 ## Examples
 
@@ -364,12 +320,20 @@ kode-review --scope local --quiet || {
 
 ### From a Coding Agent
 
-Coding agents can invoke `kode-review` as a skill or tool:
-
 ```bash
-# Non-interactive, JSON errors
 kode-review --scope both --quiet --json
 ```
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `OPENCODE_SERVER_URL` | Attach to running OpenCode server |
+| `OPENCODE_MODEL` | Default model override |
+
+---
 
 ## License
 
