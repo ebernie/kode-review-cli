@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { join } from 'node:path'
 import { writeFile, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
+import ignore from 'ignore'
 
 import {
   readFileHandler,
@@ -326,6 +327,104 @@ describe('MCP Tools', () => {
         const input: ReadFileInput = { path: 'environment.ts' }
         const result = await readFileHandler(input, testDir)
         expect(result.content).toContain('process.env')
+      })
+    })
+
+    describe('gitignore filtering', () => {
+      it('should block access to gitignored files when gitignore is provided', async () => {
+        // Create a test file that would be gitignored
+        const distDir = join(testDir, 'dist')
+        await mkdir(distDir)
+        const distFile = join(distDir, 'bundle.js')
+        await writeFile(distFile, 'console.log("bundled")')
+
+        // Create gitignore instance
+        const ig = ignore().add('dist/')
+
+        const input: ReadFileInput = { path: 'dist/bundle.js' }
+        await expect(readFileHandler(input, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
+      })
+
+      it('should block access to node_modules when gitignored', async () => {
+        const nodeModules = join(testDir, 'node_modules', 'lodash')
+        await mkdir(nodeModules, { recursive: true })
+        const lodashFile = join(nodeModules, 'index.js')
+        await writeFile(lodashFile, 'module.exports = {}')
+
+        const ig = ignore().add('node_modules/')
+
+        const input: ReadFileInput = { path: 'node_modules/lodash/index.js' }
+        await expect(readFileHandler(input, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
+      })
+
+      it('should allow access to non-gitignored files', async () => {
+        const srcFile = join(testDir, 'src', 'index.ts')
+        await mkdir(join(testDir, 'src'))
+        await writeFile(srcFile, 'export const main = () => {}')
+
+        const ig = ignore().add('dist/').add('node_modules/')
+
+        const input: ReadFileInput = { path: 'src/index.ts' }
+        const result = await readFileHandler(input, testDir, ig)
+        expect(result.content).toContain('main')
+      })
+
+      it('should work without gitignore (backward compatible)', async () => {
+        const testFile = join(testDir, 'test.ts')
+        await writeFile(testFile, 'const x = 1')
+
+        // No gitignore passed
+        const input: ReadFileInput = { path: 'test.ts' }
+        const result = await readFileHandler(input, testDir)
+        expect(result.content).toContain('const x = 1')
+      })
+
+      it('should handle glob patterns in gitignore', async () => {
+        const logFile = join(testDir, 'debug.log')
+        await writeFile(logFile, 'debug output')
+
+        const ig = ignore().add('*.log')
+
+        const input: ReadFileInput = { path: 'debug.log' }
+        await expect(readFileHandler(input, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
+      })
+
+      it('should handle multiple patterns in gitignore', async () => {
+        // Create files matching different patterns
+        const buildDir = join(testDir, 'build')
+        const srcDir = join(testDir, 'src')
+        await mkdir(buildDir)
+        await mkdir(srcDir)
+        await writeFile(join(buildDir, 'output.js'), 'ignored build')
+        await writeFile(join(testDir, 'temp.log'), 'ignored log')
+        await writeFile(join(srcDir, 'valid.ts'), 'allowed source')
+
+        // Multiple patterns
+        const ig = ignore().add('build/').add('*.log')
+
+        // build/output.js should be blocked
+        const blockedBuild: ReadFileInput = { path: 'build/output.js' }
+        await expect(readFileHandler(blockedBuild, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
+
+        // temp.log should be blocked
+        const blockedLog: ReadFileInput = { path: 'temp.log' }
+        await expect(readFileHandler(blockedLog, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
+
+        // src/valid.ts should be allowed
+        const allowedInput: ReadFileInput = { path: 'src/valid.ts' }
+        const result = await readFileHandler(allowedInput, testDir, ig)
+        expect(result.content).toContain('allowed source')
+      })
+
+      it('should handle nested directory patterns', async () => {
+        const deepPath = join(testDir, 'packages', 'app', 'coverage', 'lcov.info')
+        await mkdir(join(testDir, 'packages', 'app', 'coverage'), { recursive: true })
+        await writeFile(deepPath, 'coverage data')
+
+        const ig = ignore().add('**/coverage/')
+
+        const input: ReadFileInput = { path: 'packages/app/coverage/lcov.info' }
+        await expect(readFileHandler(input, testDir, ig)).rejects.toThrow(/access denied.*gitignore/i)
       })
     })
   })

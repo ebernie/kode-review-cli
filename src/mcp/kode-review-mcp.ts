@@ -9,6 +9,8 @@
  *   node kode-review-mcp.js --repo /path/to/repo --indexer http://localhost:8080
  */
 
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
@@ -16,6 +18,7 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js'
+import ignore, { type Ignore } from 'ignore'
 
 import { IndexerClient } from '../indexer/client.js'
 import {
@@ -86,8 +89,30 @@ function parseArgs(): ServerConfig {
 // MCP Server Implementation
 // =============================================================================
 
+/**
+ * Load .gitignore patterns from the repository
+ */
+async function loadGitignore(repoRoot: string): Promise<Ignore> {
+  const ig = ignore()
+
+  try {
+    const gitignorePath = join(repoRoot, '.gitignore')
+    const content = await readFile(gitignorePath, 'utf-8')
+    ig.add(content)
+    console.error(`Loaded .gitignore patterns from ${gitignorePath}`)
+  } catch (error) {
+    // .gitignore doesn't exist or can't be read - that's fine
+    console.error('No .gitignore found or unable to read - all files will be accessible')
+  }
+
+  return ig
+}
+
 async function main(): Promise<void> {
   const config = parseArgs()
+
+  // Load .gitignore patterns to filter out build artifacts, node_modules, etc.
+  const gitignore = await loadGitignore(config.repoRoot)
 
   // Conditionally create IndexerClient only when indexer URL is provided
   const indexerClient = config.indexerUrl
@@ -138,7 +163,7 @@ async function main(): Promise<void> {
       switch (name) {
         case 'read_file': {
           const input = args as unknown as ReadFileInput
-          const result = await readFileHandler(input, config.repoRoot)
+          const result = await readFileHandler(input, config.repoRoot, gitignore)
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           }

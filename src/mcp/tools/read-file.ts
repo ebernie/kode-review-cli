@@ -7,6 +7,7 @@
 
 import { readFile, realpath } from 'node:fs/promises'
 import { join, isAbsolute, resolve, relative, sep } from 'node:path'
+import type { Ignore } from 'ignore'
 
 /**
  * Patterns for sensitive files/directories that should not be readable
@@ -111,10 +112,15 @@ const ABSOLUTE_MAX_LINES = 1000
 
 /**
  * Read a file from the repository with line limiting
+ *
+ * @param input - The input parameters (path, startLine, maxLines)
+ * @param repoRoot - The repository root directory
+ * @param gitignore - Optional ignore instance for filtering gitignored files
  */
 export async function readFileHandler(
   input: ReadFileInput,
-  repoRoot: string
+  repoRoot: string,
+  gitignore?: Ignore
 ): Promise<ReadFileOutput> {
   // Validate and normalize the path using secure approach
   let filePath = input.path
@@ -140,6 +146,11 @@ export async function readFileHandler(
   // Security check: block access to sensitive files/directories
   if (isSensitivePath(relativePath)) {
     throw new Error(`Access denied: "${input.path}" matches a sensitive file pattern (.git, .env, etc.)`)
+  }
+
+  // Check if file is gitignored (prevents reading build artifacts, node_modules, etc.)
+  if (gitignore && gitignore.ignores(relativePath)) {
+    throw new Error(`Access denied: "${input.path}" is in .gitignore (build artifacts, dependencies, etc. are not readable)`)
   }
 
   // Additional security: resolve symlinks and check again
