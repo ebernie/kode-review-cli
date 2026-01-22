@@ -270,6 +270,131 @@ describe('IndexerClient', () => {
     })
   })
 
+  describe('lookupDefinitions', () => {
+    it('returns definition locations with snake_case to camelCase mapping', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          symbol: 'MyClass',
+          definitions: [
+            {
+              file_path: 'src/models/MyClass.ts',
+              line_start: 10,
+              line_end: 50,
+              content: 'export class MyClass { }',
+              chunk_type: 'class',
+              is_reexport: false,
+              reexport_source: null,
+            },
+            {
+              file_path: 'src/index.ts',
+              line_start: 5,
+              line_end: 5,
+              content: "export { MyClass } from './models/MyClass'",
+              chunk_type: 'export',
+              is_reexport: true,
+              reexport_source: 'src/models/MyClass.ts',
+            },
+          ],
+          total_count: 2,
+        }),
+      })
+
+      const result = await client.lookupDefinitions('MyClass', 'https://github.com/test/repo')
+
+      expect(result.symbol).toBe('MyClass')
+      expect(result.totalCount).toBe(2)
+      expect(result.definitions).toHaveLength(2)
+
+      // Verify direct definition
+      expect(result.definitions[0]).toEqual({
+        filePath: 'src/models/MyClass.ts',
+        lineStart: 10,
+        lineEnd: 50,
+        content: 'export class MyClass { }',
+        chunkType: 'class',
+        isReexport: false,
+        reexportSource: null,
+      })
+
+      // Verify re-export
+      expect(result.definitions[1]).toEqual({
+        filePath: 'src/index.ts',
+        lineStart: 5,
+        lineEnd: 5,
+        content: "export { MyClass } from './models/MyClass'",
+        chunkType: 'export',
+        isReexport: true,
+        reexportSource: 'src/models/MyClass.ts',
+      })
+    })
+
+    it('sends correct URL with all query parameters', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'test', definitions: [], total_count: 0 }),
+      })
+
+      await client.lookupDefinitions('handleRequest', 'https://github.com/test/repo', 'main', true, 10)
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain(`${baseUrl}/definitions/handleRequest`)
+      expect(calledUrl).toContain('repo_url=https%3A%2F%2Fgithub.com%2Ftest%2Frepo')
+      expect(calledUrl).toContain('branch=main')
+      expect(calledUrl).toContain('include_reexports=true')
+      expect(calledUrl).toContain('limit=10')
+      expect(mockFetch).toHaveBeenCalledWith(calledUrl, expect.objectContaining({ method: 'GET' }))
+    })
+
+    it('encodes special characters in symbol name', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'MyClass<T>', definitions: [], total_count: 0 }),
+      })
+
+      await client.lookupDefinitions('MyClass<T>')
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain(`${baseUrl}/definitions/${encodeURIComponent('MyClass<T>')}`)
+    })
+
+    it('returns empty result when no definitions found', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'unknownSymbol', definitions: [], total_count: 0 }),
+      })
+
+      const result = await client.lookupDefinitions('unknownSymbol')
+
+      expect(result.symbol).toBe('unknownSymbol')
+      expect(result.definitions).toHaveLength(0)
+      expect(result.totalCount).toBe(0)
+    })
+
+    it('throws error when lookup fails', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => 'Internal server error',
+      })
+
+      await expect(
+        client.lookupDefinitions('MyClass', 'https://github.com/test/repo')
+      ).rejects.toThrow('Failed to lookup definitions: Internal server error')
+    })
+
+    it('respects includeReexports=false parameter', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'test', definitions: [], total_count: 0 }),
+      })
+
+      await client.lookupDefinitions('test', undefined, undefined, false)
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain('include_reexports=false')
+    })
+  })
+
   describe('constructor', () => {
     it('removes trailing slash from base URL', async () => {
       const clientWithSlash = new IndexerClient('http://localhost:8321/')
