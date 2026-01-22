@@ -25,4 +25,15 @@ coverage/
 .env
 .env.local
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+*.egg-info/
+*.egg
+.eggs/
+
 
