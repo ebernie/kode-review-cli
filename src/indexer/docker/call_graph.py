@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Call graph builder for TypeScript/JavaScript/Python code using tree-sitter.
+Call graph builder for multi-language code using tree-sitter.
 
 This module provides:
-- AST-based extraction of function calls from TS/JS/Python code
+- AST-based extraction of function calls from TS/JS/Python/Go/Java/Rust code
 - Graph construction: function -> [called functions]
 - Storage in the relationships table with relationship_type='calls'
 - Support for method calls on classes (e.g., this.method(), self.method(), obj.method())
@@ -14,6 +14,9 @@ call expression nodes, then resolving them to target functions/methods.
 Language-specific handling:
 - TypeScript/JavaScript: call_expression nodes, "this" keyword for instance methods
 - Python: call nodes, "self"/"cls" for instance/class methods, super() for inheritance
+- Go: call_expression nodes, selector_expression for methods, interface implementations
+- Java: method_invocation nodes, "this"/"super" keywords, implicit this for unqualified calls
+- Rust: call_expression nodes, "self" keyword, scoped identifiers for associated functions
 """
 
 from __future__ import annotations
@@ -25,8 +28,11 @@ from pathlib import Path
 from typing import Generator
 
 import psycopg
+import tree_sitter_go
+import tree_sitter_java
 import tree_sitter_javascript
 import tree_sitter_python
+import tree_sitter_rust
 import tree_sitter_typescript
 from tree_sitter import Language, Parser, Node
 
@@ -181,6 +187,43 @@ CALL_CONFIG: dict[str, dict] = {
         "method_types": ["method_definition", "public_field_definition"],
         "this_keywords": ["this"],
     },
+    # Go
+    ".go": {
+        "language": tree_sitter_go.language(),
+        "call_types": ["call_expression"],
+        "member_expression_type": "selector_expression",  # Go uses selector_expression for obj.method
+        "identifier_type": "identifier",
+        "function_types": ["function_declaration", "func_literal"],
+        "class_types": ["type_declaration"],  # Go uses type for structs/interfaces
+        "method_types": ["method_declaration"],  # Go methods have explicit receivers
+        "this_keywords": [],  # Go has named receivers, not "this"
+        "interface_types": ["type_spec"],  # For interface implementations
+    },
+    # Java
+    ".java": {
+        "language": tree_sitter_java.language(),
+        "call_types": ["method_invocation"],  # Java uses method_invocation
+        "member_expression_type": "field_access",  # Java field access
+        "identifier_type": "identifier",
+        "function_types": [],  # Java doesn't have standalone functions
+        "class_types": ["class_declaration", "interface_declaration", "enum_declaration"],
+        "method_types": ["method_declaration", "constructor_declaration"],
+        "this_keywords": ["this"],
+        "super_keyword": "super",  # Java's super for parent class calls
+    },
+    # Rust
+    ".rs": {
+        "language": tree_sitter_rust.language(),
+        "call_types": ["call_expression"],
+        "member_expression_type": "field_expression",  # Rust uses field_expression for obj.method
+        "identifier_type": "identifier",
+        "function_types": ["function_item"],  # Rust standalone functions
+        "class_types": ["struct_item", "enum_item"],  # Rust structs and enums
+        "method_types": ["function_item"],  # Methods in impl blocks are function_items
+        "this_keywords": ["self"],  # Rust uses self like Python
+        "trait_types": ["trait_item"],  # For trait implementations
+        "impl_types": ["impl_item"],  # impl blocks
+    },
 }
 
 
@@ -203,6 +246,21 @@ def is_supported_language(filename: str) -> bool:
 def _is_python_file(filename: str) -> bool:
     """Check if a file is a Python file."""
     return Path(filename).suffix.lower() == ".py"
+
+
+def _is_go_file(filename: str) -> bool:
+    """Check if a file is a Go file."""
+    return Path(filename).suffix.lower() == ".go"
+
+
+def _is_java_file(filename: str) -> bool:
+    """Check if a file is a Java file."""
+    return Path(filename).suffix.lower() == ".java"
+
+
+def _is_rust_file(filename: str) -> bool:
+    """Check if a file is a Rust file."""
+    return Path(filename).suffix.lower() == ".rs"
 
 
 def _extract_python_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
@@ -337,6 +395,424 @@ def _extract_python_callee_info(call_node: Node, config: dict) -> FunctionCall |
             line_number=line_number,
             is_dynamic=True,
         )
+
+    return None
+
+
+def _extract_go_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
+    """
+    Extract callee info from a Go call_expression node.
+
+    Go call expressions have structure:
+    - call_expression: func_name(args) -> identifier + argument_list
+    - call_expression: obj.method(args) -> selector_expression + argument_list
+    - call_expression: pkg.Func(args) -> selector_expression (package.Function)
+
+    Go has explicit method receivers (not implicit "this"), so method calls are
+    always through a named variable. Interface implementations are resolved
+    at compile time but we flag them as potentially dynamic for safety.
+    """
+    line_number = call_node.start_point[0] + 1
+
+    # Get the function being called
+    function_node = call_node.child_by_field_name("function")
+    if function_node is None:
+        # Fallback: look for first non-argument child
+        for child in call_node.children:
+            if child.type not in ["argument_list", "(", ")", ","]:
+                function_node = child
+                break
+
+    if function_node is None:
+        return None
+
+    # Case 1: Direct function call - funcName()
+    if function_node.type == config["identifier_type"]:
+        callee_name = function_node.text.decode("utf-8") if function_node.text else ""
+        if callee_name:
+            return FunctionCall(
+                callee_name=callee_name,
+                receiver=None,
+                is_method_call=False,
+                line_number=line_number,
+            )
+
+    # Case 2: Selector expression - obj.Method() or pkg.Func()
+    elif function_node.type == "selector_expression":
+        # Go selector_expression: operand.field
+        operand_node = function_node.child_by_field_name("operand")
+        field_node = function_node.child_by_field_name("field")
+
+        if field_node is None or operand_node is None:
+            # Fallback: extract from children
+            children = list(function_node.children)
+            if len(children) >= 3:
+                operand_node = children[0]
+                field_node = children[-1]
+
+        if field_node is not None:
+            callee_name = field_node.text.decode("utf-8") if field_node.text else ""
+            receiver = None
+            is_dynamic = False
+
+            if operand_node is not None:
+                receiver_text = operand_node.text.decode("utf-8") if operand_node.text else ""
+
+                # Check for identifier (variable, package, or type name)
+                if operand_node.type == config["identifier_type"]:
+                    receiver = receiver_text
+                # Check for chained calls like obj.GetService().Method()
+                elif operand_node.type == "call_expression":
+                    receiver = "<call_result>"
+                    is_dynamic = True
+                # Check for nested selector like obj.field.Method()
+                elif operand_node.type == "selector_expression":
+                    # Get the root operand
+                    root_obj = operand_node
+                    while root_obj.type == "selector_expression":
+                        child_operand = root_obj.child_by_field_name("operand")
+                        if child_operand is None:
+                            children = list(root_obj.children)
+                            if children:
+                                child_operand = children[0]
+                        if child_operand is None or child_operand.type != "selector_expression":
+                            break
+                        root_obj = child_operand
+
+                    if root_obj.child_by_field_name("operand"):
+                        root_obj = root_obj.child_by_field_name("operand")
+                    elif root_obj.children:
+                        root_obj = list(root_obj.children)[0]
+
+                    if root_obj:
+                        receiver = root_obj.text.decode("utf-8") if root_obj.text else None
+                # Type assertion or conversion: obj.(Type).Method()
+                elif operand_node.type == "type_assertion_expression":
+                    receiver = "<type_assertion>"
+                    is_dynamic = True
+                else:
+                    receiver = "<dynamic>"
+                    is_dynamic = True
+
+            if callee_name:
+                return FunctionCall(
+                    callee_name=callee_name,
+                    receiver=receiver,
+                    is_method_call=True,
+                    line_number=line_number,
+                    is_dynamic=is_dynamic,
+                )
+
+    # Case 3: Function literal call (IIFE equivalent in Go)
+    elif function_node.type == "func_literal":
+        return FunctionCall(
+            callee_name="<anonymous>",
+            receiver=None,
+            is_method_call=False,
+            line_number=line_number,
+            is_dynamic=True,
+        )
+
+    return None
+
+
+def _extract_java_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
+    """
+    Extract callee info from a Java method_invocation node.
+
+    Java method invocations have structure:
+    - method_invocation: methodName(args) -> identifier + argument_list (implicit this)
+    - method_invocation: obj.methodName(args) -> object + identifier + argument_list
+    - method_invocation: ClassName.staticMethod(args) -> identifier + identifier + argument_list
+    - method_invocation: super.method(args) -> super keyword access
+
+    Java has implicit "this" for unqualified method calls within a class.
+    """
+    line_number = call_node.start_point[0] + 1
+
+    # Java method_invocation has fields: object, name, arguments
+    name_node = call_node.child_by_field_name("name")
+    object_node = call_node.child_by_field_name("object")
+
+    if name_node is None:
+        # Fallback: look for identifier children
+        for child in call_node.children:
+            if child.type == "identifier":
+                name_node = child
+                break
+
+    if name_node is None:
+        return None
+
+    callee_name = name_node.text.decode("utf-8") if name_node.text else ""
+    if not callee_name:
+        return None
+
+    # Case 1: Unqualified method call - methodName() (implicit this)
+    if object_node is None:
+        return FunctionCall(
+            callee_name=callee_name,
+            receiver=None,  # Implicit this - could be local or inherited method
+            is_method_call=False,  # Treat as function call since no explicit receiver
+            line_number=line_number,
+        )
+
+    # Case 2: Qualified method call
+    receiver = None
+    is_dynamic = False
+
+    receiver_text = object_node.text.decode("utf-8") if object_node.text else ""
+
+    # Check for "this" keyword
+    if object_node.type == "this":
+        receiver = "this"
+    # Check for "super" keyword
+    elif object_node.type == "super":
+        receiver = "super"
+        is_dynamic = True  # super.method() resolution depends on inheritance hierarchy
+    # Check for identifier (variable or class name)
+    elif object_node.type == "identifier":
+        receiver = receiver_text
+    # Check for chained method calls like obj.getService().method()
+    elif object_node.type == "method_invocation":
+        receiver = "<call_result>"
+        is_dynamic = True
+    # Check for field access like obj.field.method()
+    elif object_node.type == "field_access":
+        # Get the root object
+        root_obj = object_node
+        while root_obj.type == "field_access":
+            child_obj = root_obj.child_by_field_name("object")
+            if child_obj is None:
+                children = list(root_obj.children)
+                if children:
+                    child_obj = children[0]
+            if child_obj is None or child_obj.type not in ["field_access", "identifier", "this"]:
+                break
+            root_obj = child_obj
+
+        if root_obj:
+            root_text = root_obj.text.decode("utf-8") if root_obj.text else None
+            if root_obj.type == "this":
+                receiver = "this"
+            elif root_obj.type == "identifier":
+                receiver = root_text
+            else:
+                receiver = root_text
+    # Check for parenthesized expression (cast, etc.)
+    elif object_node.type == "parenthesized_expression":
+        receiver = "<cast_result>"
+        is_dynamic = True
+    # Check for object creation: new Obj().method()
+    elif object_node.type == "object_creation_expression":
+        receiver = "<new_instance>"
+        is_dynamic = True
+    else:
+        receiver = "<dynamic>"
+        is_dynamic = True
+
+    return FunctionCall(
+        callee_name=callee_name,
+        receiver=receiver,
+        is_method_call=True,
+        line_number=line_number,
+        is_dynamic=is_dynamic,
+    )
+
+
+def _extract_rust_callee_info(call_node: Node, config: dict) -> FunctionCall | None:
+    """
+    Extract callee info from a Rust call_expression node.
+
+    Rust call expressions have structure:
+    - call_expression: func_name(args) -> identifier + arguments
+    - call_expression: self.method(args) -> field_expression + arguments
+    - call_expression: Type::method(args) -> scoped_identifier + arguments
+    - call_expression: obj.method(args) -> field_expression + arguments
+
+    Rust uses "self" for instance methods (like Python).
+    Trait implementations are resolved at compile time but we track the receiver.
+    """
+    line_number = call_node.start_point[0] + 1
+
+    # Get the function being called
+    function_node = call_node.child_by_field_name("function")
+    if function_node is None:
+        # Fallback: look for first non-argument child
+        for child in call_node.children:
+            if child.type not in ["arguments", "(", ")", ","]:
+                function_node = child
+                break
+
+    if function_node is None:
+        return None
+
+    # Case 1: Direct function call - func_name()
+    if function_node.type == config["identifier_type"]:
+        callee_name = function_node.text.decode("utf-8") if function_node.text else ""
+        if callee_name:
+            return FunctionCall(
+                callee_name=callee_name,
+                receiver=None,
+                is_method_call=False,
+                line_number=line_number,
+            )
+
+    # Case 2: Scoped identifier - Type::method() or module::func()
+    elif function_node.type == "scoped_identifier":
+        # scoped_identifier has path and name
+        name_node = function_node.child_by_field_name("name")
+        path_node = function_node.child_by_field_name("path")
+
+        if name_node is None:
+            # Fallback: last child is usually the name
+            children = list(function_node.children)
+            if children:
+                name_node = children[-1]
+
+        if name_node is not None:
+            callee_name = name_node.text.decode("utf-8") if name_node.text else ""
+            receiver = None
+
+            if path_node is not None:
+                receiver = path_node.text.decode("utf-8") if path_node.text else None
+
+            if callee_name:
+                return FunctionCall(
+                    callee_name=callee_name,
+                    receiver=receiver,
+                    is_method_call=receiver is not None,
+                    line_number=line_number,
+                )
+
+    # Case 3: Field expression (method call) - obj.method() or self.method()
+    elif function_node.type == "field_expression":
+        # field_expression has value and field
+        value_node = function_node.child_by_field_name("value")
+        field_node = function_node.child_by_field_name("field")
+
+        if field_node is None or value_node is None:
+            # Fallback: extract from children
+            children = list(function_node.children)
+            if len(children) >= 3:
+                value_node = children[0]
+                field_node = children[-1]
+
+        if field_node is not None:
+            callee_name = field_node.text.decode("utf-8") if field_node.text else ""
+            receiver = None
+            is_dynamic = False
+
+            if value_node is not None:
+                receiver_text = value_node.text.decode("utf-8") if value_node.text else ""
+
+                # Check for "self" keyword (Rust's equivalent of this)
+                if value_node.type == "self" or receiver_text == "self":
+                    receiver = "self"
+                # Check for identifier (variable or type)
+                elif value_node.type == config["identifier_type"]:
+                    receiver = receiver_text
+                # Check for chained calls like obj.get_service().method()
+                elif value_node.type == "call_expression":
+                    receiver = "<call_result>"
+                    is_dynamic = True
+                # Check for nested field access like obj.field.method()
+                elif value_node.type == "field_expression":
+                    # Get the root value
+                    root_obj = value_node
+                    while root_obj.type == "field_expression":
+                        child_value = root_obj.child_by_field_name("value")
+                        if child_value is None:
+                            children = list(root_obj.children)
+                            if children:
+                                child_value = children[0]
+                        if child_value is None or child_value.type != "field_expression":
+                            break
+                        root_obj = child_value
+
+                    if root_obj.child_by_field_name("value"):
+                        root_obj = root_obj.child_by_field_name("value")
+                    elif root_obj.children:
+                        root_obj = list(root_obj.children)[0]
+
+                    if root_obj:
+                        root_text = root_obj.text.decode("utf-8") if root_obj.text else None
+                        if root_obj.type == "self" or root_text == "self":
+                            receiver = "self"
+                        else:
+                            receiver = root_text
+                # Reference or dereference: &obj or *obj
+                elif value_node.type in ["reference_expression", "dereference_expression"]:
+                    # Extract inner value
+                    inner = value_node.child_by_field_name("value")
+                    if inner and inner.type == "self":
+                        receiver = "self"
+                    elif inner:
+                        receiver = inner.text.decode("utf-8") if inner.text else "<dynamic>"
+                    else:
+                        receiver = "<dynamic>"
+                        is_dynamic = True
+                # Try expression (? operator): obj?.method()
+                elif value_node.type == "try_expression":
+                    receiver = "<try_result>"
+                    is_dynamic = True
+                else:
+                    receiver = "<dynamic>"
+                    is_dynamic = True
+
+            if callee_name:
+                return FunctionCall(
+                    callee_name=callee_name,
+                    receiver=receiver,
+                    is_method_call=True,
+                    line_number=line_number,
+                    is_dynamic=is_dynamic,
+                )
+
+    # Case 4: Closure call
+    elif function_node.type == "closure_expression":
+        return FunctionCall(
+            callee_name="<closure>",
+            receiver=None,
+            is_method_call=False,
+            line_number=line_number,
+            is_dynamic=True,
+        )
+
+    # Case 5: Generic function - func::<T>()
+    elif function_node.type == "generic_function":
+        # Get the function name from the generic_function
+        func_name_node = function_node.child_by_field_name("function")
+        if func_name_node is None:
+            for child in function_node.children:
+                if child.type in ["identifier", "scoped_identifier", "field_expression"]:
+                    func_name_node = child
+                    break
+
+        if func_name_node is not None:
+            # Recursively extract from the inner function reference
+            if func_name_node.type == "identifier":
+                callee_name = func_name_node.text.decode("utf-8") if func_name_node.text else ""
+                if callee_name:
+                    return FunctionCall(
+                        callee_name=callee_name,
+                        receiver=None,
+                        is_method_call=False,
+                        line_number=line_number,
+                    )
+            elif func_name_node.type == "scoped_identifier":
+                name_node = func_name_node.child_by_field_name("name")
+                path_node = func_name_node.child_by_field_name("path")
+                if name_node:
+                    callee_name = name_node.text.decode("utf-8") if name_node.text else ""
+                    receiver = path_node.text.decode("utf-8") if path_node and path_node.text else None
+                    if callee_name:
+                        return FunctionCall(
+                            callee_name=callee_name,
+                            receiver=receiver,
+                            is_method_call=receiver is not None,
+                            line_number=line_number,
+                        )
 
     return None
 
@@ -480,12 +956,23 @@ def extract_calls_from_code(
     tree = parser.parse(source_bytes)
 
     calls: list[FunctionCall] = []
+
+    # Determine which extractor to use based on file extension
     is_python = _is_python_file(filename)
+    is_go = _is_go_file(filename)
+    is_java = _is_java_file(filename)
+    is_rust = _is_rust_file(filename)
 
     def extract_callee_info(call_node: Node) -> FunctionCall | None:
         """Extract the callee name and receiver from a call expression."""
         if is_python:
             return _extract_python_callee_info(call_node, config)
+        elif is_go:
+            return _extract_go_callee_info(call_node, config)
+        elif is_java:
+            return _extract_java_callee_info(call_node, config)
+        elif is_rust:
+            return _extract_rust_callee_info(call_node, config)
         else:
             return _extract_js_ts_callee_info(call_node, config)
 
@@ -728,7 +1215,96 @@ class CallGraphBuilder:
             "sleep", "time", "datetime", "path", "exists", "join", "makedirs",
         }
 
-        builtin_names = js_builtins | python_builtins
+        # Go builtins
+        go_builtins = {
+            # Built-in functions
+            "append", "cap", "close", "complex", "copy", "delete", "imag", "len",
+            "make", "new", "panic", "print", "println", "real", "recover",
+            # Common fmt package functions (often used with package prefix)
+            "Println", "Printf", "Print", "Sprintf", "Fprintf", "Errorf",
+            "Scan", "Scanf", "Scanln", "Sscan", "Sscanf",
+            # Common io methods
+            "Read", "Write", "Close", "Seek", "ReadAll", "WriteString",
+            # Error handling
+            "Error", "Unwrap", "Is", "As",
+            # Context methods
+            "Background", "TODO", "WithCancel", "WithTimeout", "WithDeadline", "WithValue",
+            # Common string/bytes methods
+            "String", "Bytes", "Len", "Cap",
+            # Type conversions (often appear as function calls)
+            "int", "int8", "int16", "int32", "int64",
+            "uint", "uint8", "uint16", "uint32", "uint64",
+            "float32", "float64", "complex64", "complex128",
+            "string", "bool", "byte", "rune",
+        }
+
+        # Java builtins
+        java_builtins = {
+            # Object methods (inherited by all classes)
+            "toString", "equals", "hashCode", "getClass", "clone", "finalize",
+            "notify", "notifyAll", "wait",
+            # System methods
+            "println", "print", "printf", "format", "exit", "gc",
+            "currentTimeMillis", "nanoTime", "arraycopy",
+            # String methods
+            "length", "charAt", "substring", "indexOf", "lastIndexOf",
+            "startsWith", "endsWith", "contains", "replace", "replaceAll",
+            "split", "trim", "toLowerCase", "toUpperCase", "isEmpty", "isBlank",
+            "valueOf", "compareTo", "concat", "matches",
+            # Collection methods
+            "add", "remove", "get", "set", "size", "isEmpty", "contains",
+            "clear", "iterator", "toArray", "addAll", "removeAll", "retainAll",
+            "put", "containsKey", "containsValue", "keySet", "values", "entrySet",
+            # Stream methods
+            "stream", "filter", "map", "flatMap", "reduce", "collect",
+            "forEach", "findFirst", "findAny", "anyMatch", "allMatch", "noneMatch",
+            "sorted", "distinct", "limit", "skip", "count",
+            # Optional methods
+            "of", "ofNullable", "empty", "isPresent", "ifPresent", "orElse", "orElseGet",
+            # Common utility methods
+            "parseInt", "parseDouble", "parseFloat", "parseLong",
+            "intValue", "doubleValue", "floatValue", "longValue",
+            # Exception/error methods
+            "getMessage", "printStackTrace", "getCause", "initCause",
+        }
+
+        # Rust builtins
+        rust_builtins = {
+            # Macros (often captured as function calls)
+            "println", "print", "eprintln", "eprint", "format", "panic",
+            "assert", "assert_eq", "assert_ne", "debug_assert",
+            "vec", "format_args", "write", "writeln",
+            # Option methods
+            "Some", "None", "unwrap", "unwrap_or", "unwrap_or_else", "unwrap_or_default",
+            "expect", "is_some", "is_none", "map", "map_or", "map_or_else",
+            "and_then", "or_else", "ok_or", "ok_or_else", "take", "replace",
+            # Result methods
+            "Ok", "Err", "is_ok", "is_err", "ok", "err",
+            # Iterator methods
+            "iter", "iter_mut", "into_iter", "next", "collect", "filter", "map",
+            "fold", "reduce", "for_each", "enumerate", "zip", "chain",
+            "take", "skip", "peekable", "flatten", "flat_map",
+            "any", "all", "find", "position", "count", "sum", "product",
+            "min", "max", "min_by", "max_by", "cloned", "copied",
+            # Vec methods
+            "push", "pop", "len", "is_empty", "capacity", "reserve",
+            "clear", "insert", "remove", "swap_remove", "retain",
+            "first", "last", "get", "get_mut",
+            # String methods
+            "to_string", "to_owned", "as_str", "as_bytes", "chars", "bytes",
+            "trim", "trim_start", "trim_end", "split", "split_whitespace",
+            "contains", "starts_with", "ends_with", "replace", "to_lowercase", "to_uppercase",
+            # Common trait methods
+            "clone", "default", "from", "into", "try_from", "try_into",
+            "as_ref", "as_mut", "borrow", "borrow_mut",
+            "deref", "deref_mut", "drop",
+            # Smart pointer methods
+            "new", "lock", "read", "write", "try_lock", "try_read", "try_write",
+            # Async methods
+            "await", "poll",
+        }
+
+        builtin_names = js_builtins | python_builtins | go_builtins | java_builtins | rust_builtins
 
         if callee_name in builtin_names:
             return None
@@ -786,7 +1362,9 @@ class CallGraphBuilder:
 
     def build_call_graph(self) -> list[CallEdge]:
         """
-        Build the call graph for all supported language chunks (TS/JS/Python).
+        Build the call graph for all supported language chunks.
+
+        Supported languages: TypeScript, JavaScript, Python, Go, Java, Rust.
 
         Returns a list of CallEdge objects representing the call relationships.
         """
