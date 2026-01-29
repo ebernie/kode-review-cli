@@ -2,8 +2,12 @@ import { select, confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import { parseArgs, type CliOptions, type ReviewScope } from './cli/args.js'
 import { createContext, type CliContext } from './cli/interactive.js'
+import { showConfig } from './cli/show-config.js'
+import { runDiagnostics, printDiagnostics } from './cli/doctor.js'
+import { initHooks } from './cli/init-hooks.js'
 import { cyan, green } from './cli/colors.js'
-import { logger, setQuietMode, errorJson } from './utils/logger.js'
+import { logger, setQuietMode } from './utils/logger.js'
+import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
 import {
   isOnboardingComplete,
   resetConfig,
@@ -35,8 +39,16 @@ import {
   type VcsPlatform,
   getRepoUrl,
   getRepoRoot,
+  postReviewToPR,
+  type Platform as VcsPlatformType,
 } from './vcs/index.js'
 import { startWatchMode, type WatchConfig, type Platform } from './watch/index.js'
+import {
+  parseReviewContent,
+  writeReviewOutput,
+  getFormattedContent,
+  type ReviewOutput,
+} from './output/index.js'
 import {
   setupIndexer,
   showIndexerStatus,
@@ -55,6 +67,18 @@ import {
 } from './indexer/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
+  // Info commands (no side effects, can run without onboarding)
+  if (options.showConfig) {
+    showConfig({ json: options.json })
+    return true
+  }
+
+  if (options.doctor) {
+    const result = await runDiagnostics()
+    printDiagnostics(result)
+    process.exit(result.failCount > 0 ? 1 : 0)
+  }
+
   if (options.reset) {
     const confirmed = await confirm({
       message: 'Reset all configuration? This cannot be undone.',
@@ -80,6 +104,12 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   if (options.setupVcs) {
     await setupVcs()
+    return true
+  }
+
+  // Hook generation
+  if (options.initHooks) {
+    await initHooks({ interactive: !options.quiet })
     return true
   }
 
@@ -804,21 +834,13 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       spinner?.stop()
 
-      console.log(result.content)
-
-      if (!ctx.quiet) {
-        console.log('')
-        if (result.toolCallCount > 0) {
-          console.log(cyan(`Tool calls made: ${result.toolCallCount}`))
-        }
-        if (result.truncated) {
-          console.log(cyan(`Note: Review was truncated (${result.truncationReason})`))
-        }
-        console.log('')
-        console.log(green('========================================'))
-        console.log(green('       AGENTIC REVIEW COMPLETE          '))
-        console.log(green('========================================'))
-      }
+      // Process review output
+      await processReviewOutput(result.content, options, ctx, prMr, branch, {
+        agentic: true,
+        toolCallCount: result.toolCallCount,
+        truncated: result.truncated,
+        truncationReason: result.truncationReason,
+      })
     } else {
       // Standard review mode
       const reviewOptions = {
@@ -843,18 +865,136 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       spinner?.stop()
 
-      console.log(result.content)
-
-      if (!ctx.quiet) {
-        console.log('')
-        console.log(green('========================================'))
-        console.log(green('           REVIEW COMPLETE             '))
-        console.log(green('========================================'))
-      }
+      // Process review output
+      await processReviewOutput(result.content, options, ctx, prMr, branch, {
+        agentic: false,
+      })
     }
   } catch (error) {
     spinner?.fail('Review failed')
     throw error
+  }
+}
+
+/**
+ * Process and output review results based on options
+ */
+async function processReviewOutput(
+  rawContent: string,
+  options: CliOptions,
+  ctx: CliContext,
+  prMr: { id: number; platform: VcsPlatform } | null,
+  branch: string,
+  metadata: {
+    agentic: boolean
+    toolCallCount?: number
+    truncated?: boolean
+    truncationReason?: string
+  }
+): Promise<void> {
+  // Parse review content into structured data
+  const structured = parseReviewContent(rawContent)
+
+  // Build review output object
+  const reviewOutput: ReviewOutput = {
+    raw: rawContent,
+    structured: structured ?? undefined,
+  }
+
+  // Add metadata to structured review if available
+  if (reviewOutput.structured) {
+    const scope = options.scope === 'auto'
+      ? (prMr ? 'pr' : 'local')
+      : (options.scope ?? 'local')
+
+    reviewOutput.structured.metadata = {
+      timestamp: new Date().toISOString(),
+      scope: scope as 'local' | 'pr' | 'both',
+      agentic: metadata.agentic,
+      toolCalls: metadata.toolCallCount,
+      truncated: metadata.truncated,
+      truncationReason: metadata.truncationReason,
+      prNumber: prMr?.platform === 'github' ? prMr.id : undefined,
+      mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
+      branch,
+      provider: options.provider,
+      model: options.model,
+    }
+  }
+
+  // Get formatted output based on format option
+  const formattedOutput = getFormattedContent(reviewOutput, options.format)
+
+  // Write to file if output file specified
+  if (options.outputFile) {
+    await writeReviewOutput(reviewOutput, {
+      format: options.format,
+      outputFile: options.outputFile,
+      quiet: options.quiet,
+    })
+    logger.success(`Review written to ${options.outputFile}`)
+  }
+
+  // Display output (unless writing to file and quiet mode)
+  if (!options.outputFile || !ctx.quiet) {
+    console.log(formattedOutput)
+  }
+
+  // Display completion banner
+  if (!ctx.quiet) {
+    console.log('')
+    if (metadata.agentic) {
+      if (metadata.toolCallCount && metadata.toolCallCount > 0) {
+        console.log(cyan(`Tool calls made: ${metadata.toolCallCount}`))
+      }
+      if (metadata.truncated) {
+        console.log(cyan(`Note: Review was truncated (${metadata.truncationReason})`))
+      }
+      console.log('')
+      console.log(green('========================================'))
+      console.log(green('       AGENTIC REVIEW COMPLETE          '))
+      console.log(green('========================================'))
+    } else {
+      console.log('')
+      console.log(green('========================================'))
+      console.log(green('           REVIEW COMPLETE             '))
+      console.log(green('========================================'))
+    }
+  }
+
+  // Post to PR/MR if requested
+  if (options.postToPr && prMr && reviewOutput.structured) {
+    logger.info('Posting review to PR/MR...')
+
+    const postResult = await postReviewToPR(
+      reviewOutput.structured,
+      rawContent,
+      {
+        prNumber: prMr.platform === 'github' ? prMr.id : undefined,
+        mrIid: prMr.platform === 'gitlab' ? prMr.id : undefined,
+        platform: prMr.platform as VcsPlatformType,
+        postInlineComments: true,
+        setApprovalStatus: true,
+      }
+    )
+
+    if (postResult.success) {
+      logger.success('Review posted to PR/MR')
+      if (postResult.inlineCommentsPosted > 0) {
+        logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+      }
+      if (postResult.approvalStatusSet) {
+        logger.success(`Review status: ${reviewOutput.structured.verdict.recommendation}`)
+      }
+    } else {
+      for (const error of postResult.errors) {
+        logger.error(error)
+      }
+    }
+  } else if (options.postToPr && !prMr) {
+    logger.warn('--post-to-pr specified but no PR/MR was reviewed')
+  } else if (options.postToPr && !reviewOutput.structured) {
+    logger.warn('Could not parse review for PR posting. Raw comment posted instead.')
   }
 }
 
@@ -907,12 +1047,22 @@ async function main(): Promise<void> {
     // Run code review
     await runCodeReview(options, ctx)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
+    // Convert to AppError with proper categorization
+    const appError = error instanceof AppError
+      ? error
+      : wrapError(error, categorizeError(error))
 
     if (options.json) {
-      errorJson(message)
+      // JSON output includes category and recovery hint
+      console.log(JSON.stringify({
+        error: appError.message,
+        category: appError.category,
+        recoveryHint: appError.recoveryHint,
+      }))
     } else {
-      logger.error(message)
+      // Human-readable output with optional verbose mode
+      const verbose = process.env.DEBUG === '1'
+      logger.error(formatError(appError, verbose))
     }
 
     process.exit(1)

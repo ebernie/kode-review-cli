@@ -81,7 +81,9 @@ kode-review --scope pr --pr 123 --json   # JSON error output
 | `-s, --scope <scope>` | Review scope: `local`, `pr`, `both`, `auto` (default: auto) |
 | `-p, --pr <number>` | Specific PR/MR number to review |
 | `-q, --quiet` | Minimal output (agent-friendly) |
-| `-j, --json` | JSON error output |
+| `-f, --format <format>` | Output format: `text`, `json`, `markdown` (default: text) |
+| `-o, --output-file <path>` | Write output to file instead of stdout |
+| `--post-to-pr` | Post review as PR/MR comment with inline annotations |
 | `--provider <id>` | Override provider (e.g., `anthropic`, `google`) |
 | `--model <id>` | Override model |
 | `--variant <name>` | Override variant (e.g., `max`, `low`) |
@@ -447,9 +449,27 @@ Reviews include:
 
 ---
 
-## Examples
+## Git Hooks Integration
 
-### As a Git Hook
+Automatically run code reviews before commits or pushes.
+
+### Quick Setup
+
+```bash
+# Generate a pre-commit hook
+kode-review --init-hooks
+
+# Choose hook type interactively, or specify:
+kode-review --init-hooks --hook-type pre-push
+```
+
+The `--init-hooks` command:
+- Detects Husky and generates compatible hooks
+- Creates executable hook scripts in `.git/hooks/` or `.husky/`
+- Supports `pre-commit` and `pre-push` hook types
+- Warns before overwriting existing hooks
+
+### Manual Hook Example
 
 ```bash
 #!/bin/bash
@@ -462,10 +482,60 @@ kode-review --scope local --quiet || {
 }
 ```
 
+---
+
+## Output Formats
+
+Control how review results are displayed and saved.
+
+```bash
+# Default text output
+kode-review --scope local
+
+# JSON output (for automation/parsing)
+kode-review --scope local --format json
+
+# Markdown output (for documentation)
+kode-review --scope local --format markdown
+
+# Save to file
+kode-review --scope local --format json -o review.json
+kode-review --scope local --format markdown -o review.md
+```
+
+### Post to PR/MR
+
+Automatically post reviews as comments on GitHub PRs or GitLab MRs:
+
+```bash
+# Post review as PR comment with inline code annotations
+kode-review --scope pr --pr 123 --post-to-pr
+
+# Combined with other options
+kode-review --scope pr --pr 123 --agentic --post-to-pr
+```
+
+Features:
+- Posts main review comment with summary and verdict
+- Adds inline comments on specific lines for issues with file locations
+- Sets PR approval status based on verdict (APPROVE/REQUEST_CHANGES)
+- Works with both GitHub (`gh`) and GitLab (`glab`) CLIs
+
+---
+
+## Examples
+
 ### From a Coding Agent
 
 ```bash
-kode-review --scope both --quiet --json
+# JSON output for parsing
+kode-review --scope local --quiet --format json
+
+# Save structured output to file
+kode-review --scope local --format json -o /tmp/review.json
+
+# Post directly to PR
+kode-review --scope pr --pr 123 --post-to-pr --quiet
 ```
 
 ---
