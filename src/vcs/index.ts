@@ -5,8 +5,12 @@ export {
   getGitHubPRs,
   getGitHubPRDiff,
   getGitHubPRInfo,
+  postGitHubPRComment,
+  postGitHubPRLineComment,
+  submitGitHubPRReview,
   type PullRequest,
   type PullRequestInfo,
+  type GitHubReviewEvent,
 } from './github.js'
 export {
   isGlabInstalled,
@@ -14,6 +18,18 @@ export {
   getGitLabMRs,
   getGitLabMRDiff,
   getGitLabMRInfo,
+  postGitLabMRComment,
+  postGitLabMRLineComment,
+  approveGitLabMR,
+  revokeGitLabMRApproval,
+  setGitLabMRApproval,
   type MergeRequest,
   type MergeRequestInfo,
 } from './gitlab.js'
+export {
+  postReviewToPR,
+  postSimpleComment,
+  type Platform,
+  type PostReviewOptions,
+  type PostReviewResult,
+} from './post-review.js'

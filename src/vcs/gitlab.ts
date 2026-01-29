@@ -91,3 +91,143 @@ export async function getGitLabMRInfo(mrIid: number): Promise<MergeRequestInfo |
     return null
   }
 }
+
+/**
+ * Post a comment on a GitLab MR
+ */
+export async function postGitLabMRComment(
+  mrIid: number,
+  body: string
+): Promise<{ success: boolean; error?: string }> {
+  const result = await exec('glab', ['mr', 'note', String(mrIid), '--message', body])
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr || 'Unknown error posting comment'
+    logger.debug(`Failed to post comment on MR !${mrIid}: ${error}`)
+    return { success: false, error }
+  }
+
+  return { success: true }
+}
+
+/**
+ * Post an inline comment on a specific file/line in an MR.
+ * Uses the GitLab API for creating diff notes.
+ */
+export async function postGitLabMRLineComment(
+  mrIid: number,
+  body: string,
+  path: string,
+  newLine: number
+): Promise<{ success: boolean; error?: string }> {
+  // Get project path from current repo
+  const repoResult = await exec('glab', ['repo', 'view', '-F', 'json'])
+  if (repoResult.exitCode !== 0) {
+    return { success: false, error: 'Failed to get repository info' }
+  }
+
+  let projectPath: string
+  try {
+    const repoInfo = JSON.parse(repoResult.stdout)
+    projectPath = encodeURIComponent(repoInfo.path_with_namespace || repoInfo.full_path)
+  } catch {
+    return { success: false, error: 'Failed to parse repository info' }
+  }
+
+  // Get MR details to find the diff refs
+  const mrResult = await exec('glab', [
+    'api',
+    `projects/${projectPath}/merge_requests/${mrIid}`,
+  ])
+  if (mrResult.exitCode !== 0) {
+    return { success: false, error: 'Failed to get MR details' }
+  }
+
+  let baseSha: string
+  let headSha: string
+  let startSha: string
+  try {
+    const mrInfo = JSON.parse(mrResult.stdout)
+    baseSha = mrInfo.diff_refs?.base_sha
+    headSha = mrInfo.diff_refs?.head_sha
+    startSha = mrInfo.diff_refs?.start_sha
+    if (!baseSha || !headSha || !startSha) {
+      return { success: false, error: 'MR diff refs not available' }
+    }
+  } catch {
+    return { success: false, error: 'Failed to parse MR details' }
+  }
+
+  // Create discussion (diff note) via API
+  const apiPath = `projects/${projectPath}/merge_requests/${mrIid}/discussions`
+
+  const result = await exec('glab', [
+    'api',
+    '-X', 'POST',
+    apiPath,
+    '-f', `body=${body}`,
+    '-f', `position[position_type]=text`,
+    '-f', `position[base_sha]=${baseSha}`,
+    '-f', `position[head_sha]=${headSha}`,
+    '-f', `position[start_sha]=${startSha}`,
+    '-f', `position[new_path]=${path}`,
+    '-f', `position[old_path]=${path}`,
+    '-F', `position[new_line]=${newLine}`,
+  ])
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr || 'Unknown error posting line comment'
+    logger.debug(`Failed to post line comment on MR !${mrIid}: ${error}`)
+    return { success: false, error }
+  }
+
+  return { success: true }
+}
+
+/**
+ * Approve a GitLab MR
+ */
+export async function approveGitLabMR(
+  mrIid: number
+): Promise<{ success: boolean; error?: string }> {
+  const result = await exec('glab', ['mr', 'approve', String(mrIid)])
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr || 'Unknown error approving MR'
+    logger.debug(`Failed to approve MR !${mrIid}: ${error}`)
+    return { success: false, error }
+  }
+
+  return { success: true }
+}
+
+/**
+ * Revoke approval on a GitLab MR
+ */
+export async function revokeGitLabMRApproval(
+  mrIid: number
+): Promise<{ success: boolean; error?: string }> {
+  const result = await exec('glab', ['mr', 'revoke', String(mrIid)])
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr || 'Unknown error revoking MR approval'
+    logger.debug(`Failed to revoke approval for MR !${mrIid}: ${error}`)
+    return { success: false, error }
+  }
+
+  return { success: true }
+}
+
+/**
+ * Set GitLab MR approval status based on approve flag
+ */
+export async function setGitLabMRApproval(
+  mrIid: number,
+  approve: boolean
+): Promise<{ success: boolean; error?: string }> {
+  if (approve) {
+    return approveGitLabMR(mrIid)
+  } else {
+    return revokeGitLabMRApproval(mrIid)
+  }
+}

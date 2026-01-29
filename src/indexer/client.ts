@@ -17,6 +17,8 @@ import type {
   CallGraphEdge,
   CallGraphDirection,
 } from './types.js'
+import { LRUCache } from '../utils/cache.js'
+import { withRetry } from '../utils/retry.js'
 
 export interface IndexRequest {
   repoUrl: string
@@ -206,8 +208,32 @@ interface HybridSearchResponse {
 export class IndexerClient {
   private baseUrl: string
 
+  // Timeout constants
+  private static readonly DEFAULT_TIMEOUT_MS = 30000
+  private static readonly INDEX_TIMEOUT_MS = 60000
+  private static readonly STATS_TIMEOUT_MS = 10000
+  private static readonly LOOKUP_TIMEOUT_MS = 15000
+
+  // Caches for search results (5 minute TTL, 100 entries)
+  private searchCache = new LRUCache<string, CodeChunk[]>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
+  private hybridCache = new LRUCache<string, HybridSearchResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
+  private keywordCache = new LRUCache<string, KeywordSearchResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
+  private definitionsCache = new LRUCache<string, DefinitionLookupResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
+  private usagesCache = new LRUCache<string, UsageLookupResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
+
   constructor(baseUrl: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
+  }
+
+  /**
+   * Clear all caches
+   */
+  clearCaches(): void {
+    this.searchCache.clear()
+    this.hybridCache.clear()
+    this.keywordCache.clear()
+    this.definitionsCache.clear()
+    this.usagesCache.clear()
   }
 
   /**
@@ -235,26 +261,29 @@ export class IndexerClient {
    * Start indexing a repository
    */
   async index(request: IndexRequest): Promise<{ message: string; status: string; branch?: string }> {
-    const response = await fetch(`${this.baseUrl}/index`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        repo_url: request.repoUrl,
-        repo_path: request.repoPath,
-        branch: request.branch,
-        include_patterns: request.includePatterns,
-        exclude_patterns: request.excludePatterns,
-      }),
+    return withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/index`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          repo_url: request.repoUrl,
+          repo_path: request.repoPath,
+          branch: request.branch,
+          include_patterns: request.includePatterns,
+          exclude_patterns: request.excludePatterns,
+        }),
+        signal: AbortSignal.timeout(IndexerClient.INDEX_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to start indexing: ${error}`)
+      }
+
+      return (await response.json()) as IndexResponse & { branch?: string }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to start indexing: ${error}`)
-    }
-
-    return (await response.json()) as IndexResponse & { branch?: string }
   }
 
   /**
@@ -271,36 +300,50 @@ export class IndexerClient {
     limit: number = 5,
     branch?: string
   ): Promise<CodeChunk[]> {
-    const response = await fetch(`${this.baseUrl}/search`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        repo_url: repoUrl,
-        branch,
-        limit,
-      }),
-    })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Search failed: ${error}`)
+    // Check cache first
+    const cacheKey = JSON.stringify({ method: 'search', query, repoUrl, limit, branch })
+    const cached = this.searchCache.get(cacheKey)
+    if (cached) {
+      return cached
     }
 
-    const data = (await response.json()) as SearchResponse
+    const result = await withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          repo_url: repoUrl,
+          branch,
+          limit,
+        }),
+        signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
+      })
 
-    // Map snake_case to camelCase
-    return data.chunks.map((chunk) => ({
-      repoUrl: chunk.repo_url,
-      branch: chunk.branch,
-      filename: chunk.filename,
-      code: chunk.code,
-      score: chunk.score,
-      startLine: chunk.start_line,
-      endLine: chunk.end_line,
-    }))
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Search failed: ${error}`)
+      }
+
+      const data = (await response.json()) as SearchResponse
+
+      // Map snake_case to camelCase
+      return data.chunks.map((chunk) => ({
+        repoUrl: chunk.repo_url,
+        branch: chunk.branch,
+        filename: chunk.filename,
+        code: chunk.code,
+        score: chunk.score,
+        startLine: chunk.start_line,
+        endLine: chunk.end_line,
+      }))
+    })
+
+    // Cache the result
+    this.searchCache.set(cacheKey, result)
+    return result
   }
 
   /**
@@ -315,26 +358,29 @@ export class IndexerClient {
       url += `&branch=${encodeURIComponent(branch)}`
     }
 
-    const response = await fetch(url, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.STATS_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to get stats: ${error}`)
+      }
+
+      const data = (await response.json()) as StatsResponse
+
+      return {
+        repoUrl: data.repo_url,
+        repoId: data.repo_id,
+        branch: data.branch,
+        chunkCount: data.chunk_count,
+        fileCount: data.file_count,
+        lastIndexed: data.last_indexed,
+        status: data.status as IndexStats['status'],
+      }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to get stats: ${error}`)
-    }
-
-    const data = (await response.json()) as StatsResponse
-
-    return {
-      repoUrl: data.repo_url,
-      repoId: data.repo_id,
-      branch: data.branch,
-      chunkCount: data.chunk_count,
-      fileCount: data.file_count,
-      lastIndexed: data.last_indexed,
-      status: data.status as IndexStats['status'],
-    }
   }
 
   /**
@@ -349,14 +395,19 @@ export class IndexerClient {
       url += `?branch=${encodeURIComponent(branch)}`
     }
 
+    // No retry for delete operations - they should be idempotent but we don't want accidental double-deletes
     const response = await fetch(url, {
       method: 'DELETE',
+      signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
     })
 
     if (!response.ok) {
       const error = await response.text()
       throw new Error(`Failed to delete index: ${error}`)
     }
+
+    // Clear caches after deletion
+    this.clearCaches()
 
     return (await response.json()) as { message: string; deleted_chunks?: number }
   }
@@ -365,24 +416,27 @@ export class IndexerClient {
    * List all indexed repositories with their branches and stats
    */
   async listRepos(): Promise<RepoInfo[]> {
-    const response = await fetch(`${this.baseUrl}/repos`, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/repos`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.STATS_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to list repos: ${error}`)
+      }
+
+      const data = (await response.json()) as ReposResponse
+
+      return data.repos.map((repo) => ({
+        repoUrl: repo.repo_url,
+        repoId: repo.repo_id,
+        branches: repo.branches,
+        totalChunks: repo.total_chunks,
+        totalFiles: repo.total_files,
+      }))
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to list repos: ${error}`)
-    }
-
-    const data = (await response.json()) as ReposResponse
-
-    return data.repos.map((repo) => ({
-      repoUrl: repo.repo_url,
-      repoId: repo.repo_id,
-      branches: repo.branches,
-      totalChunks: repo.total_chunks,
-      totalFiles: repo.total_files,
-    }))
   }
 
   /**
@@ -404,6 +458,13 @@ export class IndexerClient {
     includeReexports: boolean = true,
     limit: number = 20
   ): Promise<DefinitionLookupResult> {
+    // Check cache first
+    const cacheKey = JSON.stringify({ method: 'definitions', symbol, repoUrl, branch, includeReexports, limit })
+    const cached = this.definitionsCache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+
     const params = new URLSearchParams()
     if (repoUrl) {
       params.append('repo_url', repoUrl)
@@ -417,31 +478,38 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/definitions/${encodeURIComponent(symbol)}${queryString ? `?${queryString}` : ''}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    const result = await withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to lookup definitions: ${error}`)
+      }
+
+      const data = (await response.json()) as DefinitionResponse
+
+      // Map snake_case to camelCase
+      return {
+        symbol: data.symbol,
+        definitions: data.definitions.map((def) => ({
+          filePath: def.file_path,
+          lineStart: def.line_start,
+          lineEnd: def.line_end,
+          content: def.content,
+          chunkType: def.chunk_type as ChunkType | null,
+          isReexport: def.is_reexport,
+          reexportSource: def.reexport_source,
+        })),
+        totalCount: data.total_count,
+      }
     })
 
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to lookup definitions: ${error}`)
-    }
-
-    const data = (await response.json()) as DefinitionResponse
-
-    // Map snake_case to camelCase
-    return {
-      symbol: data.symbol,
-      definitions: data.definitions.map((def) => ({
-        filePath: def.file_path,
-        lineStart: def.line_start,
-        lineEnd: def.line_end,
-        content: def.content,
-        chunkType: def.chunk_type as ChunkType | null,
-        isReexport: def.is_reexport,
-        reexportSource: def.reexport_source,
-      })),
-      totalCount: data.total_count,
-    }
+    // Cache the result
+    this.definitionsCache.set(cacheKey, result)
+    return result
   }
 
   /**
@@ -461,6 +529,13 @@ export class IndexerClient {
     branch?: string,
     limit: number = 50
   ): Promise<UsageLookupResult> {
+    // Check cache first
+    const cacheKey = JSON.stringify({ method: 'usages', symbol, repoUrl, branch, limit })
+    const cached = this.usagesCache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+
     const params = new URLSearchParams()
     if (repoUrl) {
       params.append('repo_url', repoUrl)
@@ -473,31 +548,38 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/usages/${encodeURIComponent(symbol)}${queryString ? `?${queryString}` : ''}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    const result = await withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to lookup usages: ${error}`)
+      }
+
+      const data = (await response.json()) as UsageResponse
+
+      // Map snake_case to camelCase
+      return {
+        symbol: data.symbol,
+        usages: data.usages.map((usage) => ({
+          filePath: usage.file_path,
+          lineStart: usage.line_start,
+          lineEnd: usage.line_end,
+          content: usage.content,
+          chunkType: usage.chunk_type as ChunkType | null,
+          usageType: usage.usage_type as 'calls' | 'imports' | 'references',
+          isDynamic: usage.is_dynamic,
+        })),
+        totalCount: data.total_count,
+      }
     })
 
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to lookup usages: ${error}`)
-    }
-
-    const data = (await response.json()) as UsageResponse
-
-    // Map snake_case to camelCase
-    return {
-      symbol: data.symbol,
-      usages: data.usages.map((usage) => ({
-        filePath: usage.file_path,
-        lineStart: usage.line_start,
-        lineEnd: usage.line_end,
-        content: usage.content,
-        chunkType: usage.chunk_type as ChunkType | null,
-        usageType: usage.usage_type as 'calls' | 'imports' | 'references',
-        isDynamic: usage.is_dynamic,
-      })),
-      totalCount: data.total_count,
-    }
+    // Cache the result
+    this.usagesCache.set(cacheKey, result)
+    return result
   }
 
   // ============================================================================
@@ -529,25 +611,28 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/import-tree/${encodeURIComponent(filePath)}?${queryString}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to get import tree: ${error}`)
+      }
+
+      const data = (await response.json()) as ImportTreeResponse
+
+      // Map snake_case to camelCase
+      return {
+        targetFile: data.target_file,
+        directImports: data.direct_imports,
+        directImporters: data.direct_importers,
+        indirectImports: data.indirect_imports,
+        indirectImporters: data.indirect_importers,
+      }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to get import tree: ${error}`)
-    }
-
-    const data = (await response.json()) as ImportTreeResponse
-
-    // Map snake_case to camelCase
-    return {
-      targetFile: data.target_file,
-      directImports: data.direct_imports,
-      directImporters: data.direct_importers,
-      indirectImports: data.indirect_imports,
-      indirectImporters: data.indirect_importers,
-    }
   }
 
   /**
@@ -575,27 +660,30 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/circular-dependencies?${queryString}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to get circular dependencies: ${error}`)
+      }
+
+      const data = (await response.json()) as CircularDependenciesResponse
+
+      // Map snake_case to camelCase
+      return {
+        repoUrl: data.repo_url,
+        branch: data.branch,
+        circularDependencies: data.circular_dependencies.map((cd) => ({
+          cycle: cd.cycle,
+          cycleType: cd.cycle_type as 'direct' | 'indirect',
+        })),
+        totalCount: data.total_count,
+      }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to get circular dependencies: ${error}`)
-    }
-
-    const data = (await response.json()) as CircularDependenciesResponse
-
-    // Map snake_case to camelCase
-    return {
-      repoUrl: data.repo_url,
-      branch: data.branch,
-      circularDependencies: data.circular_dependencies.map((cd) => ({
-        cycle: cd.cycle,
-        cycleType: cd.cycle_type as 'direct' | 'indirect',
-      })),
-      totalCount: data.total_count,
-    }
   }
 
   /**
@@ -626,29 +714,32 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/hub-files?${queryString}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Failed to get hub files: ${error}`)
+      }
+
+      const data = (await response.json()) as HubFilesResponse
+
+      // Map snake_case to camelCase
+      return {
+        repoUrl: data.repo_url,
+        branch: data.branch,
+        hubFiles: data.hub_files.map((hf) => ({
+          filePath: hf.file_path,
+          importCount: hf.import_count,
+          importers: hf.importers,
+        })),
+        totalCount: data.total_count,
+        threshold: data.threshold,
+      }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Failed to get hub files: ${error}`)
-    }
-
-    const data = (await response.json()) as HubFilesResponse
-
-    // Map snake_case to camelCase
-    return {
-      repoUrl: data.repo_url,
-      branch: data.branch,
-      hubFiles: data.hub_files.map((hf) => ({
-        filePath: hf.file_path,
-        importCount: hf.import_count,
-        importers: hf.importers,
-      })),
-      totalCount: data.total_count,
-      threshold: data.threshold,
-    }
   }
 
   // ============================================================================
@@ -679,46 +770,60 @@ export class IndexerClient {
     limit: number = 10,
     exactMatchBoost: number = 3.0
   ): Promise<KeywordSearchResult> {
-    const response = await fetch(`${this.baseUrl}/keyword-search`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        repo_url: repoUrl,
-        branch,
-        limit,
-        exact_match_boost: exactMatchBoost,
-      }),
+    // Check cache first
+    const cacheKey = JSON.stringify({ method: 'keyword', query, repoUrl, branch, limit, exactMatchBoost })
+    const cached = this.keywordCache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+
+    const result = await withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/keyword-search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          repo_url: repoUrl,
+          branch,
+          limit,
+          exact_match_boost: exactMatchBoost,
+        }),
+        signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Keyword search failed: ${error}`)
+      }
+
+      const data = (await response.json()) as KeywordSearchResponse
+
+      // Map snake_case to camelCase
+      return {
+        query: data.query,
+        normalizedQuery: data.normalized_query,
+        matches: data.matches.map((match): KeywordMatch => ({
+          filePath: match.file_path,
+          content: match.content,
+          lineStart: match.line_start,
+          lineEnd: match.line_end,
+          chunkType: match.chunk_type as ChunkType | null,
+          symbolNames: match.symbol_names,
+          bm25Score: match.bm25_score,
+          exactMatchBoost: match.exact_match_boost,
+          finalScore: match.final_score,
+          repoUrl: match.repo_url ?? undefined,
+          branch: match.branch ?? undefined,
+        })),
+        totalCount: data.total_count,
+      }
     })
 
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Keyword search failed: ${error}`)
-    }
-
-    const data = (await response.json()) as KeywordSearchResponse
-
-    // Map snake_case to camelCase
-    return {
-      query: data.query,
-      normalizedQuery: data.normalized_query,
-      matches: data.matches.map((match): KeywordMatch => ({
-        filePath: match.file_path,
-        content: match.content,
-        lineStart: match.line_start,
-        lineEnd: match.line_end,
-        chunkType: match.chunk_type as ChunkType | null,
-        symbolNames: match.symbol_names,
-        bm25Score: match.bm25_score,
-        exactMatchBoost: match.exact_match_boost,
-        finalScore: match.final_score,
-        repoUrl: match.repo_url ?? undefined,
-        branch: match.branch ?? undefined,
-      })),
-      totalCount: data.total_count,
-    }
+    // Cache the result
+    this.keywordCache.set(cacheKey, result)
+    return result
   }
 
   // ============================================================================
@@ -759,54 +864,77 @@ export class IndexerClient {
     keywordWeight: number = 0.4,
     exactMatchBoost: number = 3.0
   ): Promise<HybridSearchResult> {
-    const response = await fetch(`${this.baseUrl}/hybrid-search`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query,
-        repo_url: repoUrl,
-        branch,
-        limit,
-        vector_weight: vectorWeight,
-        keyword_weight: keywordWeight,
-        exact_match_boost: exactMatchBoost,
-      }),
+    // Check cache first
+    const cacheKey = JSON.stringify({
+      method: 'hybrid',
+      query,
+      repoUrl,
+      branch,
+      limit,
+      vectorWeight,
+      keywordWeight,
+      exactMatchBoost,
+    })
+    const cached = this.hybridCache.get(cacheKey)
+    if (cached) {
+      return cached
+    }
+
+    const result = await withRetry(async () => {
+      const response = await fetch(`${this.baseUrl}/hybrid-search`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query,
+          repo_url: repoUrl,
+          branch,
+          limit,
+          vector_weight: vectorWeight,
+          keyword_weight: keywordWeight,
+          exact_match_boost: exactMatchBoost,
+        }),
+        signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Hybrid search failed: ${error}`)
+      }
+
+      const data = (await response.json()) as HybridSearchResponse
+
+      // Map snake_case to camelCase
+      return {
+        query: data.query,
+        quotedPhrases: data.quoted_phrases,
+        matches: data.matches.map((match): HybridMatch => ({
+          filePath: match.file_path,
+          content: match.content,
+          lineStart: match.line_start,
+          lineEnd: match.line_end,
+          chunkType: match.chunk_type as ChunkType | null,
+          symbolNames: match.symbol_names,
+          repoUrl: match.repo_url ?? undefined,
+          branch: match.branch ?? undefined,
+          vectorScore: match.vector_score,
+          vectorRank: match.vector_rank ?? undefined,
+          keywordScore: match.keyword_score,
+          keywordRank: match.keyword_rank ?? undefined,
+          rrfScore: match.rrf_score,
+          sources: match.sources as Array<'vector' | 'keyword'>,
+        })),
+        totalCount: data.total_count,
+        vectorWeight: data.vector_weight,
+        keywordWeight: data.keyword_weight,
+        fallbackUsed: data.fallback_used,
+      }
     })
 
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Hybrid search failed: ${error}`)
-    }
-
-    const data = (await response.json()) as HybridSearchResponse
-
-    // Map snake_case to camelCase
-    return {
-      query: data.query,
-      quotedPhrases: data.quoted_phrases,
-      matches: data.matches.map((match): HybridMatch => ({
-        filePath: match.file_path,
-        content: match.content,
-        lineStart: match.line_start,
-        lineEnd: match.line_end,
-        chunkType: match.chunk_type as ChunkType | null,
-        symbolNames: match.symbol_names,
-        repoUrl: match.repo_url ?? undefined,
-        branch: match.branch ?? undefined,
-        vectorScore: match.vector_score,
-        vectorRank: match.vector_rank ?? undefined,
-        keywordScore: match.keyword_score,
-        keywordRank: match.keyword_rank ?? undefined,
-        rrfScore: match.rrf_score,
-        sources: match.sources as Array<'vector' | 'keyword'>,
-      })),
-      totalCount: data.total_count,
-      vectorWeight: data.vector_weight,
-      keywordWeight: data.keyword_weight,
-      fallbackUsed: data.fallback_used,
-    }
+    // Cache the result
+    this.hybridCache.set(cacheKey, result)
+    return result
   }
 
   // ============================================================================
@@ -851,97 +979,100 @@ export class IndexerClient {
     const queryString = params.toString()
     const url = `${this.baseUrl}/callgraph/${encodeURIComponent(functionName)}?${queryString}`
 
-    const response = await fetch(url, {
-      method: 'GET',
+    return withRetry(async () => {
+      const response = await fetch(url, {
+        method: 'GET',
+        signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
+      })
+
+      if (!response.ok) {
+        const error = await response.text()
+        throw new Error(`Call graph query failed: ${error}`)
+      }
+
+      interface CallGraphNodeResponse {
+        id: string
+        name: string
+        file_path: string
+        line_start: number
+        line_end: number
+        depth: number
+        content?: string
+      }
+
+      interface CallGraphEdgeResponse {
+        source_id: string
+        target_id: string
+        callee_name: string
+        line_number?: number
+        receiver?: string
+      }
+
+      interface CallGraphResponse {
+        function: string
+        direction: string
+        depth: number
+        nodes: CallGraphNodeResponse[]
+        edges: CallGraphEdgeResponse[]
+        total_nodes: number
+        total_edges: number
+      }
+
+      const data = (await response.json()) as CallGraphResponse
+
+      // Map snake_case to camelCase
+      const nodes: CallGraphNode[] = data.nodes.map(node => ({
+        id: node.id,
+        name: node.name,
+        filePath: node.file_path,
+        lineStart: node.line_start,
+        lineEnd: node.line_end,
+        depth: node.depth,
+        content: node.content,
+      }))
+
+      const edges: CallGraphEdge[] = data.edges.map(edge => ({
+        sourceId: edge.source_id,
+        targetId: edge.target_id,
+        calleeName: edge.callee_name,
+        lineNumber: edge.line_number,
+        receiver: edge.receiver,
+      }))
+
+      // Separate callers and callees from the nodes
+      // The function itself is at depth 0
+      // For 'callers' direction, depth > 0 means callers
+      // For 'callees' direction, depth > 0 means callees
+      // For 'both' direction, we need to check edges
+      const callers: CallGraphNode[] = []
+      const callees: CallGraphNode[] = []
+
+      // Build a set of target IDs from edges (these are callees)
+      const calleeIds = new Set(edges.map(e => e.targetId))
+      const callerIds = new Set(edges.map(e => e.sourceId))
+
+      for (const node of nodes) {
+        if (node.depth === 0) continue // Skip the root function itself
+
+        if (direction === 'callers' || (direction === 'both' && callerIds.has(node.id))) {
+          callers.push(node)
+        }
+        if (direction === 'callees' || (direction === 'both' && calleeIds.has(node.id))) {
+          callees.push(node)
+        }
+      }
+
+      return {
+        function: data.function,
+        direction: data.direction as CallGraphDirection,
+        depth: data.depth,
+        nodes,
+        edges,
+        totalNodes: data.total_nodes,
+        totalEdges: data.total_edges,
+        callers,
+        callees,
+      }
     })
-
-    if (!response.ok) {
-      const error = await response.text()
-      throw new Error(`Call graph query failed: ${error}`)
-    }
-
-    interface CallGraphNodeResponse {
-      id: string
-      name: string
-      file_path: string
-      line_start: number
-      line_end: number
-      depth: number
-      content?: string
-    }
-
-    interface CallGraphEdgeResponse {
-      source_id: string
-      target_id: string
-      callee_name: string
-      line_number?: number
-      receiver?: string
-    }
-
-    interface CallGraphResponse {
-      function: string
-      direction: string
-      depth: number
-      nodes: CallGraphNodeResponse[]
-      edges: CallGraphEdgeResponse[]
-      total_nodes: number
-      total_edges: number
-    }
-
-    const data = (await response.json()) as CallGraphResponse
-
-    // Map snake_case to camelCase
-    const nodes: CallGraphNode[] = data.nodes.map(node => ({
-      id: node.id,
-      name: node.name,
-      filePath: node.file_path,
-      lineStart: node.line_start,
-      lineEnd: node.line_end,
-      depth: node.depth,
-      content: node.content,
-    }))
-
-    const edges: CallGraphEdge[] = data.edges.map(edge => ({
-      sourceId: edge.source_id,
-      targetId: edge.target_id,
-      calleeName: edge.callee_name,
-      lineNumber: edge.line_number,
-      receiver: edge.receiver,
-    }))
-
-    // Separate callers and callees from the nodes
-    // The function itself is at depth 0
-    // For 'callers' direction, depth > 0 means callers
-    // For 'callees' direction, depth > 0 means callees
-    // For 'both' direction, we need to check edges
-    const callers: CallGraphNode[] = []
-    const callees: CallGraphNode[] = []
-
-    // Build a set of target IDs from edges (these are callees)
-    const calleeIds = new Set(edges.map(e => e.targetId))
-    const callerIds = new Set(edges.map(e => e.sourceId))
-
-    for (const node of nodes) {
-      if (node.depth === 0) continue // Skip the root function itself
-
-      if (direction === 'callers' || (direction === 'both' && callerIds.has(node.id))) {
-        callers.push(node)
-      }
-      if (direction === 'callees' || (direction === 'both' && calleeIds.has(node.id))) {
-        callees.push(node)
-      }
-    }
-
-    return {
-      function: data.function,
-      direction: data.direction as CallGraphDirection,
-      depth: data.depth,
-      nodes,
-      edges,
-      totalNodes: data.total_nodes,
-      totalEdges: data.total_edges,
-      callers,
-      callees,
-    }
   }
 }

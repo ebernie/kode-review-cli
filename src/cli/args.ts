@@ -1,4 +1,5 @@
 import { Command } from 'commander'
+import type { OutputFormat } from '../output/types.js'
 
 export type ReviewScope = 'local' | 'pr' | 'both' | 'auto'
 
@@ -8,6 +9,14 @@ export interface CliOptions {
   pr?: string
   quiet: boolean
   json: boolean
+
+  // Output options
+  format: OutputFormat
+  outputFile?: string
+  postToPr: boolean
+
+  // Hook generation
+  initHooks: boolean
 
   // Model overrides
   provider?: string
@@ -51,6 +60,10 @@ export interface CliOptions {
   agentic: boolean
   maxIterations: number
   agenticTimeout: number
+
+  // Info commands
+  showConfig: boolean
+  doctor: boolean
 }
 
 export function createProgram(): Command {
@@ -66,7 +79,17 @@ export function createProgram(): Command {
     .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto (default: auto)', 'auto')
     .option('-p, --pr <number>', 'Specific PR/MR number to review')
     .option('-q, --quiet', 'Minimal output (suitable for agents)', false)
-    .option('-j, --json', 'Output in JSON format', false)
+    .option('-j, --json', 'Output in JSON format (deprecated, use --format json)', false)
+
+  // Output options
+  program
+    .option('-f, --format <format>', 'Output format: text, json, markdown (default: text)', 'text')
+    .option('-o, --output-file <path>', 'Write output to file instead of stdout')
+    .option('--post-to-pr', 'Post review as PR/MR comment', false)
+
+  // Hook generation
+  program
+    .option('--init-hooks', 'Generate pre-commit hook for code review', false)
 
   // Model overrides
   program
@@ -119,6 +142,11 @@ export function createProgram(): Command {
     .option('--max-iterations <n>', 'Max tool call iterations for agentic mode (default: 10)', '10')
     .option('--agentic-timeout <s>', 'Timeout in seconds for agentic mode (default: 120)', '120')
 
+  // Info commands
+  program
+    .option('--show-config', 'Display current configuration', false)
+    .option('--doctor', 'Run system diagnostics', false)
+
   return program
 }
 
@@ -156,11 +184,25 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`Invalid agentic-timeout: "${agenticTimeoutRaw}". Must be a number between 30 and 600 seconds.`)
   }
 
+  // Validate and determine output format
+  // --json flag takes precedence for backward compatibility
+  let format: OutputFormat = (opts.format ?? 'text') as OutputFormat
+  if (opts.json) {
+    format = 'json'
+  }
+  if (!['text', 'json', 'markdown'].includes(format)) {
+    throw new Error(`Invalid format: "${format}". Must be text, json, or markdown.`)
+  }
+
   return {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,
     quiet: opts.quiet ?? false,
     json: opts.json ?? false,
+    format,
+    outputFile: opts.outputFile,
+    postToPr: opts.postToPr ?? false,
+    initHooks: opts.initHooks ?? false,
     provider: opts.provider,
     model: opts.model,
     variant: opts.variant,
@@ -188,5 +230,7 @@ export function parseArgs(argv: string[]): CliOptions {
     agentic: opts.agentic ?? false,
     maxIterations,
     agenticTimeout,
+    showConfig: opts.showConfig ?? false,
+    doctor: opts.doctor ?? false,
   }
 }
