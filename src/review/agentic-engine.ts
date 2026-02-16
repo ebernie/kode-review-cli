@@ -121,34 +121,34 @@ export async function runAgenticReview(
   }
   const userPrompt = buildAgenticPrompt(promptOptions)
 
-  // Start OpenCode server
+  // Configure the agent with maxSteps to enforce iteration limit
+  // This limits the number of tool call iterations before forcing a text-only response
+  const agentConfig: AgentConfig = {
+    maxSteps: maxIterations,
+    // Deny all permissions - review only, no modifications
+    permission: {
+      edit: 'deny',
+      bash: 'deny',
+      webfetch: 'deny',
+    },
+  }
+
+  // Pass agent config via createOpencode() so it's sent through
+  // OPENCODE_CONFIG_CONTENT env var instead of client.config.update(),
+  // which would persist a config.json in the target project's CWD
   const { client, server } = await createOpencode({
     port: 0, // Random available port
     timeout: 30000,
+    config: {
+      agent: {
+        general: agentConfig,
+        build: agentConfig,
+      },
+    },
   })
+  logger.debug(`Configured agent with maxSteps=${maxIterations}`)
 
   try {
-    // Configure the agent with maxSteps to enforce iteration limit
-    // This limits the number of tool call iterations before forcing a text-only response
-    const agentConfig: AgentConfig = {
-      maxSteps: maxIterations,
-      // Allow all tool permissions for the review agent
-      permission: {
-        edit: 'deny',      // No file edits - review only
-        bash: 'deny',      // No shell commands
-        webfetch: 'deny',  // No web fetching
-      },
-    }
-
-    await client.config.update({
-      body: {
-        agent: {
-          general: agentConfig,
-          build: agentConfig,
-        },
-      },
-    })
-    logger.debug(`Configured agent with maxSteps=${maxIterations}`)
 
     // Register the MCP server with OpenCode
     // The SDK manages the MCP server lifecycle - no need to spawn manually
