@@ -81,9 +81,10 @@ Analyze the code for these issues, in priority order:
 - Resource leaks
 
 ### 3. Code Quality (MEDIUM)
-- DRY violations (duplicated code)
-- SOLID principle violations
-- Overly complex logic
+- DRY violations: duplicated logic, copy-pasted blocks, or repeated conditional patterns that should be extracted
+- SOLID violations: functions/classes doing too many things (SRP), logic that can't be extended without editing (OCP), tight coupling between unrelated concerns (DIP)
+- Unnecessary complexity: deep nesting, long functions (>30 lines), convoluted control flow that could use early returns or guard clauses
+- Over-engineering: abstractions, wrappers, or indirection that serve no current purpose
 - Poor naming or unclear intent
 - Missing error handling
 
