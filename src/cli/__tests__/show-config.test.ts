@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Create module-level mocks
-const mockGetConfig = vi.fn()
-const mockGetConfigPath = vi.fn()
+// Hoist mocks so they're available when vi.mock factories run
+const { mockGetConfig, mockGetConfigPath } = vi.hoisted(() => ({
+  mockGetConfig: vi.fn(),
+  mockGetConfigPath: vi.fn(),
+}))
 
 // Mock the config module before importing
 vi.mock('../../config/index.js', () => ({

@@ -47,33 +47,25 @@ export interface DiagnosticsResult {
  * Run all diagnostic checks
  */
 export async function runDiagnostics(): Promise<DiagnosticsResult> {
-  const checks: DiagnosticCheck[] = []
   const config = getConfig()
 
-  // 1. Config file exists and valid
-  checks.push(await checkConfig())
+  // Run independent checks in parallel
+  const [configCheck, nodeCheck, gitCheck, openCodeCheck, ghCheck, glabCheck] = await Promise.all([
+    checkConfig(),
+    checkNodeVersion(),
+    checkGit(),
+    checkOpenCode(),
+    checkGitHubCli(),
+    checkGitLabCli(),
+  ])
 
-  // 2. Node.js version
-  checks.push(await checkNodeVersion())
+  const checks: DiagnosticCheck[] = [configCheck, nodeCheck, gitCheck, openCodeCheck, ghCheck, glabCheck]
 
-  // 3. Git installed
-  checks.push(await checkGit())
-
-  // 4. OpenCode CLI installed
-  checks.push(await checkOpenCode())
-
-  // 5. GitHub CLI
-  checks.push(await checkGitHubCli())
-
-  // 6. GitLab CLI
-  checks.push(await checkGitLabCli())
-
-  // 7. Docker (if indexer enabled or available)
+  // Conditional checks (depend on config/runtime state)
   if (config.indexer.enabled || await isDockerAvailable()) {
     checks.push(await checkDocker())
   }
 
-  // 8. Indexer containers (if indexer enabled)
   if (config.indexer.enabled) {
     checks.push(await checkIndexerContainers())
   }
@@ -249,66 +241,57 @@ async function checkOpenCode(): Promise<DiagnosticCheck> {
   }
 }
 
-async function checkGitHubCli(): Promise<DiagnosticCheck> {
-  const exists = await commandExists('gh')
+async function checkVcsCliTool(opts: {
+  command: string
+  name: string
+  installUrl: string
+  authCommand: string
+}): Promise<DiagnosticCheck> {
+  const exists = await commandExists(opts.command)
 
   if (!exists) {
     return {
-      name: 'GitHub CLI (gh)',
+      name: opts.name,
       status: 'warn',
       message: 'Not installed',
-      details: 'Install from: https://cli.github.com/',
+      details: `Install from: ${opts.installUrl}`,
     }
   }
 
-  // Check authentication status
-  const authResult = await exec('gh', ['auth', 'status'])
+  const authResult = await exec(opts.command, ['auth', 'status'])
 
   if (authResult.exitCode !== 0) {
     return {
-      name: 'GitHub CLI (gh)',
+      name: opts.name,
       status: 'warn',
       message: 'Installed but not authenticated',
-      details: 'Run: gh auth login',
+      details: `Run: ${opts.authCommand}`,
     }
   }
 
   return {
-    name: 'GitHub CLI (gh)',
+    name: opts.name,
     status: 'pass',
     message: 'Installed and authenticated',
   }
 }
 
-async function checkGitLabCli(): Promise<DiagnosticCheck> {
-  const exists = await commandExists('glab')
+function checkGitHubCli(): Promise<DiagnosticCheck> {
+  return checkVcsCliTool({
+    command: 'gh',
+    name: 'GitHub CLI (gh)',
+    installUrl: 'https://cli.github.com/',
+    authCommand: 'gh auth login',
+  })
+}
 
-  if (!exists) {
-    return {
-      name: 'GitLab CLI (glab)',
-      status: 'warn',
-      message: 'Not installed',
-      details: 'Install from: https://gitlab.com/gitlab-org/cli',
-    }
-  }
-
-  // Check authentication status
-  const authResult = await exec('glab', ['auth', 'status'])
-
-  if (authResult.exitCode !== 0) {
-    return {
-      name: 'GitLab CLI (glab)',
-      status: 'warn',
-      message: 'Installed but not authenticated',
-      details: 'Run: glab auth login',
-    }
-  }
-
-  return {
+function checkGitLabCli(): Promise<DiagnosticCheck> {
+  return checkVcsCliTool({
+    command: 'glab',
     name: 'GitLab CLI (glab)',
-    status: 'pass',
-    message: 'Installed and authenticated',
-  }
+    installUrl: 'https://gitlab.com/gitlab-org/cli',
+    authCommand: 'glab auth login',
+  })
 }
 
 async function checkDocker(): Promise<DiagnosticCheck> {

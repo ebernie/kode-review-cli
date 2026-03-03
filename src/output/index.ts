@@ -35,6 +35,7 @@ export {
   formatAsJson,
   formatAsMarkdown,
   formatForPRComment,
+  SEVERITY_ICONS,
 } from './formatters.js'
 
 // Writer

@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Create mock functions
-const mockExec = vi.fn()
-const mockCommandExists = vi.fn()
+// Hoist mocks so they're available when vi.mock factories run
+const { mockExec, mockCommandExists } = vi.hoisted(() => ({
+  mockExec: vi.fn(),
+  mockCommandExists: vi.fn(),
+}))
 
 // Mock the exec module before importing the module under test
 vi.mock('../../utils/exec.js', () => ({

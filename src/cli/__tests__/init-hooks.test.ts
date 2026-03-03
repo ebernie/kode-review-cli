@@ -1,13 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Create module-level mocks
-const mockWriteFile = vi.fn()
-const mockReadFile = vi.fn()
-const mockAccess = vi.fn()
-const mockMkdir = vi.fn()
-const mockChmod = vi.fn()
-const mockIsGitRepository = vi.fn()
-const mockGetRepoRoot = vi.fn()
+// Hoist mocks so they're available when vi.mock factories run
+const {
+  mockWriteFile,
+  mockReadFile,
+  mockAccess,
+  mockMkdir,
+  mockChmod,
+  mockIsGitRepository,
+  mockGetRepoRoot,
+} = vi.hoisted(() => ({
+  mockWriteFile: vi.fn(),
+  mockReadFile: vi.fn(),
+  mockAccess: vi.fn(),
+  mockMkdir: vi.fn(),
+  mockChmod: vi.fn(),
+  mockIsGitRepository: vi.fn(),
+  mockGetRepoRoot: vi.fn(),
+}))
 
 // Mock fs/promises
 vi.mock('node:fs/promises', () => ({
