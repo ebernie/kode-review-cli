@@ -1,6 +1,6 @@
 # Kode Review CLI
 
-AI-powered code review CLI using OpenCode SDK with Antigravity support.
+AI-powered code review CLI using OpenCode SDK. Multiple models supported.
 
 ## Features
 
