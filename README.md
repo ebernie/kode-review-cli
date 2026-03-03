@@ -4,7 +4,8 @@ AI-powered code review CLI using OpenCode SDK. Multiple models supported.
 
 ## Features
 
-- **AI-Powered Reviews**: Uses OpenCode SDK to run comprehensive code reviews
+- **First Pass Code Reviews using AI**: Uses OpenCode SDK to run comprehensive code reviews
+- **Diff, semantic or entire code base review modes**: Optimize for cost or correctness using simpler diff mode, or go all in using agent mode
 - **Antigravity Integration**: Free access to Claude and Gemini models via Google OAuth
 - **Multi-Platform VCS**: Supports GitHub PRs and GitLab MRs
 - **Interactive & Agent Modes**: Works interactively or in CI/automation pipelines
