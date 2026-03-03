@@ -110,17 +110,20 @@ export async function postGitLabMRComment(
   return { success: true }
 }
 
+export interface GitLabMRContext {
+  projectPath: string
+  baseSha: string
+  headSha: string
+  startSha: string
+}
+
 /**
- * Post an inline comment on a specific file/line in an MR.
- * Uses the GitLab API for creating diff notes.
+ * Fetch repository and MR metadata needed for line comments.
+ * Call once before a loop and pass the context to postGitLabMRLineComment.
  */
-export async function postGitLabMRLineComment(
-  mrIid: number,
-  body: string,
-  path: string,
-  newLine: number
-): Promise<{ success: boolean; error?: string }> {
-  // Get project path from current repo
+export async function getGitLabMRContext(
+  mrIid: number
+): Promise<{ success: true; context: GitLabMRContext } | { success: false; error: string }> {
   const repoResult = await exec('glab', ['repo', 'view', '-F', 'json'])
   if (repoResult.exitCode !== 0) {
     return { success: false, error: 'Failed to get repository info' }
@@ -134,7 +137,6 @@ export async function postGitLabMRLineComment(
     return { success: false, error: 'Failed to parse repository info' }
   }
 
-  // Get MR details to find the diff refs
   const mrResult = await exec('glab', [
     'api',
     `projects/${projectPath}/merge_requests/${mrIid}`,
@@ -143,23 +145,44 @@ export async function postGitLabMRLineComment(
     return { success: false, error: 'Failed to get MR details' }
   }
 
-  let baseSha: string
-  let headSha: string
-  let startSha: string
   try {
     const mrInfo = JSON.parse(mrResult.stdout)
-    baseSha = mrInfo.diff_refs?.base_sha
-    headSha = mrInfo.diff_refs?.head_sha
-    startSha = mrInfo.diff_refs?.start_sha
+    const baseSha = mrInfo.diff_refs?.base_sha
+    const headSha = mrInfo.diff_refs?.head_sha
+    const startSha = mrInfo.diff_refs?.start_sha
     if (!baseSha || !headSha || !startSha) {
       return { success: false, error: 'MR diff refs not available' }
     }
+    return { success: true, context: { projectPath, baseSha, headSha, startSha } }
   } catch {
     return { success: false, error: 'Failed to parse MR details' }
   }
+}
 
-  // Create discussion (diff note) via API
-  const apiPath = `projects/${projectPath}/merge_requests/${mrIid}/discussions`
+/**
+ * Post an inline comment on a specific file/line in an MR.
+ * Pass a pre-fetched context from getGitLabMRContext to avoid redundant API calls.
+ */
+export async function postGitLabMRLineComment(
+  mrIid: number,
+  body: string,
+  path: string,
+  newLine: number,
+  mrContext?: GitLabMRContext
+): Promise<{ success: boolean; error?: string }> {
+  let ctx: GitLabMRContext
+
+  if (mrContext) {
+    ctx = mrContext
+  } else {
+    const ctxResult = await getGitLabMRContext(mrIid)
+    if (!ctxResult.success) {
+      return { success: false, error: ctxResult.error }
+    }
+    ctx = ctxResult.context
+  }
+
+  const apiPath = `projects/${ctx.projectPath}/merge_requests/${mrIid}/discussions`
 
   const result = await exec('glab', [
     'api',
@@ -167,9 +190,9 @@ export async function postGitLabMRLineComment(
     apiPath,
     '-f', `body=${body}`,
     '-f', `position[position_type]=text`,
-    '-f', `position[base_sha]=${baseSha}`,
-    '-f', `position[head_sha]=${headSha}`,
-    '-f', `position[start_sha]=${startSha}`,
+    '-f', `position[base_sha]=${ctx.baseSha}`,
+    '-f', `position[head_sha]=${ctx.headSha}`,
+    '-f', `position[start_sha]=${ctx.startSha}`,
     '-f', `position[new_path]=${path}`,
     '-f', `position[old_path]=${path}`,
     '-F', `position[new_line]=${newLine}`,

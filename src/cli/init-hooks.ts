@@ -7,6 +7,7 @@ import { constants } from 'node:fs'
 import { confirm, select } from '@inquirer/prompts'
 import { logger } from '../utils/logger.js'
 import { isGitRepository, getRepoRoot } from '../vcs/detect.js'
+import type { OutputFormat } from '../output/types.js'
 
 export type HookType = 'pre-commit' | 'pre-push'
 export type HookScope = 'staged' | 'local'
@@ -14,7 +15,7 @@ export type HookScope = 'staged' | 'local'
 export interface InitHooksOptions {
   hookType?: HookType
   scope?: HookScope
-  format?: 'text' | 'json'
+  format?: OutputFormat
   failOnIssues?: boolean
   interactive?: boolean
 }
@@ -169,7 +170,7 @@ export async function initHooks(options?: InitHooksOptions): Promise<void> {
 /**
  * Generate standard git hook content
  */
-function generateGitHookContent(hookType: HookType, format: string): string {
+function generateGitHookContent(hookType: HookType, format: OutputFormat): string {
   const template = hookType === 'pre-commit'
     ? PRE_COMMIT_HOOK_TEMPLATE
     : PRE_PUSH_HOOK_TEMPLATE
@@ -180,7 +181,7 @@ function generateGitHookContent(hookType: HookType, format: string): string {
 /**
  * Generate Husky-compatible hook content
  */
-function generateHuskyHookContent(_hookType: HookType, format: string): string {
+function generateHuskyHookContent(_hookType: HookType, format: OutputFormat): string {
   // Note: Currently only pre-commit template exists for Husky
   // Future enhancement: Add pre-push template for Husky
   return HUSKY_PRE_COMMIT_TEMPLATE.replace(/{{FORMAT}}/g, format)
@@ -192,7 +193,7 @@ function generateHuskyHookContent(_hookType: HookType, format: string): string {
 function appendToExistingHook(
   existingContent: string,
   _hookType: HookType, // eslint-disable-line @typescript-eslint/no-unused-vars
-  format: string
+  format: OutputFormat
 ): string {
   const appendContent = `
 

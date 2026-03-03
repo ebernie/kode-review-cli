@@ -11,6 +11,8 @@ export {
   type PullRequest,
   type PullRequestInfo,
   type GitHubReviewEvent,
+  type GitHubPRContext,
+  getGitHubPRContext,
 } from './github.js'
 export {
   isGlabInstalled,
@@ -25,6 +27,8 @@ export {
   setGitLabMRApproval,
   type MergeRequest,
   type MergeRequestInfo,
+  type GitLabMRContext,
+  getGitLabMRContext,
 } from './gitlab.js'
 export {
   postReviewToPR,

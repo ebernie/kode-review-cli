@@ -357,10 +357,10 @@ function extractIssueSummary(section: string): IssueCounts | undefined {
  * Count issues by severity from a list of issues
  */
 export function countIssuesBySeverity(issues: ReviewIssue[]): IssueCounts {
-  return {
-    critical: issues.filter(i => i.severity === 'CRITICAL').length,
-    high: issues.filter(i => i.severity === 'HIGH').length,
-    medium: issues.filter(i => i.severity === 'MEDIUM').length,
-    low: issues.filter(i => i.severity === 'LOW').length,
+  const counts: IssueCounts = { critical: 0, high: 0, medium: 0, low: 0 }
+  for (const issue of issues) {
+    const key = issue.severity.toLowerCase() as keyof IssueCounts
+    counts[key]++
   }
+  return counts
 }

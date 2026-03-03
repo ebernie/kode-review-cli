@@ -119,63 +119,79 @@ export async function postGitHubPRComment(
   return { success: true }
 }
 
+export interface GitHubPRContext {
+  owner: string
+  repo: string
+  commitId: string
+}
+
+/**
+ * Fetch repository and PR metadata needed for line comments.
+ * Call once before a loop and pass the context to postGitHubPRLineComment.
+ */
+export async function getGitHubPRContext(
+  prNumber: number
+): Promise<{ success: true; context: GitHubPRContext } | { success: false; error: string }> {
+  const [repoResult, prResult] = await Promise.all([
+    exec('gh', ['repo', 'view', '--json', 'owner,name']),
+    exec('gh', ['pr', 'view', String(prNumber), '--json', 'headRefOid']),
+  ])
+
+  if (repoResult.exitCode !== 0) {
+    return { success: false, error: 'Failed to get repository info' }
+  }
+  if (prResult.exitCode !== 0) {
+    return { success: false, error: 'Failed to get PR head commit' }
+  }
+
+  try {
+    const repoInfo = JSON.parse(repoResult.stdout)
+    const prInfo = JSON.parse(prResult.stdout)
+    return {
+      success: true,
+      context: {
+        owner: repoInfo.owner.login,
+        repo: repoInfo.name,
+        commitId: prInfo.headRefOid,
+      },
+    }
+  } catch {
+    return { success: false, error: 'Failed to parse repository or PR info' }
+  }
+}
+
 /**
  * Post an inline comment on a specific file/line in a PR review.
- * Note: This creates a pending review comment that must be submitted with submitGitHubPRReview.
- * For standalone comments, use the REST API via gh api.
+ * Pass a pre-fetched context from getGitHubPRContext to avoid redundant API calls.
  */
 export async function postGitHubPRLineComment(
   prNumber: number,
   body: string,
   path: string,
   line: number,
-  side: 'LEFT' | 'RIGHT' = 'RIGHT'
+  side: 'LEFT' | 'RIGHT' = 'RIGHT',
+  prContext?: GitHubPRContext
 ): Promise<{ success: boolean; error?: string }> {
-  // Get the repository info
-  const repoResult = await exec('gh', ['repo', 'view', '--json', 'owner,name'])
-  if (repoResult.exitCode !== 0) {
-    return { success: false, error: 'Failed to get repository info' }
+  let ctx: GitHubPRContext
+
+  if (prContext) {
+    ctx = prContext
+  } else {
+    const ctxResult = await getGitHubPRContext(prNumber)
+    if (!ctxResult.success) {
+      return { success: false, error: ctxResult.error }
+    }
+    ctx = ctxResult.context
   }
 
-  let owner: string
-  let repo: string
-  try {
-    const repoInfo = JSON.parse(repoResult.stdout)
-    owner = repoInfo.owner.login
-    repo = repoInfo.name
-  } catch {
-    return { success: false, error: 'Failed to parse repository info' }
-  }
-
-  // Get the PR's head commit SHA
-  const prResult = await exec('gh', [
-    'pr',
-    'view',
-    String(prNumber),
-    '--json',
-    'headRefOid',
-  ])
-  if (prResult.exitCode !== 0) {
-    return { success: false, error: 'Failed to get PR head commit' }
-  }
-
-  let commitId: string
-  try {
-    const prInfo = JSON.parse(prResult.stdout)
-    commitId = prInfo.headRefOid
-  } catch {
-    return { success: false, error: 'Failed to parse PR head commit' }
-  }
-
-  // Create the review comment via GitHub API
-  const apiPath = `repos/${owner}/${repo}/pulls/${prNumber}/comments`
+  const apiPath = `repos/${ctx.owner}/${ctx.repo}/pulls/${prNumber}/comments`
 
   const result = await exec('gh', [
     'api',
     '-X', 'POST',
     apiPath,
     '-f', `body=${body}`,
-    '-f', `commit_id=${commitId}`,
+    '-f', `commit_id=${ctx.commitId}`,
     '-f', `path=${path}`,
     '-F', `line=${line}`,
     '-f', `side=${side}`,

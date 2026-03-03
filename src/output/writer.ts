@@ -14,21 +14,7 @@ export async function writeReviewOutput(
   review: ReviewOutput,
   options: WriteOptions
 ): Promise<void> {
-  // Format the output based on format option
-  let formattedContent: string
-
-  switch (options.format) {
-    case 'json':
-      formattedContent = formatAsJson(review, { includeMetadata: true })
-      break
-    case 'markdown':
-      formattedContent = formatAsMarkdown(review, { includeMetadata: true })
-      break
-    case 'text':
-    default:
-      formattedContent = formatAsText(review)
-      break
-  }
+  const formattedContent = getFormattedContent(review, options.format)
 
   // Write to file if specified
   if (options.outputFile) {

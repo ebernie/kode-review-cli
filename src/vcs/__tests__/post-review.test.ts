@@ -1,24 +1,39 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { StructuredReview } from '../../output/types.js'
 
-// Create module-level mocks
-const mockPostGitHubPRComment = vi.fn()
-const mockPostGitHubPRLineComment = vi.fn()
-const mockSubmitGitHubPRReview = vi.fn()
-const mockPostGitLabMRComment = vi.fn()
-const mockPostGitLabMRLineComment = vi.fn()
-const mockSetGitLabMRApproval = vi.fn()
+// Hoist mocks so they're available when vi.mock factories run (vitest hoists vi.mock calls)
+const {
+  mockPostGitHubPRComment,
+  mockPostGitHubPRLineComment,
+  mockGetGitHubPRContext,
+  mockSubmitGitHubPRReview,
+  mockPostGitLabMRComment,
+  mockPostGitLabMRLineComment,
+  mockGetGitLabMRContext,
+  mockSetGitLabMRApproval,
+} = vi.hoisted(() => ({
+  mockPostGitHubPRComment: vi.fn(),
+  mockPostGitHubPRLineComment: vi.fn(),
+  mockGetGitHubPRContext: vi.fn(),
+  mockSubmitGitHubPRReview: vi.fn(),
+  mockPostGitLabMRComment: vi.fn(),
+  mockPostGitLabMRLineComment: vi.fn(),
+  mockGetGitLabMRContext: vi.fn(),
+  mockSetGitLabMRApproval: vi.fn(),
+}))
 
 // Mock the VCS modules before importing
 vi.mock('../github.js', () => ({
   postGitHubPRComment: mockPostGitHubPRComment,
   postGitHubPRLineComment: mockPostGitHubPRLineComment,
+  getGitHubPRContext: mockGetGitHubPRContext,
   submitGitHubPRReview: mockSubmitGitHubPRReview,
 }))
 
 vi.mock('../gitlab.js', () => ({
   postGitLabMRComment: mockPostGitLabMRComment,
   postGitLabMRLineComment: mockPostGitLabMRLineComment,
+  getGitLabMRContext: mockGetGitLabMRContext,
   setGitLabMRApproval: mockSetGitLabMRApproval,
 }))
 
@@ -84,6 +99,19 @@ const mockReview: StructuredReview = {
 describe('postReviewToPR', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Default mocks for inline comment support
+    mockGetGitHubPRContext.mockResolvedValue({
+      success: true,
+      context: { owner: 'test-owner', repo: 'test-repo', commitId: 'abc123' },
+    })
+    mockGetGitLabMRContext.mockResolvedValue({
+      success: true,
+      context: { projectPath: 'test%2Fproject', baseSha: 'base', headSha: 'head', startSha: 'start' },
+    })
+    mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
+    mockPostGitLabMRLineComment.mockResolvedValue({ success: true })
+    mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
+    mockSetGitLabMRApproval.mockResolvedValue({ success: true })
   })
 
   afterEach(() => {
@@ -96,7 +124,7 @@ describe('postReviewToPR', () => {
       mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
       })
@@ -111,7 +139,7 @@ describe('postReviewToPR', () => {
       mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
         postInlineComments: true,
@@ -121,12 +149,14 @@ describe('postReviewToPR', () => {
       expect(result.inlineCommentsPosted).toBe(2)
       expect(mockPostGitHubPRLineComment).toHaveBeenCalledTimes(2)
 
-      // Verify first inline comment
+      // Verify first inline comment (includes side and pre-fetched context)
       expect(mockPostGitHubPRLineComment).toHaveBeenCalledWith(
         42,
         expect.stringContaining('SQL injection'),
         'src/db.ts',
-        45
+        45,
+        'RIGHT',
+        expect.objectContaining({ owner: 'test-owner', repo: 'test-repo' })
       )
     })
 
@@ -135,7 +165,7 @@ describe('postReviewToPR', () => {
       mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
         setApprovalStatus: true,
@@ -155,7 +185,7 @@ describe('postReviewToPR', () => {
         verdict: { ...mockReview.verdict, recommendation: 'APPROVE' },
       }
 
-      await postReviewToPR(approvedReview, 'raw content', {
+      await postReviewToPR(approvedReview, {
         prNumber: 42,
         platform: 'github',
         setApprovalStatus: true,
@@ -165,7 +195,7 @@ describe('postReviewToPR', () => {
     })
 
     it('returns error when PR number is missing', async () => {
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         platform: 'github',
       })
 
@@ -179,7 +209,7 @@ describe('postReviewToPR', () => {
         error: 'Network error',
       })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
       })
@@ -194,7 +224,7 @@ describe('postReviewToPR', () => {
       mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
-      await postReviewToPR(mockReview, 'raw content', {
+      await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
         postInlineComments: true,
@@ -209,7 +239,7 @@ describe('postReviewToPR', () => {
       mockPostGitHubPRComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
-      await postReviewToPR(mockReview, 'raw content', {
+      await postReviewToPR(mockReview, {
         prNumber: 42,
         platform: 'github',
         postInlineComments: false,
@@ -225,7 +255,7 @@ describe('postReviewToPR', () => {
       mockPostGitLabMRLineComment.mockResolvedValue({ success: true })
       mockSetGitLabMRApproval.mockResolvedValue({ success: true })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         mrIid: 123,
         platform: 'gitlab',
       })
@@ -240,7 +270,7 @@ describe('postReviewToPR', () => {
       mockPostGitLabMRLineComment.mockResolvedValue({ success: true })
       mockSetGitLabMRApproval.mockResolvedValue({ success: true })
 
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         mrIid: 123,
         platform: 'gitlab',
         postInlineComments: true,
@@ -259,7 +289,7 @@ describe('postReviewToPR', () => {
         verdict: { ...mockReview.verdict, recommendation: 'APPROVE' },
       }
 
-      await postReviewToPR(approvedReview, 'raw content', {
+      await postReviewToPR(approvedReview, {
         mrIid: 123,
         platform: 'gitlab',
         setApprovalStatus: true,
@@ -273,7 +303,7 @@ describe('postReviewToPR', () => {
       mockPostGitLabMRComment.mockResolvedValue({ success: true })
       mockSetGitLabMRApproval.mockResolvedValue({ success: true })
 
-      await postReviewToPR(mockReview, 'raw content', {
+      await postReviewToPR(mockReview, {
         mrIid: 123,
         platform: 'gitlab',
         setApprovalStatus: true,
@@ -285,7 +315,7 @@ describe('postReviewToPR', () => {
     })
 
     it('returns error when MR IID is missing', async () => {
-      const result = await postReviewToPR(mockReview, 'raw content', {
+      const result = await postReviewToPR(mockReview, {
         platform: 'gitlab',
       })
 

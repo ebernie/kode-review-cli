@@ -8,17 +8,28 @@ import type {
   FormatterOptions,
   IssueCounts,
   Severity,
+  Verdict,
 } from './types.js'
 import { countIssuesBySeverity } from './parser.js'
 
 /**
  * Severity icons for visual formatting
  */
-const SEVERITY_ICONS: Record<Severity, string> = {
+export const SEVERITY_ICONS: Record<Severity, string> = {
   CRITICAL: '🔴',
   HIGH: '🟠',
   MEDIUM: '🟡',
   LOW: '🔵',
+}
+
+const SEVERITY_ORDER: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+
+function getVerdictIcon(recommendation: Verdict): string {
+  return recommendation === 'APPROVE'
+    ? '✅'
+    : recommendation === 'REQUEST_CHANGES'
+    ? '❌'
+    : '⚠️'
 }
 
 /**
@@ -118,9 +129,8 @@ export function formatAsMarkdown(
 
   // Issues
   const issueCounts = countIssuesBySeverity(structured.issues)
-  const totalIssues = Object.values(issueCounts).reduce((a, b) => a + b, 0)
 
-  parts.push(`## Issues Found (${totalIssues})`)
+  parts.push(`## Issues Found (${structured.issues.length})`)
   parts.push('')
 
   if (structured.issues.length === 0) {
@@ -132,7 +142,7 @@ export function formatAsMarkdown(
     parts.push('')
 
     // Group and display issues by severity
-    const severityOrder: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+    const severityOrder = SEVERITY_ORDER
     for (const severity of severityOrder) {
       const issuesForSeverity = structured.issues.filter(i => i.severity === severity)
       if (issuesForSeverity.length > 0) {
@@ -280,12 +290,7 @@ function formatVerdictMarkdown(
   const parts: string[] = []
 
   // Recommendation with visual indicator
-  const recIndicator =
-    verdict.recommendation === 'APPROVE'
-      ? '✅'
-      : verdict.recommendation === 'REQUEST_CHANGES'
-      ? '❌'
-      : '⚠️'
+  const recIndicator = getVerdictIcon(verdict.recommendation)
 
   parts.push(`**Recommendation:** ${recIndicator} ${verdict.recommendation}`)
   parts.push('')
@@ -353,7 +358,7 @@ export function formatForPRComment(
     parts.push('<summary>📋 Issues Found</summary>')
     parts.push('')
 
-    const severityOrder: Severity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
+    const severityOrder = SEVERITY_ORDER
     for (const severity of severityOrder) {
       const issuesForSeverity = review.issues.filter(i => i.severity === severity)
       for (const issue of issuesForSeverity) {
@@ -377,12 +382,7 @@ export function formatForPRComment(
   }
 
   // Verdict
-  const recIndicator =
-    review.verdict.recommendation === 'APPROVE'
-      ? '✅'
-      : review.verdict.recommendation === 'REQUEST_CHANGES'
-      ? '❌'
-      : '⚠️'
+  const recIndicator = getVerdictIcon(review.verdict.recommendation)
 
   parts.push(`### Verdict: ${recIndicator} ${review.verdict.recommendation.replace(/_/g, ' ')}`)
   parts.push('')

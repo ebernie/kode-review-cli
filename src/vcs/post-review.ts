@@ -3,17 +3,21 @@
  */
 import { logger } from '../utils/logger.js'
 import type { StructuredReview, ReviewIssue, Verdict } from '../output/types.js'
-import { formatForPRComment } from '../output/formatters.js'
+import { formatForPRComment, SEVERITY_ICONS } from '../output/formatters.js'
 import {
   postGitHubPRComment,
   postGitHubPRLineComment,
+  getGitHubPRContext,
   submitGitHubPRReview,
   type GitHubReviewEvent,
+  type GitHubPRContext,
 } from './github.js'
 import {
   postGitLabMRComment,
   postGitLabMRLineComment,
+  getGitLabMRContext,
   setGitLabMRApproval,
+  type GitLabMRContext,
 } from './gitlab.js'
 
 export type Platform = 'github' | 'gitlab'
@@ -46,7 +50,6 @@ export interface PostReviewResult {
  */
 export async function postReviewToPR(
   review: StructuredReview,
-  rawContent: string,
   options: PostReviewOptions
 ): Promise<PostReviewResult> {
   const result: PostReviewResult = {
@@ -105,17 +108,26 @@ export async function postReviewToPR(
     if (issuesWithLocation.length > 0) {
       logger.info(`Posting ${issuesWithLocation.length} inline comment(s)...`)
 
-      for (const issue of issuesWithLocation) {
-        const inlineBody = formatInlineComment(issue)
-        const inlineResult = platform === 'github'
-          ? await postGitHubPRLineComment(identifier, inlineBody, issue.file!, issue.line!)
-          : await postGitLabMRLineComment(identifier, inlineBody, issue.file!, issue.line!)
+      // Pre-fetch context once to avoid N+1 API calls
+      const ctxResult = platform === 'github'
+        ? await getGitHubPRContext(identifier)
+        : await getGitLabMRContext(identifier)
 
-        if (inlineResult.success) {
-          result.inlineCommentsPosted++
-        } else {
-          // Don't fail the whole operation for inline comment failures
-          logger.debug(`Failed to post inline comment: ${inlineResult.error}`)
+      if (!ctxResult.success) {
+        logger.debug(`Failed to fetch PR/MR context for inline comments: ${ctxResult.error}`)
+      } else {
+        const ctx = ctxResult.context
+        for (const issue of issuesWithLocation) {
+          const inlineBody = formatInlineComment(issue)
+          const inlineResult = platform === 'github'
+            ? await postGitHubPRLineComment(identifier, inlineBody, issue.file!, issue.line!, 'RIGHT', ctx as GitHubPRContext)
+            : await postGitLabMRLineComment(identifier, inlineBody, issue.file!, issue.line!, ctx as GitLabMRContext)
+
+          if (inlineResult.success) {
+            result.inlineCommentsPosted++
+          } else {
+            logger.debug(`Failed to post inline comment: ${inlineResult.error}`)
+          }
         }
       }
 
@@ -130,8 +142,7 @@ export async function postReviewToPR(
     const approvalResult = await setApprovalStatusForReview(
       identifier,
       platform,
-      review.verdict.recommendation,
-      rawContent
+      review.verdict.recommendation
     )
 
     if (approvalResult.success) {
@@ -153,15 +164,7 @@ export async function postReviewToPR(
 function formatInlineComment(issue: ReviewIssue): string {
   const parts: string[] = []
 
-  // Severity icon
-  const icons = {
-    CRITICAL: '🔴',
-    HIGH: '🟠',
-    MEDIUM: '🟡',
-    LOW: '🔵',
-  }
-
-  parts.push(`${icons[issue.severity]} **${issue.severity}**: ${issue.title}`)
+  parts.push(`${SEVERITY_ICONS[issue.severity]} **${issue.severity}**: ${issue.title}`)
   parts.push('')
   parts.push(issue.description)
 
@@ -185,8 +188,7 @@ function formatInlineComment(issue: ReviewIssue): string {
 async function setApprovalStatusForReview(
   identifier: number,
   platform: Platform,
-  verdict: Verdict,
-  _reviewBody: string // eslint-disable-line @typescript-eslint/no-unused-vars
+  verdict: Verdict
 ): Promise<{ success: boolean; error?: string }> {
   if (platform === 'github') {
     // Map verdict to GitHub review event

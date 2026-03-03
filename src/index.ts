@@ -46,7 +46,6 @@ import { startWatchMode, type WatchConfig, type Platform } from './watch/index.j
 import {
   parseReviewContent,
   writeReviewOutput,
-  getFormattedContent,
   type ReviewOutput,
 } from './output/index.js'
 import {
@@ -723,7 +722,6 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           const fileCount = parsedDiff.fileChanges.size
 
           if (fileCount > 0 && repoRoot) {
-            const branch = await getCurrentBranch()
             const { enqueued, job } = maybeEnqueueBackgroundIndexing({
               repoUrl,
               repoPath: repoRoot,
@@ -922,22 +920,15 @@ async function processReviewOutput(
     }
   }
 
-  // Get formatted output based on format option
-  const formattedOutput = getFormattedContent(reviewOutput, options.format)
+  // Write to file and/or stdout via unified writer
+  await writeReviewOutput(reviewOutput, {
+    format: options.format,
+    outputFile: options.outputFile,
+    quiet: options.outputFile ? ctx.quiet : false,
+  })
 
-  // Write to file if output file specified
   if (options.outputFile) {
-    await writeReviewOutput(reviewOutput, {
-      format: options.format,
-      outputFile: options.outputFile,
-      quiet: options.quiet,
-    })
     logger.success(`Review written to ${options.outputFile}`)
-  }
-
-  // Display output (unless writing to file and quiet mode)
-  if (!options.outputFile || !ctx.quiet) {
-    console.log(formattedOutput)
   }
 
   // Display completion banner
@@ -968,7 +959,6 @@ async function processReviewOutput(
 
     const postResult = await postReviewToPR(
       reviewOutput.structured,
-      rawContent,
       {
         prNumber: prMr.platform === 'github' ? prMr.id : undefined,
         mrIid: prMr.platform === 'gitlab' ? prMr.id : undefined,
