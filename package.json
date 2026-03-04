@@ -1,6 +1,6 @@
 {
   "name": "@kofikode/kode-review-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "AI-powered code review CLI using OpenCode SDK with Antigravity support",
   "type": "module",
   "main": "dist/index.js",
