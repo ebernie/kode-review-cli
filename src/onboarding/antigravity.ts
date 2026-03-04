@@ -3,7 +3,6 @@ import ora from 'ora'
 import { exec, execInteractive, commandExists } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
 import { updateConfig } from '../config/index.js'
-import { ANTIGRAVITY_MODELS } from '../config/schema.js'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
 import { homedir, platform } from 'os'
@@ -11,6 +10,84 @@ import { join } from 'path'
 
 const PLUGIN_NPM_PACKAGE = 'opencode-antigravity-auth'
 const PLUGIN_CONFIG_NAME = 'opencode-antigravity-auth@beta'
+const PLUGIN_MODELS_RELATIVE_PATH = 'opencode-antigravity-auth/dist/src/plugin/config/models.js'
+
+interface PluginModelDef {
+  name: string
+  limit: { context: number; output: number }
+  modalities: { input: string[]; output: string[] }
+  variants?: Record<string, Record<string, unknown>>
+}
+
+/**
+ * Resolve the absolute path to the plugin's models.js from the npm global root.
+ */
+async function resolvePluginModelsPath(): Promise<string | null> {
+  try {
+    // exec here is the project's execa-based wrapper (array args, no shell injection)
+    const result = await exec('npm', ['root', '-g'])
+    if (result.exitCode !== 0) return null
+    const globalRoot = result.stdout.trim()
+    const modelsPath = join(globalRoot, PLUGIN_MODELS_RELATIVE_PATH)
+    return existsSync(modelsPath) ? modelsPath : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Load model definitions directly from the installed plugin's models.js file.
+ * The file is self-contained (no imports), so we can safely evaluate it.
+ */
+async function loadPluginModelDefinitions(): Promise<Record<string, PluginModelDef> | null> {
+  const modelsPath = await resolvePluginModelsPath()
+  if (!modelsPath) return null
+
+  try {
+    const content = await readFile(modelsPath, 'utf-8')
+    // Strip ESM export keywords and source map comment, then evaluate
+    const cleaned = content
+      .replace(/^export\s+/gm, '')
+      .replace(/\/\/# sourceMappingURL.*$/m, '')
+    const fn = new Function(cleaned + '; return OPENCODE_MODEL_DEFINITIONS;')
+    return fn() as Record<string, PluginModelDef>
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Sync the plugin's model definitions into opencode.json's provider.google.models.
+ * This ensures the config always has the latest models from the installed plugin.
+ */
+async function syncPluginModelsToConfig(): Promise<boolean> {
+  const definitions = await loadPluginModelDefinitions()
+  if (!definitions) return false
+
+  try {
+    const configPath = join(getOpenCodeConfigDir(), 'opencode.json')
+    let config: Record<string, unknown> = {}
+
+    if (existsSync(configPath)) {
+      const content = await readFile(configPath, 'utf-8')
+      config = JSON.parse(content)
+    }
+
+    // Ensure provider.google.models structure exists
+    if (!config.provider) config.provider = {}
+    const provider = config.provider as Record<string, unknown>
+    if (!provider.google) provider.google = {}
+    const google = provider.google as Record<string, unknown>
+
+    // Replace models entirely with the plugin's definitions
+    google.models = { ...definitions }
+
+    await writeFile(configPath, JSON.stringify(config, null, 2))
+    return true
+  } catch {
+    return false
+  }
+}
 
 /**
  * Get the OpenCode config directory path (platform-aware)
@@ -169,32 +246,11 @@ export async function installAntigravityPlugin(): Promise<boolean> {
       pluginArray.push(PLUGIN_CONFIG_NAME)
     }
 
-    // Add model definitions under google provider
-    if (!config.provider) {
-      config.provider = {}
-    }
-
-    const provider = config.provider as Record<string, unknown>
-    if (!provider.google) {
-      provider.google = {}
-    }
-
-    const google = provider.google as Record<string, unknown>
-    if (!google.models) {
-      google.models = {}
-    }
-
-    const models = google.models as Record<string, unknown>
-
-    // Add Antigravity models
-    for (const [modelId, modelDef] of Object.entries(ANTIGRAVITY_MODELS)) {
-      if (!models[modelId]) {
-        models[modelId] = modelDef
-      }
-    }
-
     // Write updated config
     await writeFile(configPath, JSON.stringify(config, null, 2))
+
+    // Sync the plugin's latest model definitions into opencode.json
+    await syncPluginModelsToConfig()
 
     spinner.succeed('Antigravity plugin configured')
     return true
@@ -265,30 +321,40 @@ export async function authenticateAntigravity(): Promise<boolean> {
   return false
 }
 
-/**
- * Get available Antigravity models for selection
- */
-export function getAntigravityModelChoices(): { name: string; value: string }[] {
-  return Object.entries(ANTIGRAVITY_MODELS).map(([id, def]) => ({
-    name: def.name,
-    value: id,
-  }))
+interface AntigravityModelInfo {
+  id: string
+  name: string
+  variants: Record<string, Record<string, unknown>>
 }
 
 /**
- * Get variant choices for a model
+ * Load Antigravity model definitions from the installed plugin package.
+ * Reads the plugin's models.js directly — no ephemeral server needed.
  */
-export function getVariantChoices(modelId: string): { name: string; value: string }[] | null {
-  const model = ANTIGRAVITY_MODELS[modelId]
+async function fetchAntigravityModels(): Promise<AntigravityModelInfo[]> {
+  const spinner = ora('Loading available Antigravity models...').start()
 
-  if (!model || !model.variants) {
-    return null
+  const definitions = await loadPluginModelDefinitions()
+  if (!definitions) {
+    spinner.fail('Could not read model definitions from the Antigravity plugin')
+    return []
   }
 
-  return Object.keys(model.variants).map((v) => ({
-    name: v,
-    value: v,
-  }))
+  const models: AntigravityModelInfo[] = []
+
+  for (const [id, def] of Object.entries(definitions)) {
+    // Only include antigravity-prefixed models
+    if (!id.startsWith('antigravity-')) continue
+
+    models.push({
+      id,
+      name: def.name,
+      variants: def.variants ?? {},
+    })
+  }
+
+  spinner.succeed(`Found ${models.length} Antigravity model(s)`)
+  return models
 }
 
 /**
@@ -296,9 +362,8 @@ export function getVariantChoices(modelId: string): { name: string; value: strin
  */
 export async function setupAntigravity(): Promise<boolean> {
   console.log('')
-  console.log('Antigravity provides free access to premium models via Google OAuth:')
-  console.log('  - Claude Sonnet 4.5 / Opus 4.5 (with thinking)')
-  console.log('  - Gemini 3 Pro / Flash')
+  console.log('Antigravity provides free access to premium AI models via Google OAuth.')
+  console.log('Available models will be shown after setup.')
   console.log('')
 
   const proceed = await confirm({
@@ -318,6 +383,8 @@ export async function setupAntigravity(): Promise<boolean> {
     if (!success) return false
   } else {
     logger.info('Antigravity plugin already configured')
+    // Sync model definitions in case the plugin was upgraded
+    await syncPluginModelsToConfig()
   }
 
   // Check if already authenticated
@@ -339,24 +406,39 @@ export async function setupAntigravity(): Promise<boolean> {
     }
   }
 
-  // Select model
-  const modelChoices = getAntigravityModelChoices()
+  // Fetch live models from the OpenCode SDK
+  const models = await fetchAntigravityModels()
+
+  if (models.length === 0) {
+    logger.error('No Antigravity models available. The plugin may not be loaded correctly.')
+    logger.info('Try restarting the setup with: kode-review --setup-provider')
+    return false
+  }
+
+  // Build model choices from live data
+  const modelChoices = models.map((m) => ({
+    name: m.name,
+    value: m.id,
+  }))
 
   const selectedModel = await select({
     message: 'Select Antigravity model:',
     choices: modelChoices,
-    default: 'antigravity-claude-sonnet-4-5-thinking',
   })
 
-  // Select variant if available
-  const variantChoices = getVariantChoices(selectedModel)
+  // Build variant choices from the selected model's variants
+  const selectedModelInfo = models.find((m) => m.id === selectedModel)
   let selectedVariant: string | undefined
 
-  if (variantChoices) {
+  if (selectedModelInfo && Object.keys(selectedModelInfo.variants).length > 0) {
+    const variantChoices = Object.keys(selectedModelInfo.variants).map((v) => ({
+      name: v,
+      value: v,
+    }))
+
     selectedVariant = await select({
       message: 'Select thinking variant:',
       choices: variantChoices,
-      default: 'max',
     })
   }
 

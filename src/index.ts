@@ -12,6 +12,7 @@ import {
   isOnboardingComplete,
   resetConfig,
   getConfig,
+  updateConfig,
 } from './config/index.js'
 import { runOnboardingWizard, runProviderSetup, setupVcs } from './onboarding/index.js'
 import {
@@ -988,6 +989,30 @@ async function processReviewOutput(
   }
 }
 
+/**
+ * Mapping of deprecated Antigravity model IDs to their replacements.
+ * When a user's configured model is deprecated, it's automatically migrated.
+ */
+const DEPRECATED_MODEL_MIGRATIONS: Record<string, string> = {
+  'antigravity-gemini-3-pro': 'antigravity-gemini-3.1-pro',
+  'antigravity-claude-sonnet-4-5-thinking': 'antigravity-claude-sonnet-4-6-thinking',
+  'antigravity-claude-sonnet-4-5': 'antigravity-claude-sonnet-4-6',
+  'antigravity-claude-opus-4-5-thinking': 'antigravity-claude-opus-4-6-thinking',
+}
+
+/**
+ * Check if the configured model is deprecated and auto-migrate to its replacement.
+ */
+function migrateDeprecatedModel(): void {
+  const config = getConfig()
+  const replacement = DEPRECATED_MODEL_MIGRATIONS[config.model]
+
+  if (replacement) {
+    logger.warn(`Model "${config.model}" has been deprecated. Migrating to "${replacement}".`)
+    updateConfig({ model: replacement })
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv)
   const ctx = createContext(options)
@@ -1027,6 +1052,9 @@ async function main(): Promise<void> {
         )
       }
     }
+
+    // Auto-migrate deprecated Antigravity models
+    migrateDeprecatedModel()
 
     // Check if watch mode requested
     if (options.watch) {
