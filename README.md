@@ -456,17 +456,14 @@ Automatically run code reviews before commits or pushes.
 ### Quick Setup
 
 ```bash
-# Generate a pre-commit hook
+# Generate a pre-commit hook (interactive — prompts for hook type)
 kode-review --init-hooks
-
-# Choose hook type interactively, or specify:
-kode-review --init-hooks --hook-type pre-push
 ```
 
 The `--init-hooks` command:
+- Prompts to select hook type (`pre-commit` or `pre-push`)
 - Detects Husky and generates compatible hooks
 - Creates executable hook scripts in `.git/hooks/` or `.husky/`
-- Supports `pre-commit` and `pre-push` hook types
 - Warns before overwriting existing hooks
 
 ### Manual Hook Example
@@ -546,6 +543,40 @@ kode-review --scope pr --pr 123 --post-to-pr --quiet
 |----------|-------------|
 | `OPENCODE_SERVER_URL` | Attach to running OpenCode server |
 | `OPENCODE_MODEL` | Default model override |
+
+---
+
+## Releasing
+
+Releases are automated with [release-it](https://github.com/release-it/release-it) and [conventional-changelog](https://github.com/conventional-changelog/conventional-changelog). Version bumps, changelog generation, git tags, and pushing are handled in a single command.
+
+### Commit Convention
+
+This project follows [Conventional Commits](https://www.conventionalcommits.org/). The commit prefix determines the version bump:
+
+| Prefix | Version Bump | Example |
+|--------|-------------|---------|
+| `feat:` | Minor (0.x.0) | `feat: add dark mode support` |
+| `fix:` | Patch (0.0.x) | `fix: correct timeout handling` |
+| `BREAKING CHANGE` in footer | Major (x.0.0) | Body contains `BREAKING CHANGE: removed --json flag` |
+| `chore:`, `refactor:`, `docs:`, etc. | No bump | Not included in changelog |
+
+### Cutting a Release
+
+```bash
+# Preview what will happen (no changes made)
+bun run release:dry
+
+# Run the release (bumps version, updates CHANGELOG.md, commits, tags, pushes)
+bun run release
+```
+
+The release command will:
+1. Determine the next version from commits since the last tag
+2. Update `version` in `package.json`
+3. Prepend new entries to `CHANGELOG.md`
+4. Create a git commit (`chore: release vX.Y.Z`) and tag (`vX.Y.Z`)
+5. Push the commit and tag to the remote
 
 ---
 
