@@ -1,8 +1,13 @@
 import { defineConfig } from 'tsup'
-import { copyFileSync, mkdirSync, existsSync } from 'fs'
+import { copyFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 
+const pkg = JSON.parse(readFileSync('package.json', 'utf-8'))
+
 export default defineConfig({
+  define: {
+    'PKG_VERSION': JSON.stringify(pkg.version),
+  },
   entry: [
     'src/index.ts',
     'src/mcp/kode-review-mcp.ts', // MCP server entry point for agentic mode

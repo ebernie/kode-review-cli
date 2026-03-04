@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release": "release-it",
+    "release:dry": "release-it --dry-run"
   },
   "keywords": [
     "code-review",
@@ -49,11 +51,13 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
+    "@release-it/conventional-changelog": "^10.0.5",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.53.1",
     "@typescript-eslint/parser": "^8.53.1",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
+    "release-it": "^19.2.4",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0"

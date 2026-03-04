@@ -1,6 +1,8 @@
 import { Command } from 'commander'
 import type { OutputFormat } from '../output/types.js'
 
+declare const PKG_VERSION: string
+
 export type ReviewScope = 'local' | 'pr' | 'both' | 'auto'
 
 export interface CliOptions {
@@ -72,7 +74,7 @@ export function createProgram(): Command {
   program
     .name('kode-review')
     .description('AI-powered code review CLI using OpenCode SDK')
-    .version('0.1.0')
+    .version(PKG_VERSION)
 
   // Review options
   program
