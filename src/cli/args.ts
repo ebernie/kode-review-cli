@@ -66,6 +66,9 @@ export interface CliOptions {
   // Info commands
   showConfig: boolean
   doctor: boolean
+
+  // Update command
+  update: boolean
 }
 
 export function createProgram(): Command {
@@ -148,6 +151,10 @@ export function createProgram(): Command {
   program
     .option('--show-config', 'Display current configuration', false)
     .option('--doctor', 'Run system diagnostics', false)
+
+  // Update command
+  program
+    .option('--update', 'Check for and install the latest version', false)
 
   return program
 }
@@ -234,5 +241,6 @@ export function parseArgs(argv: string[]): CliOptions {
     agenticTimeout,
     showConfig: opts.showConfig ?? false,
     doctor: opts.doctor ?? false,
+    update: opts.update ?? false,
   }
 }

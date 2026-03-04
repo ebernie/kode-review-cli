@@ -5,6 +5,7 @@ import { createContext, type CliContext } from './cli/interactive.js'
 import { showConfig } from './cli/show-config.js'
 import { runDiagnostics, printDiagnostics } from './cli/doctor.js'
 import { initHooks } from './cli/init-hooks.js'
+import { runUpdate, checkForUpdateNotification } from './cli/update.js'
 import { cyan, green } from './cli/colors.js'
 import { logger, setQuietMode } from './utils/logger.js'
 import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
@@ -67,6 +68,12 @@ import {
 } from './indexer/index.js'
 
 async function handleSetupCommands(options: CliOptions): Promise<boolean> {
+  // Update command (works without onboarding)
+  if (options.update) {
+    await runUpdate()
+    return true
+  }
+
   // Info commands (no side effects, can run without onboarding)
   if (options.showConfig) {
     showConfig({ json: options.json })
@@ -1055,6 +1062,9 @@ async function main(): Promise<void> {
 
     // Auto-migrate deprecated Antigravity models
     migrateDeprecatedModel()
+
+    // Non-blocking daily update check (fire-and-forget)
+    checkForUpdateNotification().catch(() => {})
 
     // Check if watch mode requested
     if (options.watch) {

@@ -75,6 +75,16 @@ export const IndexerConfigSchema = z.object({
 })
 
 /**
+ * Updater configuration for self-update tracking
+ */
+export const UpdaterConfigSchema = z.object({
+  /** ISO timestamp of the last version check, empty string if never checked */
+  lastCheckedAt: z.string().default(''),
+  /** The latest version seen in the last check, empty string if unknown */
+  latestKnownVersion: z.string().default(''),
+})
+
+/**
  * Main configuration schema
  */
 export const ConfigSchema = z.object({
@@ -97,6 +107,9 @@ export const ConfigSchema = z.object({
   // Indexer integration
   indexer: IndexerConfigSchema.default({}),
 
+  // Updater
+  updater: UpdaterConfigSchema.default({}),
+
   // State
   onboardingComplete: z.boolean().default(false),
 })
@@ -105,6 +118,7 @@ export type Config = z.infer<typeof ConfigSchema>
 export type VcsConfig = z.infer<typeof VcsConfigSchema>
 export type IndexerConfigType = z.infer<typeof IndexerConfigSchema>
 export type FileTypeStrategyOverridesType = z.infer<typeof FileTypeStrategyOverridesSchema>
+export type UpdaterConfig = z.infer<typeof UpdaterConfigSchema>
 
 /**
  * Default configuration

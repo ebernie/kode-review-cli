@@ -16,6 +16,7 @@ export type ErrorCategory =
   | 'vcs'      // VCS (GitHub/GitLab) related issues
   | 'indexer'  // Semantic indexer issues
   | 'review'   // Code review execution issues
+  | 'update'   // Self-update issues
   | 'unknown'  // Uncategorized errors
 
 /**
@@ -130,6 +131,8 @@ function getRecoveryHint(error: unknown, category: ErrorCategory): string | unde
       return 'Run "kode-review --index-status" to check indexer status.'
     case 'review':
       return 'Try running with --verbose for more details.'
+    case 'update':
+      return 'Try running "git pull && bun install && bun run build" manually in the installation directory.'
     default:
       return undefined
   }
@@ -317,6 +320,7 @@ export function getCategoryLabel(category: ErrorCategory): string {
     vcs: 'VCS Error',
     indexer: 'Indexer Error',
     review: 'Review Error',
+    update: 'Update Error',
     unknown: 'Error',
   }
   return labels[category]

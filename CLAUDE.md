@@ -26,7 +26,7 @@ bun run build && node dist/index.js   # Build and run
 ## Architecture
 
 ### Entry Flow
-`bin/kode-review.js` → `src/index.ts` → CLI parsing → onboarding check → platform detection → review execution
+`bin/kode-review.js` → `src/index.ts` → CLI parsing → setup/update commands → onboarding check → update notification → platform detection → review execution
 
 The main entry point (`src/index.ts`) orchestrates three main flows:
 1. **Setup commands** (`--setup`, `--reset`, `--setup-provider`, `--setup-vcs`)
@@ -37,7 +37,7 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 
 | Module | Purpose |
 |--------|---------|
-| `src/cli/` | CLI argument parsing (Commander), colors (Chalk), interactive context |
+| `src/cli/` | CLI argument parsing (Commander), colors (Chalk), interactive context, self-update (`update.ts`) |
 | `src/config/` | Zod schemas, Conf-based persistent config store (~/.config/kode-review/) |
 | `src/onboarding/` | Setup wizard, Antigravity OAuth, VCS CLI detection |
 | `src/review/` | OpenCode SDK integration, prompt construction, git diff extraction, project structure analysis |

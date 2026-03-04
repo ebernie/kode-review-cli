@@ -41,6 +41,17 @@ bun run build
 bun link
 ```
 
+## Updating
+
+```bash
+# Check for updates and install the latest version
+kode-review --update
+```
+
+This checks for newer versions via git tags, shows what's changed, and (after confirmation) runs `git pull`, `bun install`, and `bun run build` in the installation directory. Only works for git-clone installations.
+
+A daily background check also runs automatically and notifies you when a new version is available.
+
 ## Quick Start
 
 ```bash
@@ -273,6 +284,7 @@ kode-review --setup           # Full wizard
 kode-review --setup-provider  # Provider/model only
 kode-review --setup-vcs       # GitHub/GitLab only
 kode-review --reset           # Reset all configuration
+kode-review --update          # Check for and install latest version
 ```
 
 ### Provider Configuration
