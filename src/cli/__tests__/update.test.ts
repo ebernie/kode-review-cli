@@ -190,21 +190,21 @@ describe('runUpdate', () => {
   }
 
   it('shows update available and changelog when newer version exists', async () => {
-    setupGitLsRemote(['v0.3.0', 'v0.2.0', 'v0.1.0'])
+    setupGitLsRemote(['v99.0.0', 'v0.2.0', 'v0.1.0'])
     mockConfirm.mockResolvedValue(true)
     mockExecInteractive.mockResolvedValue(0) // all steps succeed
 
     await runUpdate()
 
     const output = consoleSpy.mock.calls.map(c => String(c[0])).join('\n')
-    expect(output).toContain('v0.3.0')
+    expect(output).toContain('v99.0.0')
     expect(output).toContain("What's new")
     expect(output).toContain('feat: new feature')
-    expect(output).toContain('Updated to v0.3.0')
+    expect(output).toContain('Updated to v99.0.0')
   })
 
   it('reports already on latest version when no newer version', async () => {
-    // PKG_VERSION is "0.2.0" via vitest.config.ts define; v0.1.0 is strictly older
+    // PKG_VERSION is current version via vitest.config.ts define; v0.1.0 is strictly older
     setupGitLsRemote(['v0.1.0', 'v0.0.1'])
 
     await runUpdate()
@@ -227,22 +227,20 @@ describe('runUpdate', () => {
   })
 
   it('throws AppError when git ls-remote fails', async () => {
-    mockExec.mockResolvedValue({ stdout: '', stderr: 'network error', exitCode: 128 })
+    // Install dir resolves OK, but ls-remote fails
+    mockExec.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('--show-toplevel')) {
+        return Promise.resolve({ stdout: '/fake/install/dir', stderr: '', exitCode: 0 })
+      }
+      return Promise.resolve({ stdout: '', stderr: 'network error', exitCode: 128 })
+    })
 
     await expect(runUpdate()).rejects.toThrow('Could not fetch latest version')
   })
 
   it('throws AppError when install dir cannot be resolved', async () => {
-    setupGitLsRemote(['v99.0.0'])
-    // Override --show-toplevel to fail
+    // --show-toplevel fails — ls-remote should never be reached
     mockExec.mockImplementation((_cmd: string, args: string[]) => {
-      if (args.includes('ls-remote')) {
-        return Promise.resolve({
-          stdout: 'abc\trefs/tags/v99.0.0',
-          stderr: '',
-          exitCode: 0,
-        })
-      }
       if (args.includes('--show-toplevel')) {
         return Promise.resolve({ stdout: '', stderr: 'not a git repo', exitCode: 128 })
       }
@@ -294,6 +292,19 @@ describe('checkForUpdateNotification', () => {
     vi.clearAllMocks()
   })
 
+  /** Helper: mock exec to resolve install dir + ls-remote with given tag output */
+  function setupAutoCheck(lsRemoteOutput: string, lsRemoteExitCode = 0) {
+    mockExec.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('--show-toplevel')) {
+        return Promise.resolve({ stdout: '/fake/install/dir', stderr: '', exitCode: 0 })
+      }
+      if (args.includes('ls-remote')) {
+        return Promise.resolve({ stdout: lsRemoteOutput, stderr: '', exitCode: lsRemoteExitCode })
+      }
+      return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })
+    })
+  }
+
   it('skips check when last check was within 24 hours', async () => {
     mockGetConfig.mockReturnValue({
       updater: {
@@ -313,18 +324,14 @@ describe('checkForUpdateNotification', () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: yesterday, latestKnownVersion: '' },
     })
-    // ls-remote returns a tag
-    mockExec.mockResolvedValue({
-      stdout: 'abc\trefs/tags/v99.0.0',
-      stderr: '',
-      exitCode: 0,
-    })
+    setupAutoCheck('abc\trefs/tags/v99.0.0')
 
     await checkForUpdateNotification()
 
     expect(mockExec).toHaveBeenCalledWith(
       'git',
       expect.arrayContaining(['ls-remote']),
+      expect.any(Object),
     )
   })
 
@@ -332,11 +339,7 @@ describe('checkForUpdateNotification', () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: '', latestKnownVersion: '' },
     })
-    mockExec.mockResolvedValue({
-      stdout: 'abc\trefs/tags/v99.0.0',
-      stderr: '',
-      exitCode: 0,
-    })
+    setupAutoCheck('abc\trefs/tags/v99.0.0')
 
     await checkForUpdateNotification()
 
@@ -347,11 +350,7 @@ describe('checkForUpdateNotification', () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: '', latestKnownVersion: '' },
     })
-    mockExec.mockResolvedValue({
-      stdout: 'abc\trefs/tags/v99.0.0',
-      stderr: '',
-      exitCode: 0,
-    })
+    setupAutoCheck('abc\trefs/tags/v99.0.0')
 
     await checkForUpdateNotification()
 
@@ -364,11 +363,7 @@ describe('checkForUpdateNotification', () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: '', latestKnownVersion: '' },
     })
-    mockExec.mockResolvedValue({
-      stdout: 'abc\trefs/tags/v0.1.0',
-      stderr: '',
-      exitCode: 0,
-    })
+    setupAutoCheck('abc\trefs/tags/v0.1.0')
 
     await checkForUpdateNotification()
 
@@ -401,15 +396,29 @@ describe('checkForUpdateNotification', () => {
     await expect(checkForUpdateNotification()).resolves.toBeUndefined()
   })
 
+  it('silently exits when install dir cannot be resolved', async () => {
+    mockGetConfig.mockReturnValue({
+      updater: { lastCheckedAt: '', latestKnownVersion: '' },
+    })
+    mockExec.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('--show-toplevel')) {
+        return Promise.resolve({ stdout: '', stderr: 'not a git repo', exitCode: 128 })
+      }
+      return Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })
+    })
+
+    await checkForUpdateNotification()
+
+    // No notification should be shown
+    const output = consoleSpy.mock.calls.map(c => String(c[0])).join('\n')
+    expect(output).not.toContain('Update available')
+  })
+
   it('silently exits when git ls-remote returns non-zero exit code', async () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: '', latestKnownVersion: '' },
     })
-    mockExec.mockResolvedValue({
-      stdout: '',
-      stderr: 'network unreachable',
-      exitCode: 128,
-    })
+    setupAutoCheck('', 128)
 
     await checkForUpdateNotification()
 

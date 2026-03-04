@@ -91,10 +91,14 @@ export function parseLatestTag(output: string): string | null {
 
 /**
  * Fetch the latest version from the remote repository using git ls-remote.
+ * Uses the local 'origin' remote so the user's existing auth (SSH, credential
+ * helper, etc.) is respected — avoids prompting for credentials.
  * Returns the version string (without 'v' prefix) or null on failure.
  */
-async function fetchLatestVersion(): Promise<string | null> {
-  const result = await exec('git', ['ls-remote', '--tags', '--refs', REPO_URL])
+async function fetchLatestVersion(installDir: string): Promise<string | null> {
+  const result = await exec('git', ['ls-remote', '--tags', '--refs', 'origin'], {
+    cwd: installDir,
+  })
   if (result.exitCode !== 0 || !result.stdout.trim()) return null
   return parseLatestTag(result.stdout)
 }
@@ -169,9 +173,26 @@ export async function runUpdate(): Promise<void> {
   console.log('='.repeat(40))
   console.log('')
 
+  // Resolve install directory first — needed for git ls-remote against origin
+  const installDir = await resolveInstallDir()
+
+  if (!installDir) {
+    throw new AppError(
+      'Could not determine the kode-review installation directory. ' +
+        'This command only works for git-clone installations.',
+      {
+        category: 'update',
+        recoveryHint:
+          'Ensure kode-review was installed via git clone:\n' +
+          `  git clone ${REPO_URL}\n` +
+          '  cd kode-review-cli && bun install && bun run build && bun link',
+      },
+    )
+  }
+
   logger.info(`Checking for updates... (current: v${currentVersion})`)
 
-  const latestVersion = await fetchLatestVersion()
+  const latestVersion = await fetchLatestVersion(installDir)
 
   if (!latestVersion) {
     throw new AppError('Could not fetch latest version from the remote repository.', {
@@ -187,23 +208,6 @@ export async function runUpdate(): Promise<void> {
   if (!isNewerVersion(latestVersion, currentVersion)) {
     logger.success('Already on the latest version.')
     return
-  }
-
-  // Resolve install directory for changelog and update
-  const installDir = await resolveInstallDir()
-
-  if (!installDir) {
-    throw new AppError(
-      'Could not determine the kode-review installation directory. ' +
-        'This command only works for git-clone installations.',
-      {
-        category: 'update',
-        recoveryHint:
-          'Ensure kode-review was installed via git clone:\n' +
-          `  git clone ${REPO_URL}\n` +
-          '  cd kode-review-cli && bun install && bun run build && bun link',
-      },
-    )
   }
 
   // Fetch tags into local repo so git log range works
@@ -268,6 +272,10 @@ export async function checkForUpdateNotification(): Promise<void> {
       }
     }
 
+    // Resolve install dir — needed for git ls-remote against origin
+    const installDir = await resolveInstallDir()
+    if (!installDir) return
+
     // Record check time immediately to prevent parallel runs
     updateConfig({
       updater: {
@@ -276,7 +284,7 @@ export async function checkForUpdateNotification(): Promise<void> {
       },
     })
 
-    const latestVersion = await fetchLatestVersion()
+    const latestVersion = await fetchLatestVersion(installDir)
     if (!latestVersion) return
 
     const currentVersion = PKG_VERSION
