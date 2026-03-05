@@ -1,27 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// --- Hoisted mocks ---
-const { mockExec, mockExecInteractive, mockGetConfig, mockUpdateConfig, mockConfirm } =
-  vi.hoisted(() => ({
-    mockExec: vi.fn(),
-    mockExecInteractive: vi.fn(),
-    mockGetConfig: vi.fn(),
-    mockUpdateConfig: vi.fn(),
-    mockConfirm: vi.fn(),
-  }))
-
 vi.mock('../../utils/exec.js', () => ({
-  exec: mockExec,
-  execInteractive: mockExecInteractive,
+  exec: vi.fn(),
+  execInteractive: vi.fn(),
 }))
 
 vi.mock('../../config/index.js', () => ({
-  getConfig: mockGetConfig,
-  updateConfig: mockUpdateConfig,
+  getConfig: vi.fn(),
+  updateConfig: vi.fn(),
 }))
 
 vi.mock('@inquirer/prompts', () => ({
-  confirm: mockConfirm,
+  confirm: vi.fn(),
 }))
 
 // Import the module under test — pure functions and public API
@@ -32,6 +22,19 @@ import {
   runUpdate,
   checkForUpdateNotification,
 } from '../update.js'
+import { exec, execInteractive } from '../../utils/exec.js'
+import { getConfig, updateConfig } from '../../config/index.js'
+import { confirm } from '@inquirer/prompts'
+
+// Provide PKG_VERSION for bun test (vitest injects via compile-time define)
+;(globalThis as Record<string, unknown>).PKG_VERSION ??= '0.3.0'
+
+// Get mock references
+const mockExec = exec as unknown as ReturnType<typeof vi.fn>
+const mockExecInteractive = execInteractive as unknown as ReturnType<typeof vi.fn>
+const mockGetConfig = getConfig as unknown as ReturnType<typeof vi.fn>
+const mockUpdateConfig = updateConfig as unknown as ReturnType<typeof vi.fn>
+const mockConfirm = confirm as unknown as ReturnType<typeof vi.fn>
 
 // --- Pure function tests (no mocking needed) ---
 

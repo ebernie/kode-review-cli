@@ -1,19 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Hoist mocks so they're available when vi.mock factories run
-const { mockGetConfig, mockGetConfigPath } = vi.hoisted(() => ({
-  mockGetConfig: vi.fn(),
-  mockGetConfigPath: vi.fn(),
-}))
-
 // Mock the config module before importing
 vi.mock('../../config/index.js', () => ({
-  getConfig: mockGetConfig,
-  getConfigPath: mockGetConfigPath,
+  getConfig: vi.fn(),
+  getConfigPath: vi.fn(),
 }))
 
 // Import after mocks
 import { showConfig } from '../show-config.js'
+import { getConfig, getConfigPath } from '../../config/index.js'
+
+// Get mock references after import
+const mockGetConfig = getConfig as ReturnType<typeof vi.fn>
+const mockGetConfigPath = getConfigPath as ReturnType<typeof vi.fn>
 
 const mockConfig = {
   provider: 'anthropic',

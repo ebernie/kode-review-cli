@@ -1,10 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import {
   getFileType,
   getStrategyForFile,
   extractPriorityQueries,
   extractQueriesUsingStrategy,
   generateRelatedFilePaths,
+  applyStrategyWeighting,
+  applyStrategyOverrides,
   typescriptStrategy,
   javascriptStrategy,
   pythonStrategy,
@@ -14,6 +16,7 @@ import {
   genericStrategy,
   FILE_TYPE_STRATEGIES,
 } from '../file-type-strategies.js'
+import type { WeightedCodeChunk } from '../types.js'
 
 describe('getFileType', () => {
   it('identifies TypeScript files', () => {
@@ -379,6 +382,9 @@ describe('FILE_TYPE_STRATEGIES registry', () => {
     expect(FILE_TYPE_STRATEGIES.css).toBe(cssStrategy)
     expect(FILE_TYPE_STRATEGIES.scss).toBe(scssStrategy)
     expect(FILE_TYPE_STRATEGIES.generic).toBe(genericStrategy)
+    expect(FILE_TYPE_STRATEGIES.rust).toBe(genericStrategy)
+    expect(FILE_TYPE_STRATEGIES.java).toBe(genericStrategy)
+    expect(Object.keys(FILE_TYPE_STRATEGIES)).toHaveLength(9)
   })
 
   it('TypeScript strategy has correct extensions', () => {
@@ -426,5 +432,93 @@ describe('FILE_TYPE_STRATEGIES registry', () => {
     expect(cssStrategy.searchTypeDefinitions).toBe(false)
     expect(cssStrategy.searchBaseClasses).toBe(false)
     expect(cssStrategy.searchImportedModules).toBe(false)
+  })
+})
+
+describe('applyStrategyWeighting', () => {
+  function makeChunk(filename: string, startLine: number, endLine: number, score: number): WeightedCodeChunk {
+    return {
+      filename,
+      code: 'test',
+      score,
+      startLine,
+      endLine,
+      originalScore: score,
+      weightMultiplier: 1.0,
+      isModifiedContext: false,
+      isTestFile: false,
+    }
+  }
+
+  it('boosts chunks that match priority chunk IDs', () => {
+    const chunks = [
+      makeChunk('src/utils.ts', 1, 10, 0.8),
+      makeChunk('src/other.ts', 5, 15, 0.6),
+    ]
+
+    const strategyResult = {
+      additionalQueries: [],
+      priorityChunkIds: new Set(['src/utils.ts:1-10']),
+      relatedFilesSearched: [],
+    }
+
+    const result = applyStrategyWeighting(chunks, strategyResult, ['src/utils.ts'])
+
+    // First chunk should be boosted by the strategy's priorityWeight
+    expect(result[0].score).toBeGreaterThan(0.8)
+    // Second chunk should remain unchanged
+    expect(result[1].score).toBe(0.6)
+  })
+
+  it('does not modify chunks not in priorityChunkIds', () => {
+    const chunks = [makeChunk('src/other.ts', 1, 10, 0.5)]
+
+    const strategyResult = {
+      additionalQueries: [],
+      priorityChunkIds: new Set<string>(),
+      relatedFilesSearched: [],
+    }
+
+    const result = applyStrategyWeighting(chunks, strategyResult, [])
+    expect(result[0].score).toBe(0.5)
+    expect(result[0].weightMultiplier).toBe(1.0)
+  })
+})
+
+describe('applyStrategyOverrides', () => {
+  // Save originals so we can restore after mutation tests
+  let originalTsPriorityWeight: number
+  let originalTsExtensions: string[]
+
+  afterEach(() => {
+    // Restore mutations from applyStrategyOverrides
+    typescriptStrategy.priorityWeight = originalTsPriorityWeight
+    typescriptStrategy.extensions = originalTsExtensions
+  })
+
+  // Capture originals before any test runs
+  originalTsPriorityWeight = typescriptStrategy.priorityWeight
+  originalTsExtensions = [...typescriptStrategy.extensions]
+
+  it('does nothing when no overrides provided', () => {
+    const before = typescriptStrategy.priorityWeight
+    applyStrategyOverrides(undefined)
+    expect(typescriptStrategy.priorityWeight).toBe(before)
+  })
+
+  it('applies priority weight overrides', () => {
+    applyStrategyOverrides({ priorityWeights: { typescript: 5.0 } })
+    expect(typescriptStrategy.priorityWeight).toBe(5.0)
+  })
+
+  it('applies extension mapping overrides', () => {
+    applyStrategyOverrides({ extensionMappings: { '.mts': 'typescript' } })
+    expect(typescriptStrategy.extensions).toContain('.mts')
+  })
+
+  it('does not duplicate existing extensions', () => {
+    const lengthBefore = typescriptStrategy.extensions.length
+    applyStrategyOverrides({ extensionMappings: { '.ts': 'typescript' } })
+    expect(typescriptStrategy.extensions).toHaveLength(lengthBefore)
   })
 })

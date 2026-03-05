@@ -1,6 +1,8 @@
-import { createOpencode, createOpencodeClient, type TextPart } from '@opencode-ai/sdk'
+import { createOpencode, createOpencodeClient } from '@opencode-ai/sdk'
 import { getConfig } from '../config/index.js'
 import { buildReviewPrompt, type ReviewPromptOptions } from './prompt.js'
+import { extractResponseContent } from './response.js'
+import { promptAndWaitForResponse } from './session-events.js'
 import { logger } from '../utils/logger.js'
 
 export interface ReviewOptions {
@@ -86,24 +88,18 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
       modelSpec.variant = variant
     }
 
-    // Send the review prompt
-    const result = await client.session.prompt({
-      path: { id: sessionId },
+    // Send prompt async and wait for completion via SSE
+    const assistantMessage = await promptAndWaitForResponse({
+      client,
+      sessionId,
       body: {
         model: modelSpec,
         parts: [{ type: 'text', text: prompt }],
       },
+      timeoutMs: 180_000,
     })
 
-    if (!result.data) {
-      throw new Error('Failed to get review response')
-    }
-
-    // Extract text content from parts
-    const content = result.data.parts
-      .filter((part): part is TextPart => part.type === 'text')
-      .map((part) => part.text)
-      .join('\n')
+    const content = extractResponseContent(assistantMessage)
 
     return {
       content,
@@ -162,22 +158,17 @@ export async function runReviewWithServer(
     modelSpec.variant = variant
   }
 
-  const result = await client.session.prompt({
-    path: { id: sessionResult.data.id },
+  const assistantMessage = await promptAndWaitForResponse({
+    client,
+    sessionId: sessionResult.data.id,
     body: {
       model: modelSpec,
       parts: [{ type: 'text', text: prompt }],
     },
+    timeoutMs: 180_000,
   })
 
-  if (!result.data) {
-    throw new Error('Failed to get review response')
-  }
-
-  const content = result.data.parts
-    .filter((part): part is TextPart => part.type === 'text')
-    .map((part) => part.text)
-    .join('\n')
+  const content = extractResponseContent(assistantMessage)
 
   return { content }
 }

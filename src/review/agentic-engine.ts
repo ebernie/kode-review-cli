@@ -7,10 +7,12 @@
 
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { createOpencode, createOpencodeClient, type TextPart, type AgentConfig } from '@opencode-ai/sdk'
+import { createOpencode, createOpencodeClient, type AgentConfig } from '@opencode-ai/sdk'
 import { getConfig } from '../config/index.js'
 import { logger } from '../utils/logger.js'
 import { AGENTIC_SYSTEM_PROMPT, buildAgenticPrompt, type AgenticPromptOptions } from './agentic-prompt.js'
+import { extractResponseContent } from './response.js'
+import { promptAndWaitForResponse, countToolCalls } from './session-events.js'
 
 // Get the directory of this module for locating the MCP server
 const __filename = fileURLToPath(import.meta.url)
@@ -209,34 +211,26 @@ export async function runAgenticReview(
       modelSpec.variant = variant
     }
 
-    // Send the review prompt with system prompt
-    const result = await client.session.prompt({
-      path: { id: sessionId },
+    // Send prompt async and wait for completion via SSE
+    const assistantMessage = await promptAndWaitForResponse({
+      client,
+      sessionId,
       body: {
         model: modelSpec,
         system: AGENTIC_SYSTEM_PROMPT,
         parts: [{ type: 'text', text: userPrompt }],
       },
+      timeoutMs: timeoutSec * 1000,
     })
 
-    if (!result.data) {
-      throw new Error('Failed to get review response')
-    }
+    const content = extractResponseContent(assistantMessage)
 
-    // Extract text content from parts
-    const content = result.data.parts
-      .filter((part): part is TextPart => part.type === 'text')
-      .map((part) => part.text)
-      .join('\n')
-
-    // Count tool calls from the response
-    // OpenCode SDK uses 'tool' type for tool invocations
-    let toolCallCount = 0
-    for (const part of result.data.parts) {
-      if (part.type === 'tool') {
-        toolCallCount++
-      }
-    }
+    // Count tool calls across ALL messages in the session
+    const allMessagesResult = await client.session.messages({
+      path: { id: sessionId },
+    })
+    const allMessages = allMessagesResult.data ?? []
+    const toolCallCount = countToolCalls(allMessages)
 
     // Check if the review was truncated due to hitting maxSteps
     // The SDK will force a text-only response when maxSteps is reached
@@ -304,6 +298,8 @@ export async function runAgenticReviewWithServer(
     throw new Error('Failed to create session')
   }
 
+  const sessionId = sessionResult.data.id
+
   const modelSpec: { providerID: string; modelID: string; variant?: string } = {
     providerID: provider,
     modelID: model,
@@ -313,27 +309,29 @@ export async function runAgenticReviewWithServer(
     modelSpec.variant = variant
   }
 
-  const result = await client.session.prompt({
-    path: { id: sessionResult.data.id },
+  const assistantMessage = await promptAndWaitForResponse({
+    client,
+    sessionId,
     body: {
       model: modelSpec,
       system: AGENTIC_SYSTEM_PROMPT,
       parts: [{ type: 'text', text: userPrompt }],
     },
+    timeoutMs: 180_000,
   })
 
-  if (!result.data) {
-    throw new Error('Failed to get review response')
-  }
+  const content = extractResponseContent(assistantMessage)
 
-  const content = result.data.parts
-    .filter((part): part is TextPart => part.type === 'text')
-    .map((part) => part.text)
-    .join('\n')
+  // Count tool calls across all messages
+  const allMessagesResult = await client.session.messages({
+    path: { id: sessionId },
+  })
+  const allMessages = allMessagesResult.data ?? []
+  const toolCallCount = countToolCalls(allMessages)
 
   return {
     content,
-    toolCallCount: 0, // Can't track without MCP integration
+    toolCallCount,
     truncated: false,
   }
 }

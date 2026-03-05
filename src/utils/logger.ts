@@ -8,8 +8,15 @@ export function setQuietMode(quiet: boolean): void {
   quietMode = quiet
 }
 
+let debugMode = false
+
+export function setDebugMode(debug: boolean): void {
+  debugMode = debug
+}
+
 export function log(level: LogLevel, message: string): void {
   if (quietMode && level !== 'error') return
+  if (level === 'debug' && !debugMode) return
 
   const prefix = {
     debug: dim('[DEBUG]'),
@@ -21,7 +28,7 @@ export function log(level: LogLevel, message: string): void {
 
   const output = `${prefix} ${message}`
 
-  if (level === 'error') {
+  if (level === 'error' || level === 'debug') {
     console.error(output)
   } else {
     console.log(output)

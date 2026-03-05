@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { LRUCache } from '../cache.js'
 
 describe('LRUCache', () => {
@@ -122,19 +122,28 @@ describe('LRUCache', () => {
   })
 
   describe('TTL expiration', () => {
+    let originalDateNow: () => number
+    let currentTime: number
+
     beforeEach(() => {
-      vi.useFakeTimers()
+      originalDateNow = Date.now
+      currentTime = originalDateNow.call(Date)
+      Date.now = () => currentTime
     })
 
     afterEach(() => {
-      vi.useRealTimers()
+      Date.now = originalDateNow
     })
+
+    function advanceTime(ms: number) {
+      currentTime += ms
+    }
 
     it('returns value before TTL expires', () => {
       const cache = new LRUCache<string, number>({ maxSize: 10, ttlMs: 1000 })
       cache.set('key', 42)
 
-      vi.advanceTimersByTime(500)
+      advanceTime(500)
       expect(cache.get('key')).toBe(42)
     })
 
@@ -142,7 +151,7 @@ describe('LRUCache', () => {
       const cache = new LRUCache<string, number>({ maxSize: 10, ttlMs: 1000 })
       cache.set('key', 42)
 
-      vi.advanceTimersByTime(1001)
+      advanceTime(1001)
       expect(cache.get('key')).toBeUndefined()
     })
 
@@ -152,7 +161,7 @@ describe('LRUCache', () => {
 
       expect(cache.size).toBe(1)
 
-      vi.advanceTimersByTime(1001)
+      advanceTime(1001)
       cache.get('key')
 
       expect(cache.size).toBe(0)
@@ -164,7 +173,7 @@ describe('LRUCache', () => {
 
       expect(cache.has('key')).toBe(true)
 
-      vi.advanceTimersByTime(1001)
+      advanceTime(1001)
       expect(cache.has('key')).toBe(false)
     })
 
@@ -173,10 +182,10 @@ describe('LRUCache', () => {
       cache.set('key1', 1)
       cache.set('key2', 2)
 
-      vi.advanceTimersByTime(500)
+      advanceTime(500)
       cache.set('key3', 3) // Added later, expires later
 
-      vi.advanceTimersByTime(501) // key1 and key2 expire, key3 still valid
+      advanceTime(501) // key1 and key2 expire, key3 still valid
 
       const pruned = cache.prune()
       expect(pruned).toBe(2)

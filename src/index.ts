@@ -7,7 +7,7 @@ import { runDiagnostics, printDiagnostics } from './cli/doctor.js'
 import { initHooks } from './cli/init-hooks.js'
 import { runUpdate, checkForUpdateNotification } from './cli/update.js'
 import { cyan, green } from './cli/colors.js'
-import { logger, setQuietMode } from './utils/logger.js'
+import { logger, setQuietMode, setDebugMode } from './utils/logger.js'
 import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
 import {
   isOnboardingComplete,
@@ -1026,6 +1026,9 @@ async function main(): Promise<void> {
 
   // Set quiet mode for logger
   setQuietMode(options.quiet)
+
+  // Enable debug mode when DEBUG=1
+  setDebugMode(process.env.DEBUG === '1')
 
   try {
     // Handle setup commands first

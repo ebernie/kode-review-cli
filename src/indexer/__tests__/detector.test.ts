@@ -1,19 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Hoist mocks so they're available when vi.mock factories run
-const { mockExec, mockCommandExists } = vi.hoisted(() => ({
-  mockExec: vi.fn(),
-  mockCommandExists: vi.fn(),
-}))
-
 // Mock the exec module before importing the module under test
 vi.mock('../../utils/exec.js', () => ({
-  exec: mockExec,
-  commandExists: mockCommandExists,
+  exec: vi.fn(),
+  commandExists: vi.fn(),
 }))
 
 // Import after mocking
-import { checkIndexerPrerequisites } from '../detector.js'
+import {
+  checkIndexerPrerequisites,
+  isDockerAvailable,
+  isDockerRunning,
+  isComposeAvailable,
+} from '../detector.js'
+import { exec, commandExists } from '../../utils/exec.js'
+
+// Get mock references
+const mockExec = exec as unknown as ReturnType<typeof vi.fn>
+const mockCommandExists = commandExists as unknown as ReturnType<typeof vi.fn>
 
 describe('checkIndexerPrerequisites', () => {
   beforeEach(() => {
@@ -71,5 +75,50 @@ describe('checkIndexerPrerequisites', () => {
     expect(result.dockerRunning).toBe(true)
     expect(result.composeAvailable).toBe(true)
     expect(result.message).toContain('All prerequisites met')
+  })
+})
+
+describe('isDockerAvailable', () => {
+  beforeEach(() => vi.resetAllMocks())
+
+  it('returns true when docker command exists', async () => {
+    mockCommandExists.mockResolvedValueOnce(true)
+    expect(await isDockerAvailable()).toBe(true)
+    expect(mockCommandExists).toHaveBeenCalledWith('docker')
+  })
+
+  it('returns false when docker command does not exist', async () => {
+    mockCommandExists.mockResolvedValueOnce(false)
+    expect(await isDockerAvailable()).toBe(false)
+  })
+})
+
+describe('isDockerRunning', () => {
+  beforeEach(() => vi.resetAllMocks())
+
+  it('returns true when docker info exits with 0', async () => {
+    mockExec.mockResolvedValueOnce({ exitCode: 0, stdout: '', stderr: '' })
+    expect(await isDockerRunning()).toBe(true)
+    expect(mockExec).toHaveBeenCalledWith('docker', ['info'])
+  })
+
+  it('returns false when docker info exits with non-zero', async () => {
+    mockExec.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'Cannot connect' })
+    expect(await isDockerRunning()).toBe(false)
+  })
+})
+
+describe('isComposeAvailable', () => {
+  beforeEach(() => vi.resetAllMocks())
+
+  it('returns true when docker compose version exits with 0', async () => {
+    mockExec.mockResolvedValueOnce({ exitCode: 0, stdout: 'v2.24.0', stderr: '' })
+    expect(await isComposeAvailable()).toBe(true)
+    expect(mockExec).toHaveBeenCalledWith('docker', ['compose', 'version'])
+  })
+
+  it('returns false when docker compose version exits with non-zero', async () => {
+    mockExec.mockResolvedValueOnce({ exitCode: 1, stdout: '', stderr: 'not found' })
+    expect(await isComposeAvailable()).toBe(false)
   })
 })

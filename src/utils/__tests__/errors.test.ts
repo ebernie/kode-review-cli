@@ -273,7 +273,7 @@ describe('formatError', () => {
 })
 
 describe('getCategoryLabel', () => {
-  const categories: ErrorCategory[] = ['config', 'network', 'vcs', 'indexer', 'review', 'unknown']
+  const categories: ErrorCategory[] = ['config', 'network', 'vcs', 'indexer', 'review', 'update', 'unknown']
 
   it('returns human-readable labels for all categories', () => {
     for (const category of categories) {
@@ -289,6 +289,7 @@ describe('getCategoryLabel', () => {
     expect(getCategoryLabel('vcs')).toBe('VCS Error')
     expect(getCategoryLabel('indexer')).toBe('Indexer Error')
     expect(getCategoryLabel('review')).toBe('Review Error')
+    expect(getCategoryLabel('update')).toBe('Update Error')
     expect(getCategoryLabel('unknown')).toBe('Error')
   })
 })

@@ -1,40 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { StructuredReview } from '../../output/types.js'
 
-// Hoist mocks so they're available when vi.mock factories run (vitest hoists vi.mock calls)
-const {
-  mockPostGitHubPRComment,
-  mockPostGitHubPRLineComment,
-  mockGetGitHubPRContext,
-  mockSubmitGitHubPRReview,
-  mockPostGitLabMRComment,
-  mockPostGitLabMRLineComment,
-  mockGetGitLabMRContext,
-  mockSetGitLabMRApproval,
-} = vi.hoisted(() => ({
-  mockPostGitHubPRComment: vi.fn(),
-  mockPostGitHubPRLineComment: vi.fn(),
-  mockGetGitHubPRContext: vi.fn(),
-  mockSubmitGitHubPRReview: vi.fn(),
-  mockPostGitLabMRComment: vi.fn(),
-  mockPostGitLabMRLineComment: vi.fn(),
-  mockGetGitLabMRContext: vi.fn(),
-  mockSetGitLabMRApproval: vi.fn(),
-}))
-
 // Mock the VCS modules before importing
 vi.mock('../github.js', () => ({
-  postGitHubPRComment: mockPostGitHubPRComment,
-  postGitHubPRLineComment: mockPostGitHubPRLineComment,
-  getGitHubPRContext: mockGetGitHubPRContext,
-  submitGitHubPRReview: mockSubmitGitHubPRReview,
+  postGitHubPRComment: vi.fn(),
+  postGitHubPRLineComment: vi.fn(),
+  getGitHubPRContext: vi.fn(),
+  submitGitHubPRReview: vi.fn(),
 }))
 
 vi.mock('../gitlab.js', () => ({
-  postGitLabMRComment: mockPostGitLabMRComment,
-  postGitLabMRLineComment: mockPostGitLabMRLineComment,
-  getGitLabMRContext: mockGetGitLabMRContext,
-  setGitLabMRApproval: mockSetGitLabMRApproval,
+  postGitLabMRComment: vi.fn(),
+  postGitLabMRLineComment: vi.fn(),
+  getGitLabMRContext: vi.fn(),
+  setGitLabMRApproval: vi.fn(),
 }))
 
 // Mock logger to suppress output during tests
@@ -50,6 +29,28 @@ vi.mock('../../utils/logger.js', () => ({
 
 // Import after mocks
 import { postReviewToPR, postSimpleComment } from '../post-review.js'
+import {
+  postGitHubPRComment,
+  postGitHubPRLineComment,
+  getGitHubPRContext,
+  submitGitHubPRReview,
+} from '../github.js'
+import {
+  postGitLabMRComment,
+  postGitLabMRLineComment,
+  getGitLabMRContext,
+  setGitLabMRApproval,
+} from '../gitlab.js'
+
+// Get mock references
+const mockPostGitHubPRComment = postGitHubPRComment as unknown as ReturnType<typeof vi.fn>
+const mockPostGitHubPRLineComment = postGitHubPRLineComment as unknown as ReturnType<typeof vi.fn>
+const mockGetGitHubPRContext = getGitHubPRContext as unknown as ReturnType<typeof vi.fn>
+const mockSubmitGitHubPRReview = submitGitHubPRReview as unknown as ReturnType<typeof vi.fn>
+const mockPostGitLabMRComment = postGitLabMRComment as unknown as ReturnType<typeof vi.fn>
+const mockPostGitLabMRLineComment = postGitLabMRLineComment as unknown as ReturnType<typeof vi.fn>
+const mockGetGitLabMRContext = getGitLabMRContext as unknown as ReturnType<typeof vi.fn>
+const mockSetGitLabMRApproval = setGitLabMRApproval as unknown as ReturnType<typeof vi.fn>
 
 const mockReview: StructuredReview = {
   summary: 'Test review summary.',

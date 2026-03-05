@@ -173,6 +173,58 @@ describe('IndexingJobQueue', () => {
     })
   })
 
+  describe('getAllJobs', () => {
+    it('returns all enqueued jobs', () => {
+      queue.enqueue({ repoUrl: 'https://github.com/a/repo', repoPath: '/a', branch: 'main', fileCount: 10 })
+      queue.enqueue({ repoUrl: 'https://github.com/b/repo', repoPath: '/b', branch: 'main', fileCount: 20 })
+
+      const all = queue.getAllJobs()
+      expect(all).toHaveLength(2)
+    })
+
+    it('returns empty array when no jobs', () => {
+      expect(queue.getAllJobs()).toHaveLength(0)
+    })
+  })
+
+  describe('getJobsByStatus', () => {
+    it('filters jobs by status', () => {
+      const job1 = queue.enqueue({ repoUrl: 'https://github.com/a/repo', repoPath: '/a', branch: 'main', fileCount: 10 })
+      queue.enqueue({ repoUrl: 'https://github.com/b/repo', repoPath: '/b', branch: 'main', fileCount: 20 })
+      queue.markProcessing(job1.id)
+
+      expect(queue.getJobsByStatus('pending')).toHaveLength(1)
+      expect(queue.getJobsByStatus('processing')).toHaveLength(1)
+      expect(queue.getJobsByStatus('completed')).toHaveLength(0)
+    })
+  })
+
+  describe('getPendingCount / getProcessingCount', () => {
+    it('returns correct counts', () => {
+      const job1 = queue.enqueue({ repoUrl: 'https://github.com/a/repo', repoPath: '/a', branch: 'main', fileCount: 10 })
+      queue.enqueue({ repoUrl: 'https://github.com/b/repo', repoPath: '/b', branch: 'main', fileCount: 20 })
+
+      expect(queue.getPendingCount()).toBe(2)
+      expect(queue.getProcessingCount()).toBe(0)
+
+      queue.markProcessing(job1.id)
+
+      expect(queue.getPendingCount()).toBe(1)
+      expect(queue.getProcessingCount()).toBe(1)
+    })
+  })
+
+  describe('removeJob', () => {
+    it('removes a job from the queue', () => {
+      const job = queue.enqueue({ repoUrl: 'https://github.com/a/repo', repoPath: '/a', branch: 'main', fileCount: 10 })
+
+      queue.removeJob(job.id)
+
+      expect(queue.getJob(job.id)).toBeNull()
+      expect(queue.getAllJobs()).toHaveLength(0)
+    })
+  })
+
   describe('cleanup', () => {
     it('should remove old completed jobs', () => {
       const job = queue.enqueue({
@@ -188,6 +240,23 @@ describe('IndexingJobQueue', () => {
       })
 
       const removed = queue.cleanupOldJobs(24 * 60 * 60 * 1000) // 1 day max age
+      expect(removed).toBe(1)
+      expect(queue.getJob(job.id)).toBeNull()
+    })
+
+    it('should remove old failed jobs', () => {
+      const job = queue.enqueue({
+        repoUrl: 'https://github.com/test/repo',
+        repoPath: '/path/to/repo',
+        branch: 'main',
+        fileCount: 100,
+      })
+
+      queue.updateStatus(job.id, 'failed', {
+        completedAt: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+
+      const removed = queue.cleanupOldJobs(24 * 60 * 60 * 1000)
       expect(removed).toBe(1)
       expect(queue.getJob(job.id)).toBeNull()
     })

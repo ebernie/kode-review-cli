@@ -11,11 +11,13 @@ bun run build          # Build with tsup (output to dist/)
 bun run dev            # Watch mode for development
 bun run typecheck      # TypeScript type checking (tsc --noEmit)
 bun run lint           # ESLint
-bun test               # Run tests once (vitest run)
+bun run test           # Run tests once (vitest run)
 bun run test:watch     # Watch mode for tests (vitest)
-bun test src/indexer   # Run tests for a specific module
-bun test src/indexer/__tests__/client.test.ts  # Run a single test file
+npx vitest run src/indexer   # Run tests for a specific module
+npx vitest run src/indexer/__tests__/client.test.ts  # Run a single test file
 ```
+
+> **Important**: Always use `bun run test` (not `bun test`). The bare `bun test` invokes Bun's native test runner, which shares module caches across files and causes `vi.mock()` calls to leak between test files. `bun run test` correctly invokes vitest with proper per-file isolation.
 
 **Run the CLI locally:**
 ```bash

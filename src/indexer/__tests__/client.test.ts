@@ -539,6 +539,273 @@ describe('IndexerClient', () => {
     })
   })
 
+  describe('listRepos', () => {
+    it('returns mapped repo info', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          repos: [
+            {
+              repo_url: 'https://github.com/test/repo',
+              repo_id: 'abc123',
+              branches: ['main', 'develop'],
+              total_chunks: 500,
+              total_files: 50,
+            },
+          ],
+        }),
+      })
+
+      const result = await client.listRepos()
+
+      expect(result).toHaveLength(1)
+      expect(result[0]).toEqual({
+        repoUrl: 'https://github.com/test/repo',
+        repoId: 'abc123',
+        branches: ['main', 'develop'],
+        totalChunks: 500,
+        totalFiles: 50,
+      })
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${baseUrl}/repos`,
+        expect.objectContaining({ method: 'GET' })
+      )
+    })
+
+    it('throws on failure', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => 'Server error',
+      })
+
+      await expect(client.listRepos()).rejects.toThrow('Failed to list repos')
+    })
+  })
+
+  describe('keywordSearch', () => {
+    it('returns mapped keyword search results', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          query: 'handleRequest',
+          normalized_query: 'handle_request',
+          matches: [
+            {
+              file_path: 'src/handler.ts',
+              content: 'function handleRequest() {}',
+              line_start: 10,
+              line_end: 20,
+              chunk_type: 'function',
+              symbol_names: ['handleRequest'],
+              bm25_score: 5.2,
+              exact_match_boost: 3.0,
+              final_score: 15.6,
+              repo_url: null,
+              branch: null,
+            },
+          ],
+          total_count: 1,
+        }),
+      })
+
+      const result = await client.keywordSearch('handleRequest')
+
+      expect(result.query).toBe('handleRequest')
+      expect(result.normalizedQuery).toBe('handle_request')
+      expect(result.totalCount).toBe(1)
+      expect(result.matches[0]).toEqual({
+        filePath: 'src/handler.ts',
+        content: 'function handleRequest() {}',
+        lineStart: 10,
+        lineEnd: 20,
+        chunkType: 'function',
+        symbolNames: ['handleRequest'],
+        bm25Score: 5.2,
+        exactMatchBoost: 3.0,
+        finalScore: 15.6,
+        repoUrl: undefined,
+        branch: undefined,
+      })
+    })
+
+    it('throws on failure', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => 'Bad request',
+      })
+
+      await expect(client.keywordSearch('test')).rejects.toThrow('Keyword search failed')
+    })
+  })
+
+  describe('getCallGraph', () => {
+    const callGraphResponse = {
+      function: 'handleRequest',
+      direction: 'both',
+      depth: 2,
+      nodes: [
+        { id: 'n0', name: 'handleRequest', file_path: 'src/handler.ts', line_start: 10, line_end: 20, depth: 0 },
+        { id: 'n1', name: 'processInput', file_path: 'src/process.ts', line_start: 5, line_end: 15, depth: 1 },
+        { id: 'n2', name: 'validateData', file_path: 'src/validate.ts', line_start: 1, line_end: 8, depth: 1 },
+      ],
+      edges: [
+        { source_id: 'n1', target_id: 'n0', callee_name: 'handleRequest', line_number: 12 },
+        { source_id: 'n0', target_id: 'n2', callee_name: 'validateData', line_number: 15 },
+      ],
+      total_nodes: 3,
+      total_edges: 2,
+    }
+
+    it('maps snake_case to camelCase and separates callers/callees', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => callGraphResponse,
+      })
+
+      const result = await client.getCallGraph('handleRequest')
+
+      expect(result.function).toBe('handleRequest')
+      expect(result.direction).toBe('both')
+      expect(result.depth).toBe(2)
+      expect(result.totalNodes).toBe(3)
+      expect(result.totalEdges).toBe(2)
+
+      // n0 is root (depth 0), skipped from callers/callees
+      // n1 is a source in edges (callerIds), so it's a caller
+      // n2 is a target in edges (calleeIds), so it's a callee
+      expect(result.callers).toHaveLength(1)
+      expect(result.callers[0].name).toBe('processInput')
+      expect(result.callees).toHaveLength(1)
+      expect(result.callees[0].name).toBe('validateData')
+
+      // Verify edge mapping
+      expect(result.edges[0]).toEqual({
+        sourceId: 'n1',
+        targetId: 'n0',
+        calleeName: 'handleRequest',
+        lineNumber: 12,
+        receiver: undefined,
+      })
+    })
+
+    it('clamps depth to range [1, 5]', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...callGraphResponse, nodes: [], edges: [], total_nodes: 0, total_edges: 0 }),
+      })
+
+      await client.getCallGraph('fn', undefined, undefined, 'both', 10)
+
+      const calledUrl = mockFetch.mock.calls[0][0] as string
+      expect(calledUrl).toContain('depth=5') // clamped from 10 to 5
+    })
+
+    it('throws on failure', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        text: async () => 'Not found',
+      })
+
+      await expect(client.getCallGraph('missing')).rejects.toThrow('Call graph query failed')
+    })
+  })
+
+  describe('LRU cache behavior', () => {
+    it('serves search results from cache on second identical call', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          chunks: [
+            { filename: 'test.ts', content: 'code', start_line: 1, end_line: 10, similarity: 0.9 },
+          ],
+        }),
+      })
+
+      await client.search('test query', 'https://repo', 5)
+      await client.search('test query', 'https://repo', 5)
+
+      // fetch should only be called once — second call served from cache
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('serves lookupDefinitions from cache on second identical call', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'MyClass', definitions: [], total_count: 0 }),
+      })
+
+      await client.lookupDefinitions('MyClass')
+      await client.lookupDefinitions('MyClass')
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('serves lookupUsages from cache on second identical call', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'fn', usages: [], total_count: 0 }),
+      })
+
+      await client.lookupUsages('fn')
+      await client.lookupUsages('fn')
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('serves keywordSearch from cache on second identical call', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ query: 'q', normalized_query: 'q', matches: [], total_count: 0 }),
+      })
+
+      await client.keywordSearch('q')
+      await client.keywordSearch('q')
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('serves hybridSearch from cache on second identical call', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          query: 'q', quoted_phrases: [], matches: [], total_count: 0,
+          vector_weight: 0.6, keyword_weight: 0.4, fallback_used: false,
+        }),
+      })
+
+      await client.hybridSearch('q')
+      await client.hybridSearch('q')
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+    })
+
+    it('cache is invalidated after deleteIndex', async () => {
+      // First call populates cache
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'fn', definitions: [], total_count: 0 }),
+      })
+      await client.lookupDefinitions('fn')
+
+      // deleteIndex clears caches
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ message: 'Deleted', deleted_chunks: 10 }),
+      })
+      await client.deleteIndex('https://repo')
+
+      // Second call should hit fetch again (cache cleared)
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ symbol: 'fn', definitions: [], total_count: 0 }),
+      })
+      await client.lookupDefinitions('fn')
+
+      // 3 fetch calls: initial lookup, deleteIndex, post-delete lookup
+      expect(mockFetch).toHaveBeenCalledTimes(3)
+    })
+  })
+
   describe('constructor', () => {
     it('removes trailing slash from base URL', async () => {
       const clientWithSlash = new IndexerClient('http://localhost:8321/')

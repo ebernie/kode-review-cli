@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import { withRetry, isRetryableError, createRetryWrapper } from '../retry.js'
 
 describe('isRetryableError', () => {
@@ -105,21 +105,14 @@ describe('isRetryableError', () => {
 })
 
 describe('withRetry', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
   afterEach(() => {
-    vi.useRealTimers()
     vi.clearAllMocks()
   })
 
   it('returns result on first successful attempt', async () => {
     const fn = vi.fn().mockResolvedValue('success')
 
-    const resultPromise = withRetry(fn)
-    vi.runAllTimers()
-    const result = await resultPromise
+    const result = await withRetry(fn)
 
     expect(result).toBe('success')
     expect(fn).toHaveBeenCalledTimes(1)
@@ -157,12 +150,8 @@ describe('withRetry', () => {
       return 'success after retry'
     })
 
-    const resultPromise = withRetry(fn, { initialDelayMs: 10, maxAttempts: 3 })
-
-    // Advance timers to allow retries
-    await vi.runAllTimersAsync()
-
-    const result = await resultPromise
+    // Use minimal delay so test completes quickly with real timers
+    const result = await withRetry(fn, { initialDelayMs: 1, maxAttempts: 3 })
 
     expect(result).toBe('success after retry')
     expect(fn).toHaveBeenCalledTimes(2)
@@ -174,16 +163,11 @@ describe('withRetry', () => {
 
     const fn = vi.fn().mockRejectedValue(retryableError)
 
-    // Need to handle the rejection properly
-    const resultPromise = withRetry(fn, { maxAttempts: 3, initialDelayMs: 10 })
-      .catch((e: Error) => e)
+    // Use minimal delay so test completes quickly with real timers
+    await expect(
+      withRetry(fn, { maxAttempts: 3, initialDelayMs: 1 })
+    ).rejects.toThrow('Connection timeout')
 
-    // Advance timers to allow all retries
-    await vi.runAllTimersAsync()
-
-    const result = await resultPromise
-    expect(result).toBeInstanceOf(Error)
-    expect((result as Error).message).toBe('Connection timeout')
     expect(fn).toHaveBeenCalledTimes(3)
   })
 })

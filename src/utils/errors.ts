@@ -95,6 +95,7 @@ const RECOVERY_HINTS: Record<string, string> = {
   'no changes': 'Stage some changes with "git add" or specify a PR with --pr.',
   'rate limit': 'Wait a moment before trying again.',
   'api key': 'Check your API key configuration with "kode-review --show-config".',
+  'did not return a response': 'Run "kode-review --setup-provider" to reconfigure your model provider.',
 }
 
 /**
@@ -130,7 +131,7 @@ function getRecoveryHint(error: unknown, category: ErrorCategory): string | unde
     case 'indexer':
       return 'Run "kode-review --index-status" to check indexer status.'
     case 'review':
-      return 'Try running with --verbose for more details.'
+      return 'Try running with DEBUG=1 for more details.'
     case 'update':
       return 'Try running "git pull && bun install && bun run build" manually in the installation directory.'
     default:

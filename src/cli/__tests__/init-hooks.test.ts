@@ -1,37 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Hoist mocks so they're available when vi.mock factories run
-const {
-  mockWriteFile,
-  mockReadFile,
-  mockAccess,
-  mockMkdir,
-  mockChmod,
-  mockIsGitRepository,
-  mockGetRepoRoot,
-} = vi.hoisted(() => ({
-  mockWriteFile: vi.fn(),
-  mockReadFile: vi.fn(),
-  mockAccess: vi.fn(),
-  mockMkdir: vi.fn(),
-  mockChmod: vi.fn(),
-  mockIsGitRepository: vi.fn(),
-  mockGetRepoRoot: vi.fn(),
-}))
-
 // Mock fs/promises
 vi.mock('node:fs/promises', () => ({
-  writeFile: mockWriteFile,
-  readFile: mockReadFile,
-  access: mockAccess,
-  mkdir: mockMkdir,
-  chmod: mockChmod,
+  writeFile: vi.fn(),
+  readFile: vi.fn(),
+  access: vi.fn(),
+  mkdir: vi.fn(),
+  chmod: vi.fn(),
 }))
 
 // Mock VCS detect
 vi.mock('../../vcs/detect.js', () => ({
-  isGitRepository: mockIsGitRepository,
-  getRepoRoot: mockGetRepoRoot,
+  isGitRepository: vi.fn(),
+  getRepoRoot: vi.fn(),
 }))
 
 // Mock inquirer prompts
@@ -52,7 +33,21 @@ vi.mock('../../utils/logger.js', () => ({
 }))
 
 // Import after mocks
-import { initHooks } from '../init-hooks.js'
+import { initHooks, removeHooks } from '../init-hooks.js'
+import { writeFile, readFile, access, mkdir, chmod } from 'node:fs/promises'
+import { isGitRepository, getRepoRoot } from '../../vcs/detect.js'
+import { confirm, select } from '@inquirer/prompts'
+
+// Get mock references
+const mockWriteFile = writeFile as unknown as ReturnType<typeof vi.fn>
+const mockReadFile = readFile as unknown as ReturnType<typeof vi.fn>
+const mockAccess = access as unknown as ReturnType<typeof vi.fn>
+const mockMkdir = mkdir as unknown as ReturnType<typeof vi.fn>
+const mockChmod = chmod as unknown as ReturnType<typeof vi.fn>
+const mockIsGitRepository = isGitRepository as unknown as ReturnType<typeof vi.fn>
+const mockGetRepoRoot = getRepoRoot as unknown as ReturnType<typeof vi.fn>
+const mockConfirm = confirm as unknown as ReturnType<typeof vi.fn>
+const mockSelect = select as unknown as ReturnType<typeof vi.fn>
 
 describe('initHooks', () => {
   beforeEach(() => {
@@ -214,5 +209,130 @@ describe('initHooks with existing hooks', () => {
       expect.stringContaining('Replacing existing kode-review')
     )
     expect(mockWriteFile).toHaveBeenCalled()
+  })
+})
+
+describe('initHooks interactive mode', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsGitRepository.mockResolvedValue(true)
+    mockGetRepoRoot.mockResolvedValue('/test/repo')
+    mockMkdir.mockResolvedValue(undefined)
+    mockWriteFile.mockResolvedValue(undefined)
+    mockChmod.mockResolvedValue(undefined)
+  })
+
+  it('does not write when user declines replacing existing kode-review hook', async () => {
+    // Existing kode-review hook
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue('#!/bin/sh\n# kode-review hook\nkode-review --scope local')
+    mockConfirm.mockResolvedValue(false)
+
+    await initHooks({ interactive: true })
+
+    expect(mockConfirm).toHaveBeenCalled()
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+
+  it('writes when user confirms replacing existing kode-review hook', async () => {
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue('#!/bin/sh\n# kode-review hook\nkode-review --scope local')
+    mockConfirm.mockResolvedValue(true)
+
+    await initHooks({ interactive: true })
+
+    expect(mockConfirm).toHaveBeenCalled()
+    expect(mockWriteFile).toHaveBeenCalled()
+  })
+
+  it('appends to existing non-kode-review hook when user selects append', async () => {
+    const existingContent = '#!/bin/sh\necho "existing hook"'
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue(existingContent)
+    mockSelect.mockResolvedValue('append')
+
+    await initHooks({ interactive: true })
+
+    expect(mockSelect).toHaveBeenCalled()
+    expect(mockWriteFile).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('existing hook'),
+      'utf-8'
+    )
+    // Should also contain the kode-review block
+    const writtenContent = mockWriteFile.mock.calls[0][1] as string
+    expect(writtenContent).toContain('kode-review')
+  })
+
+  it('replaces existing non-kode-review hook when user selects replace', async () => {
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue('#!/bin/sh\necho "other hook"')
+    mockSelect.mockResolvedValue('replace')
+
+    await initHooks({ interactive: true })
+
+    expect(mockSelect).toHaveBeenCalled()
+    expect(mockWriteFile).toHaveBeenCalled()
+    const writtenContent = mockWriteFile.mock.calls[0][1] as string
+    expect(writtenContent).toContain('kode-review')
+    expect(writtenContent).not.toContain('other hook')
+  })
+
+  it('does not write when user selects cancel on non-kode-review hook', async () => {
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue('#!/bin/sh\necho "other hook"')
+    mockSelect.mockResolvedValue('cancel')
+
+    await initHooks({ interactive: true })
+
+    expect(mockSelect).toHaveBeenCalled()
+    expect(mockWriteFile).not.toHaveBeenCalled()
+  })
+})
+
+describe('removeHooks', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockIsGitRepository.mockResolvedValue(true)
+    mockGetRepoRoot.mockResolvedValue('/test/repo')
+  })
+
+  it('throws when not in a git repository', async () => {
+    mockIsGitRepository.mockResolvedValue(false)
+    await expect(removeHooks()).rejects.toThrow('Not in a git repository')
+  })
+
+  it('throws when repo root cannot be determined', async () => {
+    mockGetRepoRoot.mockResolvedValue(null)
+    await expect(removeHooks()).rejects.toThrow('Could not determine repository root')
+  })
+
+  it('logs info when a kode-review hook is found', async () => {
+    // First path (.git/hooks/pre-commit) exists and contains kode-review
+    mockAccess.mockResolvedValue(undefined)
+    mockReadFile.mockResolvedValue('#!/bin/sh\nkode-review --scope local --quiet')
+
+    const { logger } = await import('../../utils/logger.js')
+
+    await removeHooks()
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Found kode-review hook')
+    )
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('delete or edit')
+    )
+  })
+
+  it('does nothing when no hook files exist', async () => {
+    mockAccess.mockRejectedValue(new Error('ENOENT'))
+
+    const { logger } = await import('../../utils/logger.js')
+
+    await removeHooks()
+
+    expect(logger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining('Found kode-review hook')
+    )
   })
 })
