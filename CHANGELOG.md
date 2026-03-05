@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/ebernie/kode-review-cli/compare/v0.3.0...v0.4.0) (2026-03-05)
+
+### Features
+
+* improve test coverage and add graceful provider failure handling ([40637e5](https://github.com/ebernie/kode-review-cli/commit/40637e5fb2e2f798cb79bef087e6f0ef7c288326))
+
+### Bug Fixes
+
+* regenerate changelog with correct version boundaries ([5bdee32](https://github.com/ebernie/kode-review-cli/commit/5bdee32ba2b476f1f437a57cea01175c72db5a34))
+* revert manual version bump, use release-it workflow instead ([e8329ff](https://github.com/ebernie/kode-review-cli/commit/e8329ff0972105e68a9c5259634a32d34fe0a55e))
+* use local origin remote for update checks instead of hardcoded URL ([07afbd0](https://github.com/ebernie/kode-review-cli/commit/07afbd081857e7c6a48bbf8f1c5975dcd00022a3))
+
 ## [0.3.0](https://github.com/kofikode/kode-review-cli/compare/v0.2.0...v0.3.0) (2026-03-04)
 
 ### Features
