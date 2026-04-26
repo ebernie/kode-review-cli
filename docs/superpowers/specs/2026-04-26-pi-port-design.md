@@ -21,7 +21,7 @@ These were settled during brainstorming and underpin everything below:
 1. **Integration mode:** in-process pi SDK (`@mariozechner/pi-coding-agent`). Hard version coupling is acceptable.
 2. **Tool wiring:** keep the existing tool handler modules; add a thin pi-registration adapter; delete the MCP server entrypoint and the `@modelcontextprotocol/sdk` dependency.
 3. **Auth & onboarding:** maximally minimal. Drop `provider`, `model`, `variant`, and the entire `antigravity` config block. Pi owns auth via `pi /login`. Kode-review accepts an optional `--model <pattern>` passthrough.
-4. **Migration:** clean break. v1.0 archives any pre-existing config and forces re-onboarding.
+4. **Migration:** hard clean break. v1.0 wipes any pre-existing config, watch state, and indexer Docker resources (containers + volumes) after a confirmation prompt. **No backup file.** Users who don't want this are told to stay on the previous version.
 5. **Built-in pi tools (read/bash/edit/write):** disabled for review sessions. Reviews never get write access. Only kode-review's own read-only tools are registered (and only in agentic mode).
 
 ## Architecture
@@ -57,13 +57,14 @@ The two engines (`engine.ts` for basic, `agentic-engine.ts` for tool-using) coll
 | `src/onboarding/antigravity.ts` | Delete. |
 | `src/onboarding/pi.ts` | **New.** `isPiInstalled()`, `piHasUsableModel()`, install/login hint helpers. |
 | `src/config/schema.ts` | Drop `provider`, `model`, `variant`, `antigravity`. Keep `github`, `gitlab`, `indexer`, `updater`, `onboardingComplete`. |
-| `src/config/store.ts` | Detect old schema on load, archive `config.json` → `config.json.bak.<timestamp>`, write fresh defaults, set `migrated = true` flag for the CLI to surface. |
-| `src/cli/doctor.ts` | Check `pi` instead of `opencode`. |
-| `src/cli/parse.ts` | Add `--model <pattern>` passthrough. **Delete `--setup-provider`** (no alias — clean break). |
-| `src/cli/update.ts` | No functional change; review messaging strings that mention opencode. |
+| `src/config/store.ts` | On load, expose a `hasOldSchema()` predicate (checks for `provider` key + reads `composeProject` for the migration step). |
+| `src/cli/migration.ts` | **New.** Implements the wipe-everything migration flow: confirm prompt, indexer Docker tear-down, config + watch-state deletion. Honours `--migrate-yes` / `KODE_REVIEW_MIGRATE_YES`. |
+| `src/cli/doctor.ts` | Check `pi` instead of `opencode`. Exempt from the migration gate. |
+| `src/cli/parse.ts` | Add `--model <pattern>` passthrough and `--migrate-yes`. **Delete `--setup-provider`** (no alias — clean break). |
+| `src/cli/update.ts` | No functional change; revise messaging strings that mention opencode. |
 | `src/utils/errors.ts` | New error codes: `PI_NOT_INSTALLED`, `NO_PI_AUTH`, `PI_SDK_FAILURE`. Drop opencode-specific codes. |
 | `package.json` | Remove `@opencode-ai/sdk`, `@modelcontextprotocol/sdk`. Add `@mariozechner/pi-coding-agent`. Bump to `1.0.0`. |
-| `README.md` | Lead with "install pi first." Update install commands, screenshots, model selection guidance. |
+| `README.md` | Lead with "install pi first." Add a prominent **upgrade warning** in a section near the top: v1.0 wipes prior config and indexer data; users who don't want that should pin to the previous version. Update install commands, screenshots, model selection guidance. |
 
 **Untouched:** `src/review/prompt.ts`, `src/review/agentic-prompt.ts`, `src/review/diff.ts`, `src/review/project-structure.ts`, `src/indexer/**`, `src/vcs/**`, `src/watch/**`, `src/utils/{logger,exec}.ts`.
 
@@ -174,20 +175,56 @@ kode-review --setup
 
 Before `createAgentSession`, the engine constructs `AuthStorage` and `ModelRegistry` and verifies at least one usable model exists. If not, it throws `KodeReviewError('NO_PI_AUTH')` with the `pi /login` hint. This catches the case where a user logs out of pi between onboarding and a review run, and avoids surfacing cryptic SDK errors.
 
-## Migration (clean break)
+## Migration (clean break — wipe everything)
 
-In `src/config/store.ts` on load:
+v1.0 is a hard cut. If we detect any previous install, we wipe the whole local state and force the user to re-onboard from scratch. **No backup file.** Users who don't want this are told (in the README and in the on-first-run warning) to stay on the previous version.
+
+What "wipe everything" covers:
+
+1. `~/.config/kode-review/config.json` — replaced with fresh defaults.
+2. `~/.config/kode-review-watch/config.json` — deleted.
+3. Indexer Docker containers + volumes for the previously-configured compose project (e.g., `kode-review-indexer`). We read `composeProject` from the old config *before* deleting it, then run `docker compose -p <project> down -v` to remove containers and named volumes.
+
+### Detection
+
+In `src/config/store.ts` on first load (or in a dedicated `src/cli/migration.ts` step run before any other CLI work):
 
 1. Read raw config JSON.
-2. If `provider` key is present (old-schema marker) → rename file to `config.json.bak.<timestamp>`, write fresh defaults, set in-memory `migrated = true`.
-3. `getConfig()` returns the new defaults.
-4. `src/index.ts` checks the flag once at startup and prints:
+2. If the `provider` key is present (old-schema marker) → enter migration flow.
 
-   > kode-review v1.0 now uses pi (https://pi.dev) instead of opencode. Your previous config has been archived to `config.json.bak.<timestamp>`. Run `kode-review --setup` to continue.
+### Migration flow
 
-5. Exit cleanly. The user runs `--setup` deliberately.
+Performed before any other command runs (including `--help`-adjacent paths is fine, but doctor/version should still work — see below):
 
-No silent data loss — the backup is verbatim. The new wizard is short enough (~3 prompts) that re-onboarding is acceptable.
+```
+kode-review (any command on a system with old config)
+  ├─ Detect old schema
+  ├─ Print warning:
+  │     "kode-review v1.0 is a clean break. Continuing will:
+  │        - wipe ~/.config/kode-review/
+  │        - wipe ~/.config/kode-review-watch/
+  │        - tear down the indexer Docker project (containers AND volumes)
+  │      This is irreversible. To keep the old setup, install
+  │      `kode-review@<previous-version>` instead.
+  │
+  │      Continue? Type 'wipe' to confirm."
+  ├─ Read user input
+  │     ├─ "wipe" → proceed
+  │     └─ anything else → exit 0 with "Aborted. No changes made."
+  ├─ Read composeProject name from the old config (before wiping)
+  ├─ docker compose -p <composeProject> down -v   (best-effort, log failures)
+  ├─ rm -rf ~/.config/kode-review-watch/
+  ├─ Replace ~/.config/kode-review/config.json with fresh defaults
+  └─ Print: "Done. Run `kode-review --setup` to set up v1.0."
+       exit 0
+```
+
+Notes:
+
+- **Non-interactive bypass.** Accept `--migrate-yes` (or `KODE_REVIEW_MIGRATE_YES=1`) to skip the typed confirmation, for users who want to script the upgrade. CI/Docker installs that don't have a TTY also need this — without it, the prompt fails closed and prints the same "Aborted" message.
+- **Doctor/version exempt.** `kode-review --doctor` and `kode-review --version` should run without triggering the migration prompt — they're diagnostic, not operational. The migration check sits inside the command dispatcher, not at process start.
+- **Docker tear-down is best-effort.** If `docker` is missing or the compose project doesn't exist, log the failure and continue — config wipe still proceeds. If the indexer was never set up, this is a no-op.
+- **Watch-mode state.** The separate `~/.config/kode-review-watch/` directory is wiped wholesale.
 
 ## Errors
 
@@ -216,23 +253,14 @@ Pattern stays the same: `vi.mock()` the agent SDK, stub `createAgentSession` to 
 
 - `src/review/__tests__/pi-tools.test.ts` — each tool's parameter schema validates expected input; the adapter passes input through to the underlying handler unchanged; indexer tools are skipped when `indexerUrl` is absent.
 - `src/onboarding/__tests__/pi.test.ts` — `piHasUsableModel()` recognises both the "no models" sentinel and a populated list.
-- `src/config/__tests__/migration.test.ts` — old-schema config triggers archive + fresh defaults; new-schema config passes through untouched; backup file is created with a timestamp.
+- `src/cli/__tests__/migration.test.ts` — covers (a) old-schema detection, (b) confirm prompt rejects anything that isn't `wipe`, (c) `--migrate-yes`/env-var bypass, (d) Docker tear-down is invoked with the right `composeProject` name read from the old config, (e) tear-down failure does not block config wipe, (f) post-wipe state matches fresh defaults, (g) `--doctor` and `--version` are exempt from the migration gate.
 
 **Untouched:** all indexer tests, VCS tests, watch-mode tests, prompt-builder tests, diff-extraction tests. `response.ts` tests get a small shape fix for pi's `AgentMessage`.
-
-## Known caveats
-
-**Indexer port collision on migration.** The clean-break migration wipes the entire config, including the `indexer` block (`composeProject`, `apiPort`, `dbPort`, etc.). If a user has running indexer containers from the previous install, the post-migration wizard will offer fresh defaults, and a fresh `--setup-indexer` may either collide with the running services or orphan them. Two acceptable resolutions, deferred to the implementation plan:
-
-1. Print a one-line note in the migration message: "If you previously ran the kode-review indexer, run `kode-review --index-reset` before `--setup-indexer` to avoid port conflicts." Cheapest. User-managed.
-2. Soften the migration: archive old config, but carry forward `indexer`, `github`, `gitlab`, `updater` blocks into the new defaults; only drop `provider`, `model`, `variant`, `antigravity`; still flip `onboardingComplete = false`. Equivalent to brainstorming option C ("hybrid"), with the user-facing behaviour identical to option A from the user's perspective (they still re-run setup, still see the v1.0 message). Requires a slightly more careful schema-stripper but avoids the collision. **Recommended.**
-
-The implementation plan should adopt (2) unless we hear otherwise.
 
 ## Build sequence (suggested order for the implementation plan)
 
 1. **Verify SDK shape.** Read `node_modules/@mariozechner/pi-coding-agent/examples/sdk/`. Confirm whether tools are registered dynamically on `Agent` or up-front via the session config. Lock the `pi-tools.ts` signature accordingly.
-2. **Schema + migration.** Update `src/config/schema.ts` and `src/config/store.ts`. Add migration test. Confirms an old config gets archived.
+2. **Schema + migration.** Update `src/config/schema.ts` and `src/config/store.ts` (add `hasOldSchema()`). Implement `src/cli/migration.ts` with confirm prompt, Docker tear-down, config + watch-state wipe, and `--migrate-yes` bypass. Wire it into the command dispatcher (exempting `--doctor` and `--version`). Tests per the testing section.
 3. **Onboarding helpers.** New `src/onboarding/pi.ts`. Test `piHasUsableModel()`.
 4. **Wizard rewrite.** `src/onboarding/wizard.ts` slimmed; delete `antigravity.ts`. Manual test: `kode-review --setup` with pi installed/not, with creds/not.
 5. **Move tools.** `src/mcp/tools/` → `src/review/tools/`. Update imports. No behavioural change.
@@ -242,4 +270,4 @@ The implementation plan should adopt (2) unless we hear otherwise.
 9. **Doctor + errors.** Update `src/cli/doctor.ts`, `src/utils/errors.ts`. Update its tests.
 10. **CLI flags.** Add `--model` passthrough; delete `--setup-provider`. Update `src/cli/parse.ts` and any docs.
 11. **Package + readme.** `package.json` deps + version bump; rewrite README quickstart.
-12. **End-to-end smoke.** `bun run build && node dist/index.js` against a local repo: basic review, agentic review with indexer, agentic review without indexer (should warn and run with read_file only), `--setup` flow, migration flow.
+12. **End-to-end smoke.** `bun run build && node dist/index.js` against a local repo: basic review, agentic review with indexer, agentic review without indexer (should warn and run with read_file only), `--setup` flow, migration flow (with both interactive confirm and `--migrate-yes`).
