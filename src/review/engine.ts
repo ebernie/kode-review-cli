@@ -1,135 +1,213 @@
-import { createOpencode, createOpencodeClient } from '@opencode-ai/sdk'
-import { getConfig } from '../config/index.js'
-import { buildReviewPrompt, type ReviewPromptOptions } from './prompt.js'
-import { extractResponseContent } from './response.js'
-import { promptAndWaitForResponse } from './session-events.js'
+/**
+ * Review engine — runs a code review through a pi `AgentSession`.
+ *
+ * Two public entry points:
+ * - `runReview`: text-only review (no tools, no system prompt override).
+ * - `runAgenticReview`: registers kode-review's read-only tools and uses
+ *   the agentic system prompt so the model can explore the codebase.
+ *
+ * Both share the same underlying lifecycle (auth gate, session creation,
+ * event collection, response extraction, dispose).
+ */
+
+import {
+  createAgentSession,
+  AuthStorage,
+  ModelRegistry,
+  DefaultResourceLoader,
+  SessionManager,
+  getAgentDir,
+  type ExtensionAPI,
+} from '@mariozechner/pi-coding-agent'
+import type { Api, Model } from '@mariozechner/pi-ai'
 import { logger } from '../utils/logger.js'
+import { AppError } from '../utils/errors.js'
+import { buildReviewPrompt, type ReviewPromptOptions } from './prompt.js'
+import {
+  AGENTIC_SYSTEM_PROMPT,
+  buildAgenticPrompt,
+  type AgenticPromptOptions,
+} from './agentic-prompt.js'
+import { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
+import { attachReviewListener } from './session-events.js'
+import { extractReviewContent } from './response.js'
+
+const DEFAULT_TIMEOUT_MS = 180_000
+const DEFAULT_AGENTIC_TIMEOUT_SEC = 120
+const DEFAULT_AGENTIC_MAX_ITERATIONS = 10
 
 export interface ReviewOptions {
-  /** Diff content to review */
   diffContent: string
-  /** Context description */
   context: string
-  /** PR/MR info as JSON string */
   prMrInfo?: string
-  /** Semantic context from code indexer */
   semanticContext?: string
-  /** PR/MR description summary for author intent context */
   prDescriptionSummary?: string
-  /** Project structure context (directory tree, README, architecture docs) */
   projectStructureContext?: string
-  /** Override provider */
-  provider?: string
-  /** Override model */
+  /** Pi model pattern, e.g. "anthropic/claude-sonnet-4-6". Default: pi's preferred model. */
   model?: string
-  /** Override variant */
-  variant?: string
+}
+
+export interface AgenticReviewOptions extends ReviewOptions {
+  repoRoot: string
+  repoUrl: string
+  branch?: string
+  /** When omitted, only `read_file` is registered (indexer-dependent tools are skipped). */
+  indexerUrl?: string
+  /** Maximum tool-call iterations before pi forces a text-only response. */
+  maxIterations?: number
+  /** Hard ceiling in seconds for the whole review. Default: 120. */
+  timeout?: number
 }
 
 export interface ReviewResult {
-  /** The review text output */
   content: string
-  /** Token usage info */
-  usage?: {
-    inputTokens: number
-    outputTokens: number
-  }
+}
+
+export interface AgenticReviewResult {
+  content: string
+  toolCallCount: number
+  truncated: boolean
+  truncationReason?: string
 }
 
 /**
- * Run a code review using OpenCode SDK
+ * Resolve the model the user wants for this review.
+ *
+ * Priority:
+ *  1. `--model provider/id` (or `--model id` matching a known provider)
+ *  2. First available model from pi's registry (i.e. one with valid creds)
+ *
+ * Throws `NO_PI_AUTH` when no model has usable credentials.
  */
-export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
-  const config = getConfig()
-
-  // Use overrides or config values
-  const provider = options.provider ?? config.provider
-  const model = options.model ?? config.model
-  const variant = options.variant ?? config.variant
-
-  logger.info(`Starting review with ${provider}/${model}${variant ? `:${variant}` : ''}`)
-
-  // Build the prompt
-  const promptOptions: ReviewPromptOptions = {
-    context: options.context,
-    diffContent: options.diffContent,
-    prMrInfo: options.prMrInfo,
-    semanticContext: options.semanticContext,
-    prDescriptionSummary: options.prDescriptionSummary,
-    projectStructureContext: options.projectStructureContext,
+async function resolveModel(
+  modelRegistry: ModelRegistry,
+  modelPattern: string | undefined,
+): Promise<Model<Api>> {
+  const available = await modelRegistry.getAvailable()
+  if (available.length === 0) {
+    throw new AppError(
+      'No pi provider has usable credentials.',
+      {
+        category: 'review',
+        recoveryHint: 'Run `pi` and use `/login` to set one up, then re-run kode-review.',
+      },
+    )
   }
-  const prompt = buildReviewPrompt(promptOptions)
 
-  // Start OpenCode server and client
-  const { client, server } = await createOpencode({
-    port: 0, // Random available port
-    timeout: 30000, // 30 second timeout for server start
+  if (modelPattern) {
+    const slashIdx = modelPattern.indexOf('/')
+    if (slashIdx > 0) {
+      const provider = modelPattern.slice(0, slashIdx)
+      const id = modelPattern.slice(slashIdx + 1)
+      const exact = available.find((m) => m.provider === provider && m.id === id)
+      if (exact) return exact as Model<Api>
+    } else {
+      const byId = available.find((m) => m.id === modelPattern)
+      if (byId) return byId as Model<Api>
+    }
+    const examples = available
+      .slice(0, 5)
+      .map((m) => `${m.provider}/${m.id}`)
+      .join(', ')
+    throw new AppError(
+      `Model "${modelPattern}" is not available in pi.`,
+      {
+        category: 'review',
+        recoveryHint: `Available: ${examples}${available.length > 5 ? ', …' : ''}`,
+      },
+    )
+  }
+
+  return available[0] as Model<Api>
+}
+
+interface RunOptions {
+  userPrompt: string
+  modelPattern: string | undefined
+  cwd: string
+  systemPromptOverride?: string
+  toolContext?: ToolContext
+  timeoutMs: number
+  maxIterations?: number
+}
+
+interface RunOutcome {
+  content: string
+  toolCallCount: number
+  truncated: boolean
+}
+
+async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
+  const authStorage = AuthStorage.create()
+  const modelRegistry = ModelRegistry.create(authStorage)
+  const model = await resolveModel(modelRegistry, opts.modelPattern)
+  logger.info(`Using model ${model.provider}/${model.id}`)
+
+  const extensionFactories: Array<(pi: ExtensionAPI) => void | Promise<void>> = []
+  if (opts.toolContext) {
+    extensionFactories.push(createKodeReviewToolsExtension(opts.toolContext))
+  }
+
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: opts.cwd,
+    agentDir: getAgentDir(),
+    extensionFactories,
+    systemPromptOverride: opts.systemPromptOverride
+      ? () => opts.systemPromptOverride!
+      : undefined,
+    appendSystemPromptOverride: () => [],
+  })
+  await resourceLoader.reload()
+
+  const { session } = await createAgentSession({
+    cwd: opts.cwd,
+    authStorage,
+    modelRegistry,
+    model,
+    noTools: opts.toolContext ? 'builtin' : 'all',
+    resourceLoader,
+    sessionManager: SessionManager.inMemory(opts.cwd),
+  })
+
+  const listener = attachReviewListener(session)
+
+  const timeoutHandle: { id: NodeJS.Timeout | null } = { id: null }
+  const reviewTimeout = new AppError(
+    `Review did not complete within ${opts.timeoutMs / 1000}s.`,
+    { category: 'review', recoveryHint: 'Re-run with a longer --agentic-timeout, or check that the chosen model is responding.' },
+  )
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timeoutHandle.id = setTimeout(() => reject(reviewTimeout), opts.timeoutMs)
   })
 
   try {
-    // Create a session
-    const sessionResult = await client.session.create({
-      body: { title: 'Code Review' },
-    })
-
-    if (!sessionResult.data) {
-      throw new Error('Failed to create session')
+    await Promise.race([session.prompt(opts.userPrompt), timeout, listener.done])
+  } catch (err) {
+    if (err === reviewTimeout) {
+      try {
+        await session.abort()
+      } catch (abortErr) {
+        logger.debug(`abort() after timeout failed: ${String(abortErr)}`)
+      }
     }
-
-    const sessionId = sessionResult.data.id
-
-    // Build model specification
-    const modelSpec: { providerID: string; modelID: string; variant?: string } = {
-      providerID: provider,
-      modelID: model,
-    }
-
-    if (variant) {
-      modelSpec.variant = variant
-    }
-
-    // Send prompt async and wait for completion via SSE
-    const assistantMessage = await promptAndWaitForResponse({
-      client,
-      sessionId,
-      body: {
-        model: modelSpec,
-        parts: [{ type: 'text', text: prompt }],
-      },
-      timeoutMs: 180_000,
-    })
-
-    const content = extractResponseContent(assistantMessage)
-
-    return {
-      content,
-    }
+    throw err
   } finally {
-    // Always clean up the server
-    server.close()
+    if (timeoutHandle.id) clearTimeout(timeoutHandle.id)
+    listener.unsubscribe()
+    session.dispose()
   }
+
+  const content = extractReviewContent(session.state.messages)
+  const toolCallCount = listener.toolCallCount
+  const truncated = opts.maxIterations !== undefined && toolCallCount >= opts.maxIterations
+
+  return { content, toolCallCount, truncated }
 }
 
 /**
- * Run a review by connecting to an existing OpenCode server
+ * Run a basic (text-only) code review.
  */
-export async function runReviewWithServer(
-  serverUrl: string,
-  options: ReviewOptions
-): Promise<ReviewResult> {
-  const config = getConfig()
-
-  const provider = options.provider ?? config.provider
-  const model = options.model ?? config.model
-  const variant = options.variant ?? config.variant
-
-  logger.info(`Connecting to server at ${serverUrl}`)
-  logger.info(`Using ${provider}/${model}${variant ? `:${variant}` : ''}`)
-
-  const client = createOpencodeClient({
-    baseUrl: serverUrl,
-  })
-
+export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
   const promptOptions: ReviewPromptOptions = {
     context: options.context,
     diffContent: options.diffContent,
@@ -138,37 +216,59 @@ export async function runReviewWithServer(
     prDescriptionSummary: options.prDescriptionSummary,
     projectStructureContext: options.projectStructureContext,
   }
-  const prompt = buildReviewPrompt(promptOptions)
 
-  // Create session and send prompt
-  const sessionResult = await client.session.create({
-    body: { title: 'Code Review' },
+  const outcome = await runWithPi({
+    userPrompt: buildReviewPrompt(promptOptions),
+    modelPattern: options.model,
+    cwd: process.cwd(),
+    timeoutMs: DEFAULT_TIMEOUT_MS,
   })
 
-  if (!sessionResult.data) {
-    throw new Error('Failed to create session')
+  return { content: outcome.content }
+}
+
+/**
+ * Run an agentic code review with kode-review tools registered.
+ */
+export async function runAgenticReview(
+  options: AgenticReviewOptions,
+): Promise<AgenticReviewResult> {
+  const promptOptions: AgenticPromptOptions = {
+    diffContent: options.diffContent,
+    context: options.context,
+    prMrInfo: options.prMrInfo,
+    prDescriptionSummary: options.prDescriptionSummary,
+    projectStructureContext: options.projectStructureContext,
   }
 
-  const modelSpec: { providerID: string; modelID: string; variant?: string } = {
-    providerID: provider,
-    modelID: model,
+  const maxIterations = options.maxIterations ?? DEFAULT_AGENTIC_MAX_ITERATIONS
+  const timeoutSec = options.timeout ?? DEFAULT_AGENTIC_TIMEOUT_SEC
+
+  if (!options.indexerUrl) {
+    logger.warn('Indexer URL not provided — only `read_file` will be available to the agent.')
   }
 
-  if (variant) {
-    modelSpec.variant = variant
-  }
-
-  const assistantMessage = await promptAndWaitForResponse({
-    client,
-    sessionId: sessionResult.data.id,
-    body: {
-      model: modelSpec,
-      parts: [{ type: 'text', text: prompt }],
+  const outcome = await runWithPi({
+    userPrompt: buildAgenticPrompt(promptOptions),
+    modelPattern: options.model,
+    cwd: options.repoRoot,
+    systemPromptOverride: AGENTIC_SYSTEM_PROMPT,
+    toolContext: {
+      repoRoot: options.repoRoot,
+      repoUrl: options.repoUrl,
+      indexerUrl: options.indexerUrl,
+      branch: options.branch,
     },
-    timeoutMs: 180_000,
+    timeoutMs: timeoutSec * 1000,
+    maxIterations,
   })
 
-  const content = extractResponseContent(assistantMessage)
-
-  return { content }
+  return {
+    content: outcome.content,
+    toolCallCount: outcome.toolCallCount,
+    truncated: outcome.truncated,
+    truncationReason: outcome.truncated
+      ? `Maximum iteration limit (${maxIterations}) reached`
+      : undefined,
+  }
 }

@@ -1,15 +1,12 @@
 /**
- * System diagnostics command
+ * System diagnostics command.
  *
- * Runs a series of checks to verify the system is properly configured:
- * - Config file exists and is valid
- * - OpenCode CLI installed
- * - Node.js version (18+)
- * - Git installed
- * - GitHub CLI (gh) - installed & authenticated
- * - GitLab CLI (glab) - installed & authenticated
- * - Docker prerequisites (if indexer enabled)
- * - Indexer containers running (if indexer enabled)
+ * Verifies kode-review's prerequisites:
+ * - Config file exists and onboarding is complete
+ * - pi (https://pi.dev) installed and has at least one usable model
+ * - Node.js 18+ and git installed
+ * - GitHub/GitLab CLIs installed & authenticated
+ * - Docker + indexer containers (when indexer is enabled)
  */
 
 import { exec, commandExists } from '../utils/exec.js'
@@ -50,16 +47,16 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
   const config = getConfig()
 
   // Run independent checks in parallel
-  const [configCheck, nodeCheck, gitCheck, openCodeCheck, ghCheck, glabCheck] = await Promise.all([
+  const [configCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck] = await Promise.all([
     checkConfig(),
     checkNodeVersion(),
     checkGit(),
-    checkOpenCode(),
+    checkPi(),
     checkGitHubCli(),
     checkGitLabCli(),
   ])
 
-  const checks: DiagnosticCheck[] = [configCheck, nodeCheck, gitCheck, openCodeCheck, ghCheck, glabCheck]
+  const checks: DiagnosticCheck[] = [configCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck]
 
   // Conditional checks (depend on config/runtime state)
   if (config.indexer.enabled || await isDockerAvailable()) {
@@ -211,33 +208,51 @@ async function checkGit(): Promise<DiagnosticCheck> {
   }
 }
 
-async function checkOpenCode(): Promise<DiagnosticCheck> {
-  const exists = await commandExists('opencode')
-
-  if (!exists) {
+async function checkPi(): Promise<DiagnosticCheck> {
+  const piInstalled = await commandExists('pi')
+  if (!piInstalled) {
     return {
-      name: 'OpenCode CLI',
-      status: 'warn',
+      name: 'pi',
+      status: 'fail',
       message: 'Not found in PATH',
-      details: 'Install via: npm install -g @opencode-ai/cli',
+      details: 'Install via: npm install -g @mariozechner/pi-coding-agent (https://pi.dev)',
     }
   }
 
-  try {
-    const result = await exec('opencode', ['--version'])
-    const version = result.stdout.trim()
+  const runner = exec
+  const listResult = await runner('pi', ['--list-models'])
+  const stdout = listResult.stdout
 
+  if (listResult.exitCode !== 0) {
     return {
-      name: 'OpenCode CLI',
-      status: 'pass',
-      message: `Version ${version || 'installed'}`,
+      name: 'pi',
+      status: 'fail',
+      message: 'Installed but `pi --list-models` failed',
+      details: stdout.trim() || listResult.stderr.trim() || `exit code ${listResult.exitCode}`,
     }
+  }
+
+  if (/No models available/i.test(stdout) || stdout.trim().length === 0) {
+    return {
+      name: 'pi',
+      status: 'fail',
+      message: 'Installed but no provider configured',
+      details: 'Run `pi` and use `/login` to set up a provider.',
+    }
+  }
+
+  let version = ''
+  try {
+    const verResult = await runner('pi', ['--version'])
+    version = verResult.stdout.trim()
   } catch {
-    return {
-      name: 'OpenCode CLI',
-      status: 'warn',
-      message: 'Found but could not get version',
-    }
+    // best-effort; not critical
+  }
+
+  return {
+    name: 'pi',
+    status: 'pass',
+    message: version ? `Version ${version}, provider available` : 'Installed, provider available',
   }
 }
 
@@ -381,7 +396,7 @@ function getSuggestion(checkName: string): string | undefined {
     'Configuration': 'Run "kode-review --setup" to complete configuration',
     'Node.js': 'Install Node.js 18 or later from https://nodejs.org/',
     'Git': 'Install Git from https://git-scm.com/',
-    'OpenCode CLI': 'Run: npm install -g @opencode-ai/cli',
+    'pi': 'Run: npm install -g @mariozechner/pi-coding-agent — then `pi /login`',
     'GitHub CLI (gh)': 'Run: gh auth login',
     'GitLab CLI (glab)': 'Run: glab auth login',
     'Docker': 'Install and start Docker from https://docker.com/',

@@ -20,13 +20,8 @@ export interface CliOptions {
   // Hook generation
   initHooks: boolean
 
-  // Model overrides
-  provider?: string
+  // Model override (passthrough to pi)
   model?: string
-  variant?: string
-
-  // Server
-  attach?: string
 
   // Watch mode
   watch: boolean
@@ -35,9 +30,9 @@ export interface CliOptions {
 
   // Setup commands
   setup: boolean
-  setupProvider: boolean
   setupVcs: boolean
   reset: boolean
+  migrateYes: boolean
 
   // Indexer commands
   setupIndexer: boolean
@@ -76,7 +71,7 @@ export function createProgram(): Command {
 
   program
     .name('kode-review')
-    .description('AI-powered code review CLI using OpenCode SDK')
+    .description('AI-powered code review CLI built on pi (https://pi.dev)')
     .version(PKG_VERSION)
 
   // Review options
@@ -96,15 +91,9 @@ export function createProgram(): Command {
   program
     .option('--init-hooks', 'Generate pre-commit hook for code review', false)
 
-  // Model overrides
+  // Model override (passed through to pi as `provider/id` or `id`)
   program
-    .option('--provider <provider>', 'Override provider (e.g., anthropic, google)')
-    .option('--model <model>', 'Override model (e.g., claude-sonnet-4-20250514)')
-    .option('--variant <variant>', 'Override variant (e.g., max, low)')
-
-  // Server
-  program
-    .option('--attach <url>', 'Attach to running OpenCode server')
+    .option('--model <model>', 'Override model used for this review (e.g., anthropic/claude-sonnet-4-6)')
 
   // Watch mode
   program
@@ -115,9 +104,9 @@ export function createProgram(): Command {
   // Setup commands
   program
     .option('--setup', 'Run the full onboarding wizard', false)
-    .option('--setup-provider', 'Re-configure provider/model only', false)
     .option('--setup-vcs', 'Re-configure GitHub/GitLab only', false)
     .option('--reset', 'Reset all configuration', false)
+    .option('--migrate-yes', 'Skip the typed-confirmation prompt during the v1.0 clean-break migration', false)
 
   // Indexer commands
   program
@@ -212,17 +201,14 @@ export function parseArgs(argv: string[]): CliOptions {
     outputFile: opts.outputFile,
     postToPr: opts.postToPr ?? false,
     initHooks: opts.initHooks ?? false,
-    provider: opts.provider,
     model: opts.model,
-    variant: opts.variant,
-    attach: opts.attach,
     watch: opts.watch ?? false,
     watchInterval,
     watchInteractive: opts.watchInteractive ?? false,
     setup: opts.setup ?? false,
-    setupProvider: opts.setupProvider ?? false,
     setupVcs: opts.setupVcs ?? false,
     reset: opts.reset ?? false,
+    migrateYes: opts.migrateYes ?? false,
     setupIndexer: opts.setupIndexer ?? false,
     index: opts.index ?? false,
     indexWatch: opts.indexWatch ?? false,

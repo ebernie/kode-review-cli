@@ -298,7 +298,8 @@ describe('runDiagnostics', () => {
     mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }
       if (cmd === 'git') return { stdout: 'git version 2.43.0', exitCode: 0 }
-      if (cmd === 'opencode') return { stdout: '1.0.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) return { stdout: 'anthropic/claude-sonnet-4-6\n', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--version')) return { stdout: '0.70.2', exitCode: 0 }
       if (cmd === 'gh' && args?.includes('status')) return { stdout: 'Logged in', exitCode: 0 }
       if (cmd === 'glab' && args?.includes('status')) return { stdout: 'Logged in', exitCode: 0 }
       return { stdout: '', exitCode: 0 }
@@ -318,19 +319,38 @@ describe('runDiagnostics', () => {
     expect(result.failCount).toBe(0)
   })
 
-  it('returns mix of pass and warn when onboarding incomplete and opencode missing', async () => {
+  it('reports pi as failing when it is missing from PATH', async () => {
     mockIsOnboardingComplete.mockReturnValue(false)
     mockCommandExists.mockImplementation(async (cmd: string) => {
-      if (cmd === 'opencode') return false
+      if (cmd === 'pi') return false
       return true
     })
 
     const result = await runDiagnostics()
 
-    expect(result.passCount).toBeGreaterThan(0)
-    expect(result.warnCount).toBeGreaterThan(0)
-    expect(result.failCount).toBe(0)
-    expect(result.passCount + result.warnCount + result.failCount).toBe(result.checks.length)
+    const piCheck = result.checks.find((c) => c.name === 'pi')
+    expect(piCheck).toBeDefined()
+    expect(piCheck!.status).toBe('fail')
+    expect(result.failCount).toBeGreaterThanOrEqual(1)
+  })
+
+  it('reports pi as failing when no provider is configured', async () => {
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
+      if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }
+      if (cmd === 'git') return { stdout: 'git version 2.43.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) {
+        return { stdout: 'No models available. Use /login...', exitCode: 0 }
+      }
+      if (cmd === 'gh') return { stdout: 'Logged in', exitCode: 0 }
+      if (cmd === 'glab') return { stdout: 'Logged in', exitCode: 0 }
+      return { stdout: '', exitCode: 0 }
+    })
+
+    const result = await runDiagnostics()
+    const piCheck = result.checks.find((c) => c.name === 'pi')
+    expect(piCheck).toBeDefined()
+    expect(piCheck!.status).toBe('fail')
+    expect(piCheck!.message).toContain('no provider')
   })
 
   it('includes Docker check when indexer is enabled', async () => {
@@ -358,10 +378,11 @@ describe('runDiagnostics', () => {
   })
 
   it('returns fail when git is not found', async () => {
-    mockExec.mockImplementation(async (cmd: string) => {
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'git') throw new Error('not found')
       if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }
-      if (cmd === 'opencode') return { stdout: '1.0.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) return { stdout: 'anthropic/claude-sonnet-4-6\n', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--version')) return { stdout: '0.70.2', exitCode: 0 }
       if (cmd === 'gh') return { stdout: 'Logged in', exitCode: 0 }
       if (cmd === 'glab') return { stdout: 'Logged in', exitCode: 0 }
       return { stdout: '', exitCode: 0 }
@@ -376,10 +397,11 @@ describe('runDiagnostics', () => {
   })
 
   it('returns fail when Node.js version is too low', async () => {
-    mockExec.mockImplementation(async (cmd: string) => {
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'node') return { stdout: 'v16.0.0', exitCode: 0 }
       if (cmd === 'git') return { stdout: 'git version 2.43.0', exitCode: 0 }
-      if (cmd === 'opencode') return { stdout: '1.0.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) return { stdout: 'anthropic/claude-sonnet-4-6\n', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--version')) return { stdout: '0.70.2', exitCode: 0 }
       if (cmd === 'gh') return { stdout: 'Logged in', exitCode: 0 }
       if (cmd === 'glab') return { stdout: 'Logged in', exitCode: 0 }
       return { stdout: '', exitCode: 0 }
@@ -407,7 +429,8 @@ describe('runDiagnostics', () => {
     mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }
       if (cmd === 'git') return { stdout: 'git version 2.43.0', exitCode: 0 }
-      if (cmd === 'opencode') return { stdout: '1.0.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) return { stdout: 'anthropic/claude-sonnet-4-6\n', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--version')) return { stdout: '0.70.2', exitCode: 0 }
       // gh auth status fails
       if (cmd === 'gh' && args?.includes('status')) return { stdout: '', exitCode: 1 }
       if (cmd === 'glab' && args?.includes('status')) return { stdout: 'Logged in', exitCode: 0 }

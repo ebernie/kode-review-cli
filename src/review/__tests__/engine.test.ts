@@ -1,210 +1,189 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Mock session-events module
-vi.mock('../session-events.js', () => ({
-  promptAndWaitForResponse: vi.fn(),
-}))
+// Pi SDK stub. We capture the options createAgentSession was called with,
+// and let each test drive the simulated session lifecycle.
+const captured: { options: any | null; subscriber: ((event: any) => void) | null; resolvePrompt: () => void; rejectPrompt: (err: unknown) => void } = {
+  options: null,
+  subscriber: null,
+  resolvePrompt: () => {},
+  rejectPrompt: () => {},
+}
 
-// Mock the @opencode-ai/sdk module
-vi.mock('@opencode-ai/sdk', () => ({
-  createOpencode: vi.fn().mockResolvedValue({
-    client: {
-      session: {
-        create: vi.fn(),
-      },
+const sessionState = { messages: [] as any[] }
+
+vi.mock('@mariozechner/pi-coding-agent', () => {
+  class FakeDefaultResourceLoader {
+    options: unknown
+    constructor(opts: unknown) { this.options = opts }
+    async reload() {}
+  }
+  return {
+    AuthStorage: { create: vi.fn(() => ({})) },
+    ModelRegistry: {
+      create: vi.fn(() => ({
+        getAvailable: vi.fn(async () => [
+          { provider: 'anthropic', id: 'claude-sonnet-4-6', api: 'anthropic-messages' },
+          { provider: 'google', id: 'gemini-3-pro', api: 'google-gen-ai' },
+        ]),
+      })),
     },
-    server: { close: vi.fn() },
-  }),
-  createOpencodeClient: vi.fn().mockReturnValue({
-    session: {
-      create: vi.fn(),
-    },
-  }),
-}))
+    DefaultResourceLoader: FakeDefaultResourceLoader,
+    SessionManager: { inMemory: vi.fn(() => ({})) },
+    getAgentDir: vi.fn(() => '/tmp/agent'),
+    createAgentSession: vi.fn(async (opts: any) => {
+      captured.options = opts
+      const session = {
+        state: sessionState,
+        subscribe(listener: (event: any) => void) {
+          captured.subscriber = listener
+          return () => { captured.subscriber = null }
+        },
+        prompt: vi.fn(async () => {
+          await new Promise<void>((resolve, reject) => {
+            captured.resolvePrompt = () => {
+              if (captured.subscriber) captured.subscriber({ type: 'agent_end', messages: sessionState.messages })
+              resolve()
+            }
+            captured.rejectPrompt = reject
+          })
+        }),
+        abort: vi.fn(async () => {}),
+        dispose: vi.fn(),
+      }
+      return { session }
+    }),
+  }
+})
 
-vi.mock('../../config/index.js', () => ({
-  getConfig: vi.fn().mockReturnValue({
-    provider: 'test-provider',
-    model: 'test-model',
-    variant: undefined,
-  }),
-}))
+import { runReview, runAgenticReview } from '../engine.js'
 
-vi.mock('../../utils/logger.js', () => ({
-  logger: {
-    info: vi.fn(),
-    debug: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    success: vi.fn(),
-  },
-}))
+beforeEach(() => {
+  captured.options = null
+  captured.subscriber = null
+  sessionState.messages = []
+})
 
-import { runReview, runReviewWithServer } from '../engine.js'
-import { promptAndWaitForResponse } from '../session-events.js'
-import { createOpencode, createOpencodeClient } from '@opencode-ai/sdk'
+function pushAssistantText(text: string) {
+  sessionState.messages.push({
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    stopReason: 'end_turn',
+  })
+}
 
-// Get mock references
-const mockPromptAndWait = promptAndWaitForResponse as unknown as ReturnType<typeof vi.fn>
+function pushTool() {
+  if (captured.subscriber) {
+    captured.subscriber({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read_file', args: { path: 'a.ts' } })
+    captured.subscriber({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'read_file', result: 'ok', isError: false })
+  }
+}
 
 describe('runReview', () => {
-  let mockSessionCreate: ReturnType<typeof vi.fn>
-  let mockServerClose: ReturnType<typeof vi.fn>
-
-  beforeEach(async () => {
-    vi.clearAllMocks()
-    // Re-setup the createOpencode mock since clearAllMocks resets return values
-    const opencodeResult = await (createOpencode as unknown as ReturnType<typeof vi.fn>)()
-    mockSessionCreate = opencodeResult.client.session.create as ReturnType<typeof vi.fn>
-    mockServerClose = opencodeResult.server.close as ReturnType<typeof vi.fn>
-    mockSessionCreate.mockResolvedValue({
-      data: { id: 'session-123' },
+  it('returns the assistant text after a basic review completes', async () => {
+    const promise = runReview({
+      diffContent: 'diff',
+      context: 'review',
     })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('Looks good, no critical issues.')
+    captured.resolvePrompt()
+
+    const result = await promise
+    expect(result.content).toBe('Looks good, no critical issues.')
   })
 
-  it('extracts text content from response parts', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: { role: 'assistant' },
-      parts: [
-        { type: 'text', text: 'Review summary' },
-        { type: 'text', text: 'Detailed feedback' },
-      ],
-    })
+  it('disables built-in pi tools entirely for basic review (noTools = "all")', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
 
-    const result = await runReview({
-      diffContent: 'diff --git a/file.ts',
-      context: 'local changes',
-    })
-
-    expect(result.content).toBe('Review summary\nDetailed feedback')
+    expect(captured.options.noTools).toBe('all')
   })
 
-  it('filters out non-text parts', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: { role: 'assistant' },
-      parts: [
-        { type: 'text', text: 'Only text' },
-        { type: 'tool', name: 'some_tool' },
-      ],
-    })
+  it('passes the provided model pattern when it matches an available model', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c', model: 'google/gemini-3-pro' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
 
-    const result = await runReview({
-      diffContent: 'diff --git a/file.ts',
-      context: 'local changes',
-    })
-
-    expect(result.content).toBe('Only text')
+    expect(captured.options.model.provider).toBe('google')
+    expect(captured.options.model.id).toBe('gemini-3-pro')
   })
 
-  it('surfaces model error when info.error is present', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: {
-        role: 'assistant',
-        error: {
-          name: 'APIError',
-          data: { message: 'Invalid API key', statusCode: 401, isRetryable: false },
-        },
-      },
-      parts: [],
-    })
+  it('falls back to the first available model when no --model is set', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
 
-    await expect(
-      runReview({ diffContent: 'diff', context: 'test' })
-    ).rejects.toThrow('Model returned an error: Invalid API key')
+    expect(captured.options.model.provider).toBe('anthropic')
   })
 
-  it('throws when response parts are undefined with no model error', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: { role: 'assistant' },
-    })
-
-    await expect(
-      runReview({ diffContent: 'diff', context: 'test' })
-    ).rejects.toThrow('Review response contained no content')
-  })
-
-  it('closes server even when review fails', async () => {
-    mockPromptAndWait.mockRejectedValue(new Error('API failure'))
-
-    await expect(
-      runReview({ diffContent: 'diff', context: 'test' })
-    ).rejects.toThrow('API failure')
-
-    expect(mockServerClose).toHaveBeenCalled()
-  })
-
-  it('throws when session creation returns no data', async () => {
-    mockSessionCreate.mockResolvedValue({ data: null })
-
-    await expect(
-      runReview({ diffContent: 'diff', context: 'test' })
-    ).rejects.toThrow('Failed to create session')
-  })
-
-  it('passes correct options to promptAndWaitForResponse', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: { role: 'assistant' },
-      parts: [{ type: 'text', text: 'OK' }],
-    })
-
-    await runReview({
-      diffContent: 'diff --git a/file.ts',
-      context: 'local changes',
-    })
-
-    expect(mockPromptAndWait).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: 'session-123',
-        timeoutMs: 180_000,
-        body: expect.objectContaining({
-          model: { providerID: 'test-provider', modelID: 'test-model' },
-        }),
-      })
-    )
+  it('throws a clear error when --model does not match any available model', async () => {
+    await expect(runReview({ diffContent: 'd', context: 'c', model: 'foo/nope' })).rejects.toThrow(/not available in pi/)
   })
 })
 
-describe('runReviewWithServer', () => {
-  beforeEach(() => {
-    vi.clearAllMocks()
-    const clientMock = (createOpencodeClient as unknown as ReturnType<typeof vi.fn>)()
-    const mockCreate = clientMock.session.create as ReturnType<typeof vi.fn>
-    mockCreate.mockResolvedValue({
-      data: { id: 'session-456' },
+describe('runAgenticReview', () => {
+  it('counts tool executions across the session and surfaces the final text', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
+      maxIterations: 5,
     })
+
+    // Wait a tick for createAgentSession to be invoked and listener attached.
+    await new Promise((resolve) => setImmediate(resolve))
+    pushTool()
+    pushTool()
+    pushAssistantText('Final review.')
+    captured.resolvePrompt()
+
+    const result = await promise
+    expect(result.content).toBe('Final review.')
+    expect(result.toolCallCount).toBe(2)
+    expect(result.truncated).toBe(false)
   })
 
-  it('surfaces model error when info.error is present', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: {
-        role: 'assistant',
-        error: {
-          name: 'ProviderAuthError',
-          data: { message: 'Token expired' },
-        },
-      },
-      parts: [],
+  it('marks truncated=true when tool calls hit maxIterations', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
+      maxIterations: 2,
     })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushTool()
+    pushTool()
+    pushAssistantText('Truncated final.')
+    captured.resolvePrompt()
 
-    await expect(
-      runReviewWithServer('http://localhost:3000', {
-        diffContent: 'diff',
-        context: 'test',
-      })
-    ).rejects.toThrow('Model returned an error: Token expired')
+    const result = await promise
+    expect(result.toolCallCount).toBe(2)
+    expect(result.truncated).toBe(true)
+    expect(result.truncationReason).toContain('Maximum iteration limit')
   })
 
-  it('returns content from valid response', async () => {
-    mockPromptAndWait.mockResolvedValue({
-      info: { role: 'assistant' },
-      parts: [{ type: 'text', text: 'LGTM' }],
+  it('keeps built-in tools off but enables custom (extension) tools (noTools = "builtin")', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
     })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
 
-    const result = await runReviewWithServer('http://localhost:3000', {
-      diffContent: 'diff',
-      context: 'test',
-    })
-
-    expect(result.content).toBe('LGTM')
+    expect(captured.options.noTools).toBe('builtin')
   })
 })

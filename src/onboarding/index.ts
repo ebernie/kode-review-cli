@@ -1,3 +1,3 @@
-export { runOnboardingWizard, runProviderSetup } from './wizard.js'
-export { setupAntigravity, isAntigravityInstalled, isAntigravityAuthenticated } from './antigravity.js'
+export { runOnboardingWizard } from './wizard.js'
 export { setupVcs, type VcsSetupResult } from './vcs.js'
+export { isPiInstalled, piHasUsableModel, PI_INSTALL_HINT, PI_LOGIN_HINT } from './pi.js'

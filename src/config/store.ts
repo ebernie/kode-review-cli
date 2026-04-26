@@ -1,5 +1,5 @@
 import Conf from 'conf'
-import { ConfigSchema, type Config, defaultConfig } from './schema.js'
+import { ConfigSchema, type Config, defaultConfig, isLegacyConfig, type LegacyConfigMarkers } from './schema.js'
 
 const CONFIG_NAME = 'kode-review'
 
@@ -19,6 +19,32 @@ const store = new Conf<Config>({
 export function getConfig(): Config {
   const raw = store.store
   return ConfigSchema.parse(raw)
+}
+
+/**
+ * Get the raw, unvalidated config object. Used by the migration flow to
+ * detect pre-1.0 schemas without throwing on parse.
+ */
+export function getRawConfig(): unknown {
+  return store.store
+}
+
+/**
+ * True when the config on disk is from a pre-1.0 (opencode era) install.
+ * Used by the migration flow before any other CLI work runs.
+ */
+export function hasOldSchema(): boolean {
+  return isLegacyConfig(getRawConfig())
+}
+
+/**
+ * Read the legacy `indexer.composeProject` value before the migration flow
+ * wipes the config. Returns the default if the legacy block was absent.
+ */
+export function readLegacyComposeProject(): string {
+  const raw = getRawConfig()
+  if (!isLegacyConfig(raw)) return 'kode-review-indexer'
+  return (raw as LegacyConfigMarkers).indexer?.composeProject ?? 'kode-review-indexer'
 }
 
 /**
@@ -60,10 +86,12 @@ export function setOnboardingComplete(complete: boolean = true): void {
 }
 
 /**
- * Reset configuration to defaults
+ * Reset configuration to defaults. Replaces every value, including
+ * `onboardingComplete`, so the next CLI invocation will trigger the wizard.
  */
 export function resetConfig(): void {
   store.clear()
+  store.set(defaultConfig)
 }
 
 /**

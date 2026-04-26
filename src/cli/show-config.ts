@@ -1,13 +1,8 @@
 /**
- * Display current configuration
+ * Display current configuration.
  *
- * Shows all configuration settings including:
- * - Config file path
- * - Provider settings
- * - Antigravity status
- * - VCS integration (GitHub/GitLab)
- * - Indexer settings
- * - Onboarding state
+ * v1.0+: pi (https://pi.dev) owns provider/model/auth — those are not
+ * stored here. To see what pi knows, run `pi --list-models` directly.
  */
 
 import { getConfig, getConfigPath } from '../config/index.js'
@@ -45,20 +40,9 @@ export function showConfig(options: ShowConfigOptions): void {
   console.log(`  Path: ${dim(configPath)}`)
   console.log('')
 
-  // Provider settings
-  console.log(cyan('Provider Settings'))
-  console.log(`  Provider: ${config.provider}`)
-  console.log(`  Model: ${config.model}`)
-  if (config.variant) {
-    console.log(`  Variant: ${config.variant}`)
-  }
-  console.log('')
-
-  // Antigravity status
-  console.log(cyan('Antigravity Integration'))
-  console.log(`  Enabled: ${formatBoolean(config.antigravity.enabled)}`)
-  console.log(`  Plugin Installed: ${formatBoolean(config.antigravity.pluginInstalled)}`)
-  console.log(`  Authenticated: ${formatBoolean(config.antigravity.authenticated)}`)
+  // Provider/model are owned by pi
+  console.log(cyan('Model & Auth'))
+  console.log(`  Owned by pi (https://pi.dev). Run ${dim('pi --list-models')} to inspect.`)
   console.log('')
 
   // VCS integration

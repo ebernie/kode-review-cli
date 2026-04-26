@@ -94,8 +94,10 @@ const RECOVERY_HINTS: Record<string, string> = {
   // Review errors
   'no changes': 'Stage some changes with "git add" or specify a PR with --pr.',
   'rate limit': 'Wait a moment before trying again.',
-  'api key': 'Check your API key configuration with "kode-review --show-config".',
-  'did not return a response': 'Run "kode-review --setup-provider" to reconfigure your model provider.',
+  'api key': 'Run `pi` and use `/login` to update your provider credentials.',
+  'no pi provider': 'Run `pi` and use `/login` to set up at least one provider, then re-run kode-review.',
+  'pi is not installed': 'Install pi (https://pi.dev): npm install -g @mariozechner/pi-coding-agent',
+  'did not return a response': 'Re-run with --model <other> to try a different model, or run `pi` and `/login` to refresh credentials.',
 }
 
 /**
@@ -206,7 +208,8 @@ export function categorizeError(error: unknown): ErrorCategory {
   if (
     errorMessage.includes('review') ||
     errorMessage.includes('diff') ||
-    errorMessage.includes('opencode') ||
+    errorMessage.includes('pi is not installed') ||
+    errorMessage.includes('no pi provider') ||
     errorMessage.includes('model') ||
     errorMessage.includes('api key') ||
     errorMessage.includes('rate limit')

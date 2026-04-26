@@ -13,14 +13,12 @@ import {
   isOnboardingComplete,
   resetConfig,
   getConfig,
-  updateConfig,
 } from './config/index.js'
-import { runOnboardingWizard, runProviderSetup, setupVcs } from './onboarding/index.js'
+import { runOnboardingWizard, setupVcs } from './onboarding/index.js'
+import { needsMigration, runMigration } from './cli/migration.js'
 import {
   runReview,
-  runReviewWithServer,
   runAgenticReview,
-  runAgenticReviewWithServer,
   getLocalChanges,
   hasChanges,
   formatChanges,
@@ -101,11 +99,6 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   if (options.setup) {
     await runOnboardingWizard()
-    return true
-  }
-
-  if (options.setupProvider) {
-    await runProviderSetup()
     return true
   }
 
@@ -823,20 +816,12 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         prMrInfo,
         prDescriptionSummary,
         projectStructureContext,
-        provider: options.provider,
         model: options.model,
-        variant: options.variant,
         maxIterations: options.maxIterations,
         timeout: options.agenticTimeout,
       }
 
-      let result
-
-      if (options.attach) {
-        result = await runAgenticReviewWithServer(options.attach, agenticOptions)
-      } else {
-        result = await runAgenticReview(agenticOptions)
-      }
+      const result = await runAgenticReview(agenticOptions)
 
       spinner?.stop()
 
@@ -856,18 +841,10 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         semanticContext,
         prDescriptionSummary,
         projectStructureContext,
-        provider: options.provider,
         model: options.model,
-        variant: options.variant,
       }
 
-      let result
-
-      if (options.attach) {
-        result = await runReviewWithServer(options.attach, reviewOptions)
-      } else {
-        result = await runReview(reviewOptions)
-      }
+      const result = await runReview(reviewOptions)
 
       spinner?.stop()
 
@@ -923,7 +900,6 @@ async function processReviewOutput(
       prNumber: prMr?.platform === 'github' ? prMr.id : undefined,
       mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
       branch,
-      provider: options.provider,
       model: options.model,
     }
   }
@@ -1000,26 +976,6 @@ async function processReviewOutput(
  * Mapping of deprecated Antigravity model IDs to their replacements.
  * When a user's configured model is deprecated, it's automatically migrated.
  */
-const DEPRECATED_MODEL_MIGRATIONS: Record<string, string> = {
-  'antigravity-gemini-3-pro': 'antigravity-gemini-3.1-pro',
-  'antigravity-claude-sonnet-4-5-thinking': 'antigravity-claude-sonnet-4-6-thinking',
-  'antigravity-claude-sonnet-4-5': 'antigravity-claude-sonnet-4-6',
-  'antigravity-claude-opus-4-5-thinking': 'antigravity-claude-opus-4-6-thinking',
-}
-
-/**
- * Check if the configured model is deprecated and auto-migrate to its replacement.
- */
-function migrateDeprecatedModel(): void {
-  const config = getConfig()
-  const replacement = DEPRECATED_MODEL_MIGRATIONS[config.model]
-
-  if (replacement) {
-    logger.warn(`Model "${config.model}" has been deprecated. Migrating to "${replacement}".`)
-    updateConfig({ model: replacement })
-  }
-}
-
 async function main(): Promise<void> {
   const options = parseArgs(process.argv)
   const ctx = createContext(options)
@@ -1031,6 +987,17 @@ async function main(): Promise<void> {
   setDebugMode(process.env.DEBUG === '1')
 
   try {
+    // v1.0 clean-break migration gate. Doctor and version-style commands
+    // (handled by Commander before parseArgs returns) must remain reachable
+    // even on a legacy install — those don't trigger this branch because
+    // they exit during arg parsing.
+    if (needsMigration() && !options.doctor) {
+      const result = await runMigration({ skipConfirm: options.migrateYes })
+      // Always exit after migration (or abort): re-running puts the user in
+      // the post-migration state, which is what setup expects.
+      process.exit(result.performed ? 0 : 1)
+    }
+
     // Handle setup commands first
     if (await handleSetupCommands(options)) {
       return
@@ -1062,9 +1029,6 @@ async function main(): Promise<void> {
         )
       }
     }
-
-    // Auto-migrate deprecated Antigravity models
-    migrateDeprecatedModel()
 
     // Non-blocking daily update check (fire-and-forget)
     checkForUpdateNotification().catch(() => {})

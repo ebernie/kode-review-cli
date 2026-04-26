@@ -1,30 +1,40 @@
 # Kode Review CLI
 
-AI-powered code review CLI using OpenCode SDK. Multiple models supported.
+AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/model auth — kode-review handles the review.
+
+> ## ⚠️ Upgrading from 0.x?
+>
+> v1.0 is a clean break. The first run on a 0.x install will offer to **wipe everything** (config, watch state, indexer Docker containers AND volumes) before re-onboarding. There is no backup.
+>
+> If you don't want this, **stay on 0.4.0**:
+>
+> ```bash
+> npm install -g @kofikode/kode-review-cli@0.4.0
+> ```
+>
+> The migration prompts for a typed `wipe` confirmation. To script the upgrade, pass `--migrate-yes` or set `KODE_REVIEW_MIGRATE_YES=1`.
 
 ## Features
 
-- **First Pass Code Reviews using AI**: Uses OpenCode SDK to run comprehensive code reviews
-- **Diff, semantic or entire code base review modes**: Optimize for cost or correctness using simpler diff mode, or go all in using agent mode
-- **Antigravity Integration**: Free access to Claude and Gemini models via Google OAuth
-- **Multi-Platform VCS**: Supports GitHub PRs and GitLab MRs
-- **Interactive & Agent Modes**: Works interactively or in CI/automation pipelines
-- **Watch Mode**: Continuous monitoring for PRs/MRs where you're a reviewer
-- **Semantic Code Indexer**: Optional Docker-based code indexing for contextual reviews
+- **First-pass AI code reviews** powered by pi
+- **Diff, semantic, or agentic review modes**: pick a tier based on cost vs. depth
+- **Multi-platform VCS**: GitHub PRs and GitLab MRs
+- **Interactive & CI modes**: human-friendly output or quiet/JSON for automation
+- **Watch mode**: continuous monitoring of PRs/MRs assigned to you
+- **Semantic code indexer**: optional Docker-based context retrieval
 
 ## Requirements
 
 - **Node.js 18+**
 - **Bun** (recommended) or npm
 - **Git**
-- **OpenCode CLI** - Install with:
+- **pi (https://pi.dev)** — install and configure before kode-review:
   ```bash
-  curl -fsSL https://opencode.ai/install | bash
-  # or
-  bun install -g opencode-ai
+  npm install -g @mariozechner/pi-coding-agent
+  pi   # then use /login to set up a provider (Anthropic, Google, OpenAI, etc.)
   ```
 - **Optional:** GitHub CLI ([`gh`](https://cli.github.com/)) and/or GitLab CLI ([`glab`](https://gitlab.com/gitlab-org/cli))
-- **Optional:** [Docker](https://www.docker.com/products/docker-desktop/) (required for semantic code indexer)
+- **Optional:** [Docker](https://www.docker.com/products/docker-desktop/) (required for the semantic code indexer)
 
 ## Installation
 
@@ -95,10 +105,8 @@ kode-review --scope pr --pr 123 --json   # JSON error output
 | `-f, --format <format>` | Output format: `text`, `json`, `markdown` (default: text) |
 | `-o, --output-file <path>` | Write output to file instead of stdout |
 | `--post-to-pr` | Post review as PR/MR comment with inline annotations |
-| `--provider <id>` | Override provider (e.g., `anthropic`, `google`) |
-| `--model <id>` | Override model |
-| `--variant <name>` | Override variant (e.g., `max`, `low`) |
-| `--attach <url>` | Connect to running OpenCode server |
+| `--model <pattern>` | Override the pi model for this review (e.g., `anthropic/claude-sonnet-4-6`). When omitted, pi's default applies. |
+| `--migrate-yes` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
 | `--agentic` | Enable agent mode with dynamic codebase exploration |
 | `--max-iterations <n>` | Max tool call iterations for agent mode (default: 10) |
 | `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 120) |
@@ -280,21 +288,23 @@ Configuration is stored in `~/.config/kode-review/config.json`.
 The first run triggers an interactive onboarding wizard, or run manually:
 
 ```bash
-kode-review --setup           # Full wizard
-kode-review --setup-provider  # Provider/model only
+kode-review --setup           # Full wizard (verifies pi + configures GitHub/GitLab)
 kode-review --setup-vcs       # GitHub/GitLab only
-kode-review --reset           # Reset all configuration
+kode-review --reset           # Reset kode-review's local config
 kode-review --update          # Check for and install latest version
 ```
 
 ### Provider Configuration
 
-**Antigravity (Recommended)** - Free access to premium models via Google OAuth:
-- Claude Sonnet 4.5 / Opus 4.5 (thinking variants: `low`, `max`)
-- Gemini 3 Pro (thinking variants: `low`, `high`)
-- Gemini 3 Flash (thinking variants: `minimal`, `low`, `medium`, `high`)
+Pi owns model providers. Set one up with:
 
-**Standard Providers** - Anthropic, Google, OpenAI, or OpenCode Zen (requires direct authentication)
+```bash
+pi              # opens interactive UI
+# Inside pi, run: /login
+# Pick Anthropic, Google (Gemini / Antigravity), OpenAI Codex, GitHub Copilot, etc.
+```
+
+`pi --list-models` shows what is currently usable. Kode-review picks the first available model unless you override with `--model <provider>/<id>` per invocation.
 
 ### VCS Integration
 
@@ -553,8 +563,10 @@ kode-review --scope pr --pr 123 --post-to-pr --quiet
 
 | Variable | Description |
 |----------|-------------|
-| `OPENCODE_SERVER_URL` | Attach to running OpenCode server |
-| `OPENCODE_MODEL` | Default model override |
+| `KODE_REVIEW_MIGRATE_YES` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
+| `DEBUG` | Set to `1` for verbose logging |
+
+Pi-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) are honored by pi directly. See pi's [providers documentation](https://pi.dev) for details.
 
 ---
 

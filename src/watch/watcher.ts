@@ -278,9 +278,7 @@ async function reviewRequest(
       diffContent,
       context: `Reviewing ${request.platform === 'github' ? 'Pull Request' : 'Merge Request'} #${request.id} from ${request.repository}`,
       prMrInfo,
-      provider: cliOptions.provider,
       model: cliOptions.model,
-      variant: cliOptions.variant,
     }
 
     // Run review

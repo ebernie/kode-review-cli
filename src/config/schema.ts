@@ -85,21 +85,12 @@ export const UpdaterConfigSchema = z.object({
 })
 
 /**
- * Main configuration schema
+ * Main configuration schema (v1.0+).
+ *
+ * Pi (https://pi.dev) owns provider/model/auth — they are deliberately not
+ * stored here. Use `pi /login` to configure providers.
  */
 export const ConfigSchema = z.object({
-  // Provider/model settings
-  provider: z.string().default('anthropic'),
-  model: z.string().default('claude-sonnet-4-20250514'),
-  variant: z.string().optional(),
-
-  // Antigravity integration
-  antigravity: z.object({
-    enabled: z.boolean().default(false),
-    pluginInstalled: z.boolean().default(false),
-    authenticated: z.boolean().default(false),
-  }).default({}),
-
   // VCS integration
   github: VcsConfigSchema.default({}),
   gitlab: VcsConfigSchema.default({}),
@@ -126,12 +117,26 @@ export type UpdaterConfig = z.infer<typeof UpdaterConfigSchema>
 export const defaultConfig: Config = ConfigSchema.parse({})
 
 /**
- * Provider display names
+ * Pre-1.0 (opencode era) schema markers used to detect installs that need
+ * the migration flow. We only need a structural shape for detection — never
+ * parse the full old schema.
  */
-export const PROVIDER_NAMES: Record<string, string> = {
-  anthropic: 'Anthropic (Claude)',
-  google: 'Google (Gemini)',
-  openai: 'OpenAI (GPT)',
-  opencode: 'OpenCode Zen',
-  antigravity: 'Antigravity (Free via Google OAuth)',
+export interface LegacyConfigMarkers {
+  /** Old `provider` field (top-level). Presence triggers migration. */
+  provider?: unknown
+  /** Old `indexer.composeProject` — read before wiping so we can tear down
+   *  the right Docker project. */
+  indexer?: { composeProject?: string }
+}
+
+/**
+ * Detect whether a raw, untyped config object came from the pre-1.0 (opencode)
+ * era. Used by the migration flow.
+ */
+export function isLegacyConfig(raw: unknown): raw is LegacyConfigMarkers {
+  return (
+    typeof raw === 'object' &&
+    raw !== null &&
+    'provider' in (raw as Record<string, unknown>)
+  )
 }
