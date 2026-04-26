@@ -1,11 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { writeFile, mkdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+// IndexerClient mock — each test can swap in its own behaviour by reassigning
+// `mockClientImpl` before constructing the extension.
+let mockClientImpl: Record<string, ReturnType<typeof vi.fn>> = {}
+
 vi.mock('../../indexer/client.js', () => ({
   IndexerClient: vi.fn().mockImplementation((baseUrl: string) => ({
     baseUrl,
+    ...mockClientImpl,
   })),
 }))
 
@@ -45,6 +50,7 @@ describe('createKodeReviewToolsExtension', () => {
     testRepoRoot = join(tmpdir(), `kode-review-pi-tools-${Date.now()}-${Math.random().toString(36).slice(2)}`)
     await mkdir(testRepoRoot, { recursive: true })
     await writeFile(join(testRepoRoot, '.gitignore'), 'node_modules\ndist\n')
+    mockClientImpl = {}
   })
 
   it('always registers the read_file tool, even without an indexer URL', async () => {
@@ -129,9 +135,60 @@ describe('createKodeReviewToolsExtension', () => {
       .rejects.toThrow(/Path traversal/)
   })
 
+  it('search_code execute() forwards through to IndexerClient.hybridSearch and JSON-stringifies the result', async () => {
+    mockClientImpl.hybridSearch = vi.fn().mockResolvedValue({
+      matches: [
+        {
+          filePath: 'src/auth.ts',
+          lineStart: 10,
+          lineEnd: 25,
+          content: 'function login() { ... }',
+          rrfScore: 0.91,
+          sources: ['vector', 'bm25'],
+        },
+      ],
+      totalCount: 1,
+    })
+
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+      indexerUrl: 'http://localhost:8321',
+      branch: 'main',
+    })
+    await factory(pi as never)
+
+    const searchCode = pi.tools.find((t) => t.name === 'search_code')!
+    const result = (await searchCode.execute('id-1', { query: 'login' })) as {
+      content: { type: string; text: string }[]
+      details: Record<string, unknown>
+    }
+
+    expect(mockClientImpl.hybridSearch).toHaveBeenCalledWith('login', 'https://github.com/x/y', 'main', 10)
+    expect(result.content[0].type).toBe('text')
+    const parsed = JSON.parse(result.content[0].text) as { results: unknown[]; query: string; totalMatches: number }
+    expect(parsed.query).toBe('login')
+    expect(parsed.totalMatches).toBe(1)
+    expect((parsed.results as Array<{ path: string }>)[0].path).toBe('src/auth.ts')
+  })
+
+  it('propagates errors from indexer-backed tool handlers (does not swallow rejections)', async () => {
+    mockClientImpl.hybridSearch = vi.fn().mockRejectedValue(new Error('Connection refused'))
+
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+      indexerUrl: 'http://localhost:8321',
+    })
+    await factory(pi as never)
+
+    const searchCode = pi.tools.find((t) => t.name === 'search_code')!
+    await expect(searchCode.execute('id-1', { query: 'anything' })).rejects.toThrow(/Connection refused/)
+  })
+
   afterEach(async () => {
     await rm(testRepoRoot, { recursive: true, force: true })
   })
 })
-
-import { afterEach } from 'vitest'

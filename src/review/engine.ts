@@ -180,8 +180,15 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
     timeoutHandle.id = setTimeout(() => reject(reviewTimeout), opts.timeoutMs)
   })
 
+  let content: string
+  let toolCallCount: number
   try {
     await Promise.race([session.prompt(opts.userPrompt), timeout, listener.done])
+    // Read state BEFORE the finally block disposes the session. pi's current
+    // dispose() leaves state intact, but reading after dispose() is a fragile
+    // pattern that future SDK versions could break.
+    content = extractReviewContent(session.state.messages)
+    toolCallCount = listener.toolCallCount
   } catch (err) {
     if (err === reviewTimeout) {
       try {
@@ -197,10 +204,7 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
     session.dispose()
   }
 
-  const content = extractReviewContent(session.state.messages)
-  const toolCallCount = listener.toolCallCount
   const truncated = opts.maxIterations !== undefined && toolCallCount >= opts.maxIterations
-
   return { content, toolCallCount, truncated }
 }
 

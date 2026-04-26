@@ -89,7 +89,12 @@ describe('migration', () => {
 
       expect(result).toEqual({ performed: true })
       expect(mockExec).toHaveBeenCalledWith('docker', ['compose', '-p', 'kode-review-indexer', 'down', '-v'])
+      // Verify rm was invoked on the watch-config directory (not, say, the
+      // main config path) so a regression that swaps directories is caught.
       expect(mockRm).toHaveBeenCalledTimes(1)
+      const rmPath = mockRm.mock.calls[0][0] as string
+      expect(rmPath).toContain('kode-review-watch')
+      expect(mockRm).toHaveBeenCalledWith(rmPath, { recursive: true, force: true })
       expect(mockResetConfig).toHaveBeenCalledTimes(1)
     })
 
@@ -164,6 +169,25 @@ describe('migration', () => {
       expect(result).toEqual({ performed: true })
       expect(mockExec).not.toHaveBeenCalled()
       expect(mockResetConfig).toHaveBeenCalled()
+    })
+
+    it('aborts with skipReason="no-tty" when stdin is not a TTY and no readLine override is supplied', async () => {
+      mockHasOld.mockReturnValue(true)
+      mockReadCompose.mockReturnValue('kode-review-indexer')
+      mockCommandExists.mockResolvedValue(true)
+
+      // Force isTTY to falsy for the duration of the test.
+      const original = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY')
+      Object.defineProperty(process.stdin, 'isTTY', { value: undefined, configurable: true })
+      try {
+        const result = await runMigration({})
+        expect(result).toEqual({ performed: false, skipReason: 'no-tty' })
+        expect(mockResetConfig).not.toHaveBeenCalled()
+        expect(mockExec).not.toHaveBeenCalled()
+        expect(mockRm).not.toHaveBeenCalled()
+      } finally {
+        if (original) Object.defineProperty(process.stdin, 'isTTY', original)
+      }
     })
   })
 })

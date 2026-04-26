@@ -24,12 +24,19 @@ export interface ReviewEventState {
  */
 export function attachReviewListener(session: AgentSession): ReviewEventState {
   let toolCallCount = 0
+  let settled = false
   let resolveDone: () => void = () => {}
-  let rejectDone: (err: unknown) => void = () => {}
 
-  const done = new Promise<void>((resolve, reject) => {
-    resolveDone = resolve
-    rejectDone = reject
+  // `done` is consumed by `Promise.race` in the engine. We never reject it —
+  // when the engine bails early (timeout/error), the timeout/error promise
+  // wins the race and `done` is left to be GC'd. Rejecting `done` would
+  // produce an unhandled rejection on Node ≥15.
+  const done = new Promise<void>((resolve) => {
+    resolveDone = () => {
+      if (settled) return
+      settled = true
+      resolve()
+    }
   })
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
@@ -63,8 +70,6 @@ export function attachReviewListener(session: AgentSession): ReviewEventState {
     done,
     unsubscribe: () => {
       unsubscribe()
-      // Reject any still-pending listener when the engine bails out early.
-      rejectDone(new Error('Listener detached before agent_end'))
     },
   } as ReviewEventState
 }

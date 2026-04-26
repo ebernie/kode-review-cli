@@ -1011,9 +1011,12 @@ async function main(): Promise<void> {
     // Check if onboarding is needed
     if (!isOnboardingComplete()) {
       if (ctx.interactive) {
-        await runOnboardingWizard()
+        const setupOk = await runOnboardingWizard()
+        // Wizard returns false if pi isn't installed or has no usable model.
+        // It already printed the actionable hint; don't proceed to a review
+        // that would only fail at the auth gate.
+        if (!setupOk) return
 
-        // If user just completed onboarding, ask if they want to run a review
         const runNow = await confirm({
           message: 'Run a code review now?',
           default: true,

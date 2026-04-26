@@ -1,12 +1,28 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 // Pi SDK stub. We capture the options createAgentSession was called with,
-// and let each test drive the simulated session lifecycle.
-const captured: { options: any | null; subscriber: ((event: any) => void) | null; resolvePrompt: () => void; rejectPrompt: (err: unknown) => void } = {
+// the live session reference (so tests can inspect abort/dispose), and let
+// each test drive the simulated session lifecycle by hand.
+interface CapturedSession {
+  state: { messages: unknown[] }
+  abort: ReturnType<typeof vi.fn>
+  dispose: ReturnType<typeof vi.fn>
+}
+
+const captured: {
+  options: any | null
+  subscriber: ((event: any) => void) | null
+  resolvePrompt: () => void
+  rejectPrompt: (err: unknown) => void
+  session: CapturedSession | null
+  modelsOverride: any[] | null
+} = {
   options: null,
   subscriber: null,
   resolvePrompt: () => {},
   rejectPrompt: () => {},
+  session: null,
+  modelsOverride: null,
 }
 
 const sessionState = { messages: [] as any[] }
@@ -21,7 +37,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
     AuthStorage: { create: vi.fn(() => ({})) },
     ModelRegistry: {
       create: vi.fn(() => ({
-        getAvailable: vi.fn(async () => [
+        getAvailable: vi.fn(async () => captured.modelsOverride ?? [
           { provider: 'anthropic', id: 'claude-sonnet-4-6', api: 'anthropic-messages' },
           { provider: 'google', id: 'gemini-3-pro', api: 'google-gen-ai' },
         ]),
@@ -32,7 +48,10 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
     getAgentDir: vi.fn(() => '/tmp/agent'),
     createAgentSession: vi.fn(async (opts: any) => {
       captured.options = opts
-      const session = {
+      const session: CapturedSession & {
+        subscribe: (listener: (event: any) => void) => () => void
+        prompt: ReturnType<typeof vi.fn>
+      } = {
         state: sessionState,
         subscribe(listener: (event: any) => void) {
           captured.subscriber = listener
@@ -50,6 +69,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
         abort: vi.fn(async () => {}),
         dispose: vi.fn(),
       }
+      captured.session = session
       return { session }
     }),
   }
@@ -60,6 +80,8 @@ import { runReview, runAgenticReview } from '../engine.js'
 beforeEach(() => {
   captured.options = null
   captured.subscriber = null
+  captured.session = null
+  captured.modelsOverride = null
   sessionState.messages = []
 })
 
@@ -185,5 +207,58 @@ describe('runAgenticReview', () => {
     await promise
 
     expect(captured.options.noTools).toBe('builtin')
+    // Defensive: explicitly assert it is NOT 'all' — the security distinction
+    // matters (extension tools must remain enabled in agentic mode).
+    expect(captured.options.noTools).not.toBe('all')
+  })
+})
+
+describe('runWithPi failure paths', () => {
+  it('rejects with NO_PI_AUTH-style error when ModelRegistry has no usable models', async () => {
+    captured.modelsOverride = []
+    await expect(runReview({ diffContent: 'd', context: 'c' })).rejects.toThrow(/No pi provider has usable credentials/)
+  })
+
+  it('honors the timeout, calls session.abort(), and disposes the session', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
+      timeout: 0.05, // 50ms — short enough to fire reliably in a unit test
+    })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    // Deliberately do NOT call resolvePrompt — let the timeout win the race.
+
+    await expect(promise).rejects.toThrow(/did not complete within/)
+    expect(captured.session).not.toBeNull()
+    expect(captured.session!.abort).toHaveBeenCalledTimes(1)
+    expect(captured.session!.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('still propagates the timeout error and disposes the session even when abort() rejects', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
+      timeout: 0.05,
+    })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    captured.session!.abort.mockRejectedValueOnce(new Error('abort failed'))
+
+    await expect(promise).rejects.toThrow(/did not complete within/)
+    expect(captured.session!.dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces session.prompt() errors and still disposes the session', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    captured.rejectPrompt(new Error('upstream provider exploded'))
+
+    await expect(promise).rejects.toThrow(/upstream provider exploded/)
+    expect(captured.session!.dispose).toHaveBeenCalledTimes(1)
   })
 })
