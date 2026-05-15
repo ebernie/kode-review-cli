@@ -1,5 +1,5 @@
 import { defineConfig } from 'tsup'
-import { copyFileSync, mkdirSync, existsSync, readFileSync } from 'fs'
+import { copyFileSync, mkdirSync, existsSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 
 const pkg = JSON.parse(readFileSync('package.json', 'utf-8'))
@@ -53,6 +53,28 @@ export default defineConfig({
       const src = join(srcDir, file)
       const dest = join(destDir, file)
       if (existsSync(src)) {
+        copyFileSync(src, dest)
+        console.log(`Copied ${src} -> ${dest}`)
+      }
+    }
+
+    // Copy reviewer templates to dist/templates/.
+    //
+    // Path resolution: in source, registry.ts lives at src/reviewers/ and
+    // resolves templates relative to its own __dirname (→ src/reviewers/
+    // templates/). After bundling, tsup collapses everything into
+    // dist/index.js, so the same __dirname resolution lands on dist/, and
+    // the registry looks for `dist/templates/`. We must copy here.
+    const reviewerSrc = 'src/reviewers/templates'
+    const reviewerDest = 'dist/templates'
+    if (existsSync(reviewerSrc)) {
+      if (!existsSync(reviewerDest)) {
+        mkdirSync(reviewerDest, { recursive: true })
+      }
+      for (const entry of readdirSync(reviewerSrc)) {
+        if (!entry.endsWith('.md')) continue
+        const src = join(reviewerSrc, entry)
+        const dest = join(reviewerDest, entry)
         copyFileSync(src, dest)
         console.log(`Copied ${src} -> ${dest}`)
       }

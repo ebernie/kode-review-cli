@@ -50,6 +50,22 @@ export interface ReviewOptions {
    * callers are expected to throttle if surfacing to a spinner / UI.
    */
   onProgress?: (progress: ReviewProgress) => void
+  /**
+   * Optional system prompt override. When set, the model's behaviour is
+   * driven by this string instead of pi's default. Used by reviewer personas
+   * to inject their own role definition while keeping the data-section user
+   * prompt shared across reviewers.
+   */
+  systemPrompt?: string
+  /**
+   * Optional user prompt override. When set, this string is sent as the user
+   * prompt instead of the legacy `buildReviewPrompt(...)` output. Callers
+   * that supply `systemPrompt` should usually also supply this so the data
+   * sections aren't duplicated.
+   */
+  userPromptOverride?: string
+  /** Override the default timeout in ms. */
+  timeoutMs?: number
 }
 
 export interface AgenticReviewOptions extends ReviewOptions {
@@ -218,20 +234,27 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
  * Run a basic (text-only) code review.
  */
 export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
-  const promptOptions: ReviewPromptOptions = {
-    context: options.context,
-    diffContent: options.diffContent,
-    prMrInfo: options.prMrInfo,
-    semanticContext: options.semanticContext,
-    prDescriptionSummary: options.prDescriptionSummary,
-    projectStructureContext: options.projectStructureContext,
+  let userPrompt: string
+  if (options.userPromptOverride !== undefined) {
+    userPrompt = options.userPromptOverride
+  } else {
+    const promptOptions: ReviewPromptOptions = {
+      context: options.context,
+      diffContent: options.diffContent,
+      prMrInfo: options.prMrInfo,
+      semanticContext: options.semanticContext,
+      prDescriptionSummary: options.prDescriptionSummary,
+      projectStructureContext: options.projectStructureContext,
+    }
+    userPrompt = buildReviewPrompt(promptOptions)
   }
 
   const outcome = await runWithPi({
-    userPrompt: buildReviewPrompt(promptOptions),
+    userPrompt,
     modelPattern: options.model,
     cwd: process.cwd(),
-    timeoutMs: DEFAULT_TIMEOUT_MS,
+    systemPromptOverride: options.systemPrompt,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     onProgress: options.onProgress,
   })
 

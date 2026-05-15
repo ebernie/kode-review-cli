@@ -5,6 +5,18 @@ declare const PKG_VERSION: string
 
 export type ReviewScope = 'local' | 'pr' | 'both' | 'auto'
 
+/**
+ * Commander collector for `--reviewer`. Each invocation may carry one name
+ * or a comma-separated list; multiple `--reviewer` flags accumulate.
+ *
+ * Tokens are not validated here — that happens after the full list is built,
+ * in `parseArgs` / `resolveReviewerNames`.
+ */
+function collectReviewer(value: string, previous: string[]): string[] {
+  const parts = value.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+  return previous.concat(parts)
+}
+
 export interface CliOptions {
   // Review options
   scope?: ReviewScope
@@ -21,6 +33,18 @@ export interface CliOptions {
 
   // Model override (passthrough to pi)
   model?: string
+
+  /**
+   * Reviewer personas to run, in resolution order. Each token is either a
+   * reviewer name, `all`, or a comma-separated list of names. `--reviewer`
+   * may be passed multiple times.
+   *
+   * Default: `['general']` (preserves pre-multi-reviewer behaviour).
+   */
+  reviewers: string[]
+
+  /** Print the list of available reviewers and exit. */
+  listReviewers: boolean
 
   // Watch mode
   watch: boolean
@@ -105,6 +129,16 @@ export function createProgram(): Command {
   program
     .option('--with-context', 'Include semantic context in review', false)
     .option('--context-top-k <n>', 'Number of similar code chunks to include (default: 5)', '5')
+
+  // ── Reviewer personas ──────────────────────────────────────────────────────
+  program
+    .option(
+      '--reviewer <name>',
+      'Reviewer persona(s) to run. Repeatable; comma-separated; "all" runs every reviewer. Default: general',
+      collectReviewer,
+      [] as string[],
+    )
+    .option('--list-reviewers', 'List available reviewers (built-in + user-defined) and exit', false)
 
   // ── Watch mode ─────────────────────────────────────────────────────────────
   program
@@ -230,6 +264,10 @@ export function parseArgs(argv: string[]): CliOptions {
     postToPr,
     initHooks: opts.initHooks ?? false,
     model: opts.model,
+    reviewers: Array.isArray(opts.reviewer) && opts.reviewer.length > 0
+      ? (opts.reviewer as string[])
+      : ['general'],
+    listReviewers: opts.listReviewers ?? false,
     watch: opts.watch ?? false,
     watchInterval,
     watchInteractive: opts.watchInteractive ?? false,

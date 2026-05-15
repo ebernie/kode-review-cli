@@ -61,6 +61,8 @@ export interface ReviewMetadata {
   prNumber?: number
   mrIid?: number
   branch?: string
+  /** Reviewer persona that produced this review, when multi-reviewer mode is active. */
+  reviewer?: string
 }
 
 /**
