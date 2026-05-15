@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/ebernie/kode-review-cli/compare/v0.5.0...v0.5.1) (2026-05-15)
+
+### Bug Fixes
+
+* fall back to 'HEAD' label in detached-HEAD CI/--pr runs ([036af25](https://github.com/ebernie/kode-review-cli/commit/036af25b51a2285b6ae0a655cd884c6de05bc3a8))
+* skip onboarding gate in --ci mode ([2d51317](https://github.com/ebernie/kode-review-cli/commit/2d51317250db371b6f8f537cfaee476fe16976a8))
+
 ## [0.5.0](https://github.com/ebernie/kode-review-cli/compare/v0.4.0...v0.5.0) (2026-05-15)
 
 ### ⚠ BREAKING CHANGES
