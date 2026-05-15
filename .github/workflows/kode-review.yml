@@ -1,0 +1,55 @@
+# Run kode-review on every PR. Posts a sticky markdown review as a PR comment
+# and fails the check when CRITICAL findings are reported.
+#
+# Required secrets:
+#   MINIMAX_API_KEY  — provider key picked up by pi (https://pi.dev).
+# Built-in:
+#   GITHUB_TOKEN     — provided by Actions; lets gh post and replace comments.
+
+name: kode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so kode-review can resolve merge-base and read commits.
+          fetch-depth: 0
+          # Review the PR head as the author wrote it, not the merge ref.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: oven-sh/setup-bun@v2
+
+      # ripgrep is preinstalled on ubuntu-latest; this is a safety net.
+      - name: Ensure ripgrep is installed
+        run: which rg || sudo apt-get install -y ripgrep
+
+      - name: Install dependencies
+        # TODO: remove prior to commit
+        run: bun install --frozen-lockfile
+
+      - name: Build kode-review
+        run: bun run build
+
+      - name: Run review
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        # --model is pinned to dodge pi's provider auto-resolution: the
+        # Actions-injected GITHUB_TOKEN otherwise looks like a GitHub Copilot
+        # credential to pi-ai's env-key scanner and gets picked over MiniMax.
+        run: node ./bin/kode-review.js --ci --pr "$PR_NUMBER" --model minimax/MiniMax-M2.7 --fail-on critical

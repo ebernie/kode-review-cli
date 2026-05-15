@@ -16,7 +16,7 @@ import {
   resetConfig,
   getConfig,
 } from './config/index.js'
-import { runOnboardingWizard, setupVcs } from './onboarding/index.js'
+import { runOnboardingWizard, setupVcs, shouldEnforceOnboardingGate } from './onboarding/index.js'
 import { needsMigration, runMigration } from './cli/migration.js'
 import {
   runAgenticReview,
@@ -50,6 +50,7 @@ import {
 import {
   detectPlatform,
   getCurrentBranch,
+  resolveBranchLabel,
   isGitRepository,
   getGitHubPRs,
   getGitHubPRDiff,
@@ -539,13 +540,10 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
     throw new Error('Not in a git repository')
   }
 
-  // Detect platform and branch
+  // Detect platform and branch. Detached-HEAD (no current branch) is the
+  // norm in CI runs that check out by SHA — fall back to a literal label.
   const platform = await detectPlatform()
-  const branch = await getCurrentBranch()
-
-  if (!branch) {
-    throw new Error('Could not determine current branch')
-  }
+  const branch = resolveBranchLabel(await getCurrentBranch(), options)
 
   logger.info(`Platform: ${platform}, Branch: ${branch}`)
 
@@ -1406,7 +1404,7 @@ async function main(): Promise<void> {
     }
 
     // Check if onboarding is needed
-    if (!isOnboardingComplete()) {
+    if (shouldEnforceOnboardingGate(options, isOnboardingComplete())) {
       if (ctx.interactive) {
         const setupOk = await runOnboardingWizard()
         // Wizard returns false if pi isn't installed or has no usable model.

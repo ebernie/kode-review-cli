@@ -670,7 +670,7 @@ kode-review --scope pr --pr 123 --post-to-pr --quiet
 | `KODE_REVIEW_MIGRATE_YES` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
 | `DEBUG` | Set to `1` for verbose logging |
 
-Pi-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) are honored by pi directly. See pi's [providers documentation](https://pi.dev) for details.
+Pi-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MINIMAX_API_KEY`, etc.) are honored by pi directly. For the full provider → env-var mapping, see `node_modules/@mariozechner/pi-coding-agent/docs/providers.md` (installed alongside pi) or run `pi --list-models` to see which providers your current setup can reach. Pi homepage: <https://pi.dev>.
 
 ---
 
