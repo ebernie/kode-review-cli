@@ -928,11 +928,8 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       // CI mode + suppressions apply per reviewer: each persona's content is
       // filtered for suppression markers, and in --ci mode the worst
       // (highest) exit code across reviewers wins so a single failing
-      // reviewer can still fail the CI run.
-      //
-      // Note: per-reviewer usage isn't yet threaded through ReviewerRunResult,
-      // so the sticky comment's usage footer is omitted on this path. The
-      // single-reviewer agentic path above still surfaces usage.
+      // reviewer can still fail the CI run. Per-reviewer usage is passed
+      // through so the sticky comment carries an accurate cost footer.
       let aggregateCiExitCode: number | undefined
       for (const r of results) {
         if (!r.ok || r.content === undefined) continue
@@ -940,6 +937,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           r.content,
           options,
           repoRoot!,
+          r.usage,
         )
         r.content = filtered
         if (ciExitCode !== undefined) {
@@ -983,7 +981,7 @@ async function applyCiAndSuppressions(
   rawContent: string,
   options: CliOptions,
   repoRoot: string,
-  // Optional: not yet threaded through the multi-reviewer ReviewerRunResult.
+  // Optional because per-reviewer results may be in a failure state (no usage).
   // formatUsageOneLiner() handles undefined by emitting a "—" placeholder.
   usage?: UsageTotals,
 ): Promise<CiAndSuppressionsResult> {

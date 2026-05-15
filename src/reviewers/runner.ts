@@ -8,6 +8,7 @@
  */
 
 import { runReview, type ReviewOptions } from '../review/engine.js'
+import type { UsageTotals } from '../review/usage.js'
 import {
   buildReviewerUserPrompt,
   loadReviewerSystemPrompt,
@@ -30,6 +31,8 @@ export interface ReviewerRunResult {
   error?: string
   /** Wall-clock duration in milliseconds. */
   durationMs: number
+  /** Aggregated token usage + estimated cost. Present when `ok` is true. */
+  usage?: UsageTotals
 }
 
 export interface RunReviewersOptions {
@@ -135,12 +138,13 @@ export async function runReviewers(
         userPromptOverride: userPrompt,
         timeoutMs: options.timeoutMs,
       }
-      const { content } = await runReview(reviewOptions)
+      const { content, usage } = await runReview(reviewOptions)
       const result: ReviewerRunResult = {
         reviewer,
         ok: true,
         content,
         durationMs: Date.now() - started,
+        usage,
       }
       options.onReviewerComplete?.(result)
       return result

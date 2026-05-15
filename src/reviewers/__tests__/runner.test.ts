@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { UsageTotals } from '../../review/usage.js'
 
 // Capture every invocation of the underlying engine so we can verify that
 // each reviewer ran with the correct system prompt and that all reviewers
@@ -23,8 +24,12 @@ interface CapturedOptions {
   timeoutMs?: number
 }
 
+// `usage` is the optional field threaded through ReviewerRunResult — when
+// present in the mock's return value, the runner forwards it onto the result.
+// Keeping it on the canonical mock signature means a `UsageTotals` shape
+// regression is a compile error in the test file, not a silently-passing cast.
 const captured: CapturedRun[] = []
-let runReviewImpl: (opts: CapturedOptions) => Promise<{ content: string }> = async () => ({
+let runReviewImpl: (opts: CapturedOptions) => Promise<{ content: string; usage?: UsageTotals }> = async () => ({
   content: 'default',
 })
 
@@ -213,6 +218,54 @@ describe('runReviewers — parallel orchestration', () => {
     expect(sec.error).toContain('upstream model exploded')
     expect(arch.ok).toBe(true)
     expect(arch.content).toBe('ok')
+  })
+
+  it('threads usage from runReview onto each ReviewerRunResult', async () => {
+    runReviewImpl = async (opts) => {
+      const isSec = /application security engineer/i.test(String(opts.systemPrompt))
+      return {
+        content: 'ok',
+        usage: {
+          input: isSec ? 100 : 200,
+          output: isSec ? 50 : 75,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: isSec ? 150 : 275,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: isSec ? 0.001 : 0.002 },
+          assistantMessages: 1,
+        },
+      }
+    }
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    const results = await runReviewers({
+      reviewers,
+      data: { context: 'c', diffContent: 'd' },
+    })
+    const sec = results.find((r) => r.reviewer.name === 'security')!
+    const arch = results.find((r) => r.reviewer.name === 'architect')!
+    // Assert across both top-level and nested fields to confirm the runner
+    // forwards the whole object rather than partially reconstructing it.
+    expect(sec.usage?.input).toBe(100)
+    expect(sec.usage?.output).toBe(50)
+    expect(sec.usage?.totalTokens).toBe(150)
+    expect(sec.usage?.cost.total).toBe(0.001)
+    expect(arch.usage?.input).toBe(200)
+    expect(arch.usage?.output).toBe(75)
+    expect(arch.usage?.totalTokens).toBe(275)
+    expect(arch.usage?.cost.total).toBe(0.002)
+  })
+
+  it('omits usage on failed reviewers', async () => {
+    runReviewImpl = async () => {
+      throw new Error('model error')
+    }
+    const reviewers = resolveReviewerNames(['security'])
+    const results = await runReviewers({
+      reviewers,
+      data: { context: 'c', diffContent: 'd' },
+    })
+    expect(results[0].ok).toBe(false)
+    expect(results[0].usage).toBeUndefined()
   })
 
   it('captures a failure to load the template without throwing', async () => {
