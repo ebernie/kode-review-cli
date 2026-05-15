@@ -27,11 +27,11 @@
     "gitlab",
     "cli"
   ],
-  "author": "",
+  "author": "Bernie <ebernie@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/kofikode/kode-review-cli"
+    "url": "https://github.com/ebernie/kode-review-cli"
   },
   "engines": {
     "node": ">=18.0.0"

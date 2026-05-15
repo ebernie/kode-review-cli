@@ -32,7 +32,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: "22"
 
       # ripgrep is preinstalled on ubuntu-latest; this is a safety net.
       - name: Ensure ripgrep is installed

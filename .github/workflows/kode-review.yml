@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: '22'
 
       - uses: oven-sh/setup-bun@v2
 
@@ -38,7 +38,6 @@ jobs:
         run: which rg || sudo apt-get install -y ripgrep
 
       - name: Install dependencies
-        # TODO: remove prior to commit
         run: bun install --frozen-lockfile
 
       - name: Build kode-review
