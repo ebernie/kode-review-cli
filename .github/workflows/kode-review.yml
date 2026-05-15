@@ -49,4 +49,7 @@ jobs:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: node ./bin/kode-review.js --ci --pr "$PR_NUMBER" --fail-on critical
+        # --model is pinned to dodge pi's provider auto-resolution: the
+        # Actions-injected GITHUB_TOKEN otherwise looks like a GitHub Copilot
+        # credential to pi-ai's env-key scanner and gets picked over MiniMax.
+        run: node ./bin/kode-review.js --ci --pr "$PR_NUMBER" --model minimax/MiniMax-M2.7 --fail-on critical
