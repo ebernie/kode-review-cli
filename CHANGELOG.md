@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.5.0](https://github.com/ebernie/kode-review-cli/compare/v0.4.0...v0.5.0) (2026-05-15)
+
+### ⚠ BREAKING CHANGES
+
+* v1.0 is a clean break. On first run, kode-review detects
+any pre-1.0 config and offers to wipe everything (config, watch state,
+indexer Docker containers + volumes) before re-onboarding. No backup.
+Users who want to keep their old setup must pin to 0.4.0.
+
+Replaces the opencode SDK + MCP-via-subprocess agent harness with the
+pi (https://pi.dev) SDK in-process. Pi handles provider/model auth,
+session/event streaming, tool execution, compaction, and retries.
+Kode-review keeps owning prompts, diff extraction, the indexer, VCS
+integration, and watch mode.
+
+Highlights:
+- New `src/review/pi-tools.ts` registers read_file + indexer tools as a
+  pi extension factory; the MCP server entrypoint is gone.
+- `src/review/engine.ts` unifies basic and agentic flows; the old
+  `agentic-engine.ts` is deleted.
+- New `src/cli/migration.ts` implements the typed-`wipe` migration with
+  --migrate-yes / KODE_REVIEW_MIGRATE_YES bypass.
+- Onboarding shrinks to: pi installed? pi has a usable model? VCS setup.
+- Config schema drops provider/model/variant/antigravity. --model is the
+  only per-invocation override (passed through to pi).
+- Doctor checks pi instead of opencode.
+- README leads with pi install instructions and a prominent v1.0 upgrade
+  warning.
+
+583 tests pass. Typecheck clean. Build clean.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+### Features
+
+* agent-mode by default, CI mode, fs-tool fallbacks, ergonomics ([981faf1](https://github.com/ebernie/kode-review-cli/commit/981faf1fbe77f26f3180d44b5aa43969440e8c10))
+* drop legacy CLI flags and fix pi stderr detection ([1e91722](https://github.com/ebernie/kode-review-cli/commit/1e91722eaa14bff97ce8ed2c9c29f382f6393553))
+* live throttled spinner progress during code reviews ([8280535](https://github.com/ebernie/kode-review-cli/commit/828053524c9f47634844f79b5aeaea0a13243f01))
+* multi-reviewer personas with externalized, user-overridable prompts ([1eb9627](https://github.com/ebernie/kode-review-cli/commit/1eb9627e696a0476acd50564bdfb421669b3d907))
+* port agent harness from opencode to pi (v1.0) ([cb72b50](https://github.com/ebernie/kode-review-cli/commit/cb72b50e16d133e86d452c72794d4b274c9b3fad))
+* surface pi token usage and estimated cost per review ([a0db7f7](https://github.com/ebernie/kode-review-cli/commit/a0db7f7a37fac00a20381f9f9fb77364e78cf1a4))
+* thread per-reviewer usage through ReviewerRunResult ([0633fce](https://github.com/ebernie/kode-review-cli/commit/0633fce0c4c7fa3f7f911ad7de7b37925d086763))
+
+### Bug Fixes
+
+* address multi-agent review feedback on pi port ([9285db4](https://github.com/ebernie/kode-review-cli/commit/9285db425bcf1607d20db320b6bcca94a6837bc7))
+* post one composite sticky for multi-reviewer CI runs ([76cd45e](https://github.com/ebernie/kode-review-cli/commit/76cd45ece3bba3437e53172e8b8a653a0b11dc63))
+
 ## [0.4.0](https://github.com/ebernie/kode-review-cli/compare/v0.3.0...v0.4.0) (2026-03-05)
 
 ### Features

@@ -1,6 +1,6 @@
 {
   "name": "@kofikode/kode-review-cli",
-  "version": "1.0.0",
+  "version": "0.5.0",
   "description": "AI-powered code review CLI built on pi (https://pi.dev)",
   "type": "module",
   "main": "dist/index.js",
