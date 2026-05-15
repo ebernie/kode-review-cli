@@ -8,6 +8,25 @@
 import type { AgentSession, AgentSessionEvent } from '@mariozechner/pi-coding-agent'
 import { logger } from '../utils/logger.js'
 
+/**
+ * Live progress snapshot delivered to `onProgress` subscribers. Emitted on
+ * `tool_execution_start` (so `lastToolName` reflects what's currently
+ * running) and `tool_execution_end` (so `toolCallCount` is up to date).
+ */
+export interface ReviewProgress {
+  toolCallCount: number
+  /** Name of the most recently started or finished tool, if any. */
+  lastToolName?: string
+}
+
+export interface AttachReviewListenerOptions {
+  /**
+   * Fired on every tool start/end. Callers are expected to throttle this —
+   * the listener intentionally does not, so tests can observe each event.
+   */
+  onProgress?: (progress: ReviewProgress) => void
+}
+
 export interface ReviewEventState {
   toolCallCount: number
   /** Resolved when the session emits `agent_end`. */
@@ -22,10 +41,23 @@ export interface ReviewEventState {
  * The returned `done` promise resolves when the agent finishes naturally,
  * and the caller is responsible for racing it against any timeout.
  */
-export function attachReviewListener(session: AgentSession): ReviewEventState {
+export function attachReviewListener(
+  session: AgentSession,
+  options: AttachReviewListenerOptions = {},
+): ReviewEventState {
   let toolCallCount = 0
+  let lastToolName: string | undefined
   let settled = false
   let resolveDone: () => void = () => {}
+
+  const emitProgress = () => {
+    if (!options.onProgress) return
+    try {
+      options.onProgress({ toolCallCount, lastToolName })
+    } catch (err) {
+      logger.debug(`onProgress callback threw: ${String(err)}`)
+    }
+  }
 
   // `done` is consumed by `Promise.race` in the engine. We never reject it —
   // when the engine bails early (timeout/error), the timeout/error promise
@@ -44,13 +76,17 @@ export function attachReviewListener(session: AgentSession): ReviewEventState {
       case 'tool_execution_start': {
         const argsPreview = previewArgs(event.args)
         logger.debug(`→ tool ${event.toolName}(${argsPreview})`)
+        lastToolName = event.toolName
+        emitProgress()
         break
       }
       case 'tool_execution_end': {
         toolCallCount++
+        lastToolName = event.toolName
         if (event.isError) {
           logger.warn(`Tool ${event.toolName} returned an error`)
         }
+        emitProgress()
         break
       }
       case 'agent_end': {

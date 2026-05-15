@@ -85,6 +85,62 @@ describe('attachReviewListener', () => {
     await expect(state.done).resolves.toBeUndefined()
   })
 
+  it('fires onProgress on tool_execution_start with toolCallCount=0 and the started tool name', () => {
+    const session = createFakeSession()
+    const updates: Array<{ toolCallCount: number; lastToolName?: string }> = []
+    attachReviewListener(session as never, { onProgress: (p) => updates.push({ ...p }) })
+
+    session.emit({ type: 'tool_execution_start', toolCallId: '1', toolName: 'read_file', args: {} })
+
+    expect(updates).toEqual([{ toolCallCount: 0, lastToolName: 'read_file' }])
+  })
+
+  it('fires onProgress on tool_execution_end with the incremented count and last tool name', () => {
+    const session = createFakeSession()
+    const updates: Array<{ toolCallCount: number; lastToolName?: string }> = []
+    attachReviewListener(session as never, { onProgress: (p) => updates.push({ ...p }) })
+
+    session.emit({ type: 'tool_execution_start', toolCallId: '1', toolName: 'read_file', args: {} })
+    session.emit({ type: 'tool_execution_end', toolCallId: '1', toolName: 'read_file', result: 'ok', isError: false })
+    session.emit({ type: 'tool_execution_start', toolCallId: '2', toolName: 'search_code', args: {} })
+    session.emit({ type: 'tool_execution_end', toolCallId: '2', toolName: 'search_code', result: 'ok', isError: false })
+
+    expect(updates).toEqual([
+      { toolCallCount: 0, lastToolName: 'read_file' },
+      { toolCallCount: 1, lastToolName: 'read_file' },
+      { toolCallCount: 1, lastToolName: 'search_code' },
+      { toolCallCount: 2, lastToolName: 'search_code' },
+    ])
+  })
+
+  it('does not invoke onProgress for non-tool events (agent_end, etc.)', () => {
+    const session = createFakeSession()
+    const onProgress = vi.fn()
+    attachReviewListener(session as never, { onProgress })
+
+    session.emit({ type: 'agent_end', messages: [] })
+    expect(onProgress).not.toHaveBeenCalled()
+  })
+
+  it('keeps counting and logging warnings even when onProgress throws (defensive)', () => {
+    const session = createFakeSession()
+    const onProgress = vi.fn(() => {
+      throw new Error('subscriber blew up')
+    })
+    const state = attachReviewListener(session as never, { onProgress })
+
+    // Mix a clean event and an isError event to verify BOTH that the count
+    // keeps accumulating AND that logger.warn still fires when the callback
+    // is throwing — the error-isolation wrapper must not swallow downstream
+    // side effects from the same case branch.
+    session.emit({ type: 'tool_execution_end', toolCallId: '1', toolName: 'a', result: 'ok', isError: false })
+    session.emit({ type: 'tool_execution_end', toolCallId: '2', toolName: 'broken', result: '', isError: true })
+
+    expect(state.toolCallCount).toBe(2)
+    expect(onProgress).toHaveBeenCalledTimes(2)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('broken'))
+  })
+
   it('unsubscribe() detaches from the session and does NOT reject done', async () => {
     const session = createFakeSession()
     const state = attachReviewListener(session as never)

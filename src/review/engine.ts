@@ -29,7 +29,7 @@ import {
   type AgenticPromptOptions,
 } from './agentic-prompt.js'
 import { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
-import { attachReviewListener } from './session-events.js'
+import { attachReviewListener, type ReviewProgress } from './session-events.js'
 import { extractReviewContent } from './response.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
@@ -45,6 +45,11 @@ export interface ReviewOptions {
   projectStructureContext?: string
   /** Pi model pattern, e.g. "anthropic/claude-sonnet-4-6". Default: pi's preferred model. */
   model?: string
+  /**
+   * Optional progress callback. Fired on every pi tool start/end event;
+   * callers are expected to throttle if surfacing to a spinner / UI.
+   */
+  onProgress?: (progress: ReviewProgress) => void
 }
 
 export interface AgenticReviewOptions extends ReviewOptions {
@@ -129,6 +134,7 @@ interface RunOptions {
   toolContext?: ToolContext
   timeoutMs: number
   maxIterations?: number
+  onProgress?: (progress: ReviewProgress) => void
 }
 
 interface RunOutcome {
@@ -169,7 +175,7 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
     sessionManager: SessionManager.inMemory(opts.cwd),
   })
 
-  const listener = attachReviewListener(session)
+  const listener = attachReviewListener(session, { onProgress: opts.onProgress })
 
   const timeoutHandle: { id: NodeJS.Timeout | null } = { id: null }
   const reviewTimeout = new AppError(
@@ -226,6 +232,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     modelPattern: options.model,
     cwd: process.cwd(),
     timeoutMs: DEFAULT_TIMEOUT_MS,
+    onProgress: options.onProgress,
   })
 
   return { content: outcome.content }
@@ -265,6 +272,7 @@ export async function runAgenticReview(
     },
     timeoutMs: timeoutSec * 1000,
     maxIterations,
+    onProgress: options.onProgress,
   })
 
   return {

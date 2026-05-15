@@ -8,6 +8,10 @@ export {
 } from './engine.js'
 
 export {
+  type ReviewProgress,
+} from './session-events.js'
+
+export {
   getLocalChanges,
   hasChanges,
   formatChanges,
