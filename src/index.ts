@@ -19,7 +19,6 @@ import {
 import { runOnboardingWizard, setupVcs } from './onboarding/index.js'
 import { needsMigration, runMigration } from './cli/migration.js'
 import {
-  runReview,
   runAgenticReview,
   getLocalChanges,
   hasChanges,
@@ -39,6 +38,12 @@ import {
   type CiPlatform,
 } from './review/ci-mode.js'
 import { filterSuppressedFindings } from './review/suppressions.js'
+import {
+  listAvailableReviewers,
+  resolveReviewerNames,
+  runReviewers,
+  type ReviewerRunResult,
+} from './reviewers/index.js'
 import {
   detectPlatform,
   getCurrentBranch,
@@ -82,6 +87,12 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
   // Update command (works without onboarding)
   if (options.update) {
     await runUpdate()
+    return true
+  }
+
+  // List reviewers (no side effects, works without onboarding)
+  if (options.listReviewers) {
+    printReviewerList()
     return true
   }
 
@@ -872,37 +883,69 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         process.exit(ciExitCode)
       }
     } else {
-      // Standard review mode
-      const reviewOptions = {
+      // Standard (non-agentic) review mode — dispatch to one or more reviewer
+      // personas, each running in its own pi `AgentSession` in parallel.
+      //
+      // Note on onProgress: non-agentic reviews don't make tool calls, so
+      // there's no live tool-progress signal to surface on the spinner.
+      // Per-reviewer completion is reported via `onReviewerComplete` below.
+      const reviewerInfos = resolveReviewerNames(options.reviewers)
+      const reviewData = {
         diffContent,
         context: contextParts.join('\n'),
         prMrInfo,
         semanticContext,
         prDescriptionSummary,
         projectStructureContext,
-        model: options.model,
-        onProgress,
       }
 
-      const result = await runReview(reviewOptions)
+      if (!ctx.quiet) {
+        const names = reviewerInfos.map((r) => r.name).join(', ')
+        logger.info(`Dispatching ${reviewerInfos.length} reviewer(s) in parallel: ${names}`)
+      }
+
+      const results = await runReviewers({
+        reviewers: reviewerInfos,
+        data: reviewData,
+        model: options.model,
+        onReviewerComplete: (r) => {
+          if (ctx.quiet) return
+          if (r.ok) {
+            logger.success(`Reviewer ${r.reviewer.name} completed in ${Math.round(r.durationMs / 100) / 10}s`)
+          } else {
+            logger.warn(`Reviewer ${r.reviewer.name} failed: ${r.error}`)
+          }
+        },
+      })
 
       progressUpdater?.dispose()
       spinner?.stop()
 
-      // CI mode + suppressions apply to the non-agentic path too; the only
-      // thing different about agentic mode is the tool-call metadata.
-      const { content: reviewContent, ciExitCode } = await applyCiAndSuppressions(
-        result.content,
-        options,
-        repoRoot!,
-      )
+      // CI mode + suppressions apply per reviewer: each persona's content is
+      // filtered for suppression markers, and in --ci mode the worst
+      // (highest) exit code across reviewers wins so a single failing
+      // reviewer can still fail the CI run.
+      let aggregateCiExitCode: number | undefined
+      for (const r of results) {
+        if (!r.ok || r.content === undefined) continue
+        const { content: filtered, ciExitCode } = await applyCiAndSuppressions(
+          r.content,
+          options,
+          repoRoot!,
+        )
+        r.content = filtered
+        if (ciExitCode !== undefined) {
+          aggregateCiExitCode =
+            aggregateCiExitCode === undefined
+              ? ciExitCode
+              : Math.max(aggregateCiExitCode, ciExitCode)
+        }
+      }
 
-      await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
-        agentic: false,
-      })
+      await processMultiReviewerOutput(results, options, ctx, prMr, branch)
 
-      if (ciExitCode !== undefined) {
-        process.exit(ciExitCode)
+      if (aggregateCiExitCode !== undefined) {
+        process.exit(aggregateCiExitCode)
       }
     }
   } catch (error) {
@@ -1090,6 +1133,179 @@ async function processReviewOutput(
     logger.warn('--post-to-pr specified but no PR/MR was reviewed')
   } else if (options.postToPr && !reviewOutput.structured) {
     logger.warn('Could not parse review for PR posting. Raw comment posted instead.')
+  }
+}
+
+/**
+ * Print the list of available reviewers (built-in + user-defined).
+ *
+ * Reads `--format json` to decide between human-readable text and a JSON
+ * array suitable for scripting.
+ */
+function printReviewerList(): void {
+  const reviewers = listAvailableReviewers()
+  console.log('')
+  console.log('Available reviewers:')
+  console.log('')
+  for (const r of reviewers) {
+    const tag = r.builtin ? cyan('[builtin]') : green('[user]    ')
+    console.log(`  ${tag} ${r.name.padEnd(14)} ${r.description}`)
+  }
+  console.log('')
+  console.log('Run a reviewer with:  kode-review --reviewer <name>')
+  console.log('Run multiple:         kode-review --reviewer security,architect')
+  console.log('Run all in parallel:  kode-review --reviewer all')
+  console.log('')
+  console.log('To define your own reviewer, drop a markdown prompt at:')
+  console.log('  ~/.config/kode-review/reviewers/<name>.md')
+  console.log('(or override the location with $KODE_REVIEW_REVIEWERS_DIR)')
+}
+
+/**
+ * Derive a per-reviewer output filename from a base path.
+ *
+ * `review.md` + `security` → `review.security.md`. When no extension is
+ * present, the reviewer name is appended with a dash.
+ */
+function perReviewerOutputPath(basePath: string, reviewerName: string): string {
+  const lastDot = basePath.lastIndexOf('.')
+  const lastSep = Math.max(basePath.lastIndexOf('/'), basePath.lastIndexOf('\\'))
+  if (lastDot > lastSep && lastDot !== -1) {
+    return `${basePath.slice(0, lastDot)}.${reviewerName}${basePath.slice(lastDot)}`
+  }
+  return `${basePath}-${reviewerName}`
+}
+
+/**
+ * Handle output for one or more parallel reviewer runs.
+ *
+ * Single-reviewer runs are written exactly as before (no per-reviewer
+ * filename suffix, no section header). Multi-reviewer runs prefix each
+ * section with a header in stdout output, and write to per-reviewer files
+ * when `--output-file` is set. Failed reviewers are surfaced but don't
+ * block the remaining output.
+ *
+ * Returns when every successful reviewer has been written + (optionally)
+ * posted. Throws only if every reviewer failed — partial failure is logged
+ * and treated as non-fatal.
+ */
+async function processMultiReviewerOutput(
+  results: ReviewerRunResult[],
+  options: CliOptions,
+  ctx: CliContext,
+  prMr: { id: number; platform: VcsPlatform } | null,
+  branch: string,
+): Promise<void> {
+  const okResults = results.filter((r) => r.ok && r.content !== undefined)
+  const failed = results.filter((r) => !r.ok)
+
+  if (okResults.length === 0) {
+    const detail = failed.map((r) => `${r.reviewer.name}: ${r.error}`).join('; ')
+    throw new Error(`All reviewers failed. ${detail}`)
+  }
+
+  const multi = results.length > 1
+
+  // Hoist invariants out of the per-reviewer loop so we don't repeat the
+  // same warning once per successful reviewer.
+  if (options.postToPr && !prMr) {
+    logger.warn('--post-to-pr specified but no PR/MR was reviewed')
+  }
+
+  for (let i = 0; i < okResults.length; i++) {
+    const r = okResults[i]
+    const rawContent = r.content!
+    const structured = parseReviewContent(rawContent)
+
+    const reviewOutput: ReviewOutput = {
+      raw: rawContent,
+      structured: structured ?? undefined,
+    }
+
+    if (reviewOutput.structured) {
+      const scope = options.scope === 'auto'
+        ? (prMr ? 'pr' : 'local')
+        : (options.scope ?? 'local')
+
+      reviewOutput.structured.metadata = {
+        timestamp: new Date().toISOString(),
+        scope: scope as 'local' | 'pr' | 'both',
+        agentic: false,
+        prNumber: prMr?.platform === 'github' ? prMr.id : undefined,
+        mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
+        branch,
+        model: options.model,
+        reviewer: r.reviewer.name,
+      }
+    }
+
+    const outputFile = options.outputFile && multi
+      ? perReviewerOutputPath(options.outputFile, r.reviewer.name)
+      : options.outputFile
+
+    if (!ctx.quiet && multi) {
+      const tag = r.reviewer.builtin ? '[builtin]' : '[user]'
+      console.log('')
+      console.log(cyan('────────────────────────────────────────'))
+      console.log(cyan(` Reviewer: ${r.reviewer.name} ${tag}`))
+      console.log(cyan('────────────────────────────────────────'))
+      console.log('')
+    }
+
+    await writeReviewOutput(reviewOutput, {
+      format: options.format,
+      outputFile,
+      quiet: outputFile ? ctx.quiet : false,
+    })
+
+    if (outputFile) {
+      logger.success(`Review (${r.reviewer.name}) written to ${outputFile}`)
+    }
+
+    // PR/MR posting — one comment per reviewer so each persona's verdict is
+    // visible separately rather than being merged into a single decision.
+    if (options.postToPr && prMr && reviewOutput.structured) {
+      logger.info(`Posting ${r.reviewer.name} review to PR/MR...`)
+
+      const postResult = await postReviewToPR(
+        reviewOutput.structured,
+        {
+          prNumber: prMr.platform === 'github' ? prMr.id : undefined,
+          mrIid: prMr.platform === 'gitlab' ? prMr.id : undefined,
+          platform: prMr.platform as VcsPlatformType,
+          postInlineComments: true,
+          setApprovalStatus: !multi, // only the lone reviewer toggles approval state
+        }
+      )
+
+      if (postResult.success) {
+        logger.success(`Posted ${r.reviewer.name} review to PR/MR`)
+        if (postResult.inlineCommentsPosted > 0) {
+          logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+        }
+      } else {
+        for (const error of postResult.errors) {
+          logger.error(error)
+        }
+      }
+    } else if (options.postToPr && prMr && !reviewOutput.structured) {
+      logger.warn(`Could not parse ${r.reviewer.name} review for PR posting.`)
+    }
+  }
+
+  if (!ctx.quiet) {
+    console.log('')
+    console.log(green('========================================'))
+    console.log(green('           REVIEW COMPLETE              '))
+    console.log(green('========================================'))
+    if (multi) {
+      console.log('')
+      const summary = okResults
+        .map((r) => `  ${r.reviewer.name}: ok (${Math.round(r.durationMs / 100) / 10}s)`)
+        .concat(failed.map((r) => `  ${r.reviewer.name}: FAILED — ${r.error}`))
+        .join('\n')
+      console.log(summary)
+    }
   }
 }
 
