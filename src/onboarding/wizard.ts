@@ -3,8 +3,7 @@
  *
  * Pi (https://pi.dev) owns provider/model/auth — the wizard's job is to
  * verify pi is installed and has a usable provider, then walk the user
- * through VCS integration. No more provider list, no more antigravity
- * flow, no more `--setup-provider`.
+ * through VCS integration.
  */
 
 import { confirm } from '@inquirer/prompts'

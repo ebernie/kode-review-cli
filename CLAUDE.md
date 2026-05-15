@@ -41,7 +41,7 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 |--------|---------|
 | `src/cli/` | CLI argument parsing (Commander), colors (Chalk), interactive context, self-update (`update.ts`) |
 | `src/config/` | Zod schemas, Conf-based persistent config store (~/.config/kode-review/) |
-| `src/onboarding/` | Setup wizard, Antigravity OAuth, VCS CLI detection |
+| `src/onboarding/` | Setup wizard, pi installation check, VCS CLI detection |
 | `src/review/` | OpenCode SDK integration, prompt construction, git diff extraction, project structure analysis |
 | `src/vcs/` | GitHub/GitLab CLI wrappers (`gh`/`glab`), platform detection from git remote |
 | `src/watch/` | Polling-based PR/MR monitoring with persistent state tracking |
@@ -106,17 +106,19 @@ Early termination occurs when high-confidence matches (score > 0.9) are found.
 - **Runtime**: Node.js 18+ with ESM (type: module)
 - **Build**: tsup with tree-shaking, source maps
 - **TypeScript**: Strict mode, no unused locals/parameters, no implicit returns
-- **AI Integration**: OpenCode SDK (`@opencode-ai/sdk`) with Antigravity models support
+- **AI Integration**: Pi (https://pi.dev) owns provider/model/auth (Anthropic, Google Gemini API key, OpenAI, GitHub Copilot, etc.)
 - **CLI**: Commander for args, Inquirer for prompts, Ora for spinners
 - **Process execution**: execa for running git, gh, glab commands
 
 ## Configuration
 
 Config stored at `~/.config/kode-review/config.json` with:
-- Provider/model selection (Anthropic, Google/Antigravity)
 - VCS authentication status (GitHub CLI `gh`, GitLab CLI `glab`)
 - Indexer settings (ports, embedding model, chunk sizes)
+- Updater state (last version check)
 - Onboarding completion state
+
+Provider/model/auth is owned by pi (https://pi.dev) and is deliberately NOT stored in kode-review config. Use `pi /login` to configure providers.
 
 Watch mode state stored separately at `~/.config/kode-review-watch/config.json`.
 
