@@ -149,6 +149,30 @@ describe('runReview', () => {
   it('throws a clear error when --model does not match any available model', async () => {
     await expect(runReview({ diffContent: 'd', context: 'c', model: 'foo/nope' })).rejects.toThrow(/not available in pi/)
   })
+
+  it('forwards onProgress through runWithPi even in basic (no-tools) mode', async () => {
+    const seen: Array<{ toolCallCount: number; lastToolName?: string }> = []
+    const promise = runReview({
+      diffContent: 'd',
+      context: 'c',
+      onProgress: (p) => seen.push({ ...p }),
+    })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    // Pi normally would not emit tool events with noTools='all', but we
+    // simulate one to prove the wiring forwards events all the way through —
+    // a future refactor that drops `onProgress` from `runWithPi`'s `runReview`
+    // call site would make this test fail.
+    pushTool()
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(seen).toEqual([
+      { toolCallCount: 0, lastToolName: 'read_file' },
+      { toolCallCount: 1, lastToolName: 'read_file' },
+    ])
+  })
 })
 
 describe('runAgenticReview', () => {
@@ -192,6 +216,29 @@ describe('runAgenticReview', () => {
     expect(result.toolCallCount).toBe(2)
     expect(result.truncated).toBe(true)
     expect(result.truncationReason).toContain('Maximum iteration limit')
+  })
+
+  it('threads onProgress through to the listener — observer sees a snapshot per tool start and per tool end', async () => {
+    const seen: Array<{ toolCallCount: number; lastToolName?: string }> = []
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/repo',
+      repoUrl: 'https://github.com/x/y',
+      onProgress: (p) => seen.push({ ...p }),
+    })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    pushTool()
+    pushAssistantText('Final.')
+    captured.resolvePrompt()
+    await promise
+
+    // Two emissions for the single tool: start + end.
+    expect(seen).toEqual([
+      { toolCallCount: 0, lastToolName: 'read_file' },
+      { toolCallCount: 1, lastToolName: 'read_file' },
+    ])
   })
 
   it('keeps built-in tools off but enables custom (extension) tools (noTools = "builtin")', async () => {

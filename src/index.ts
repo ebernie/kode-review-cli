@@ -7,6 +7,7 @@ import { runDiagnostics, printDiagnostics } from './cli/doctor.js'
 import { initHooks } from './cli/init-hooks.js'
 import { runUpdate, checkForUpdateNotification } from './cli/update.js'
 import { cyan, green } from './cli/colors.js'
+import { createThrottledProgressUpdater } from './cli/spinner-progress.js'
 import { logger, setQuietMode, setDebugMode } from './utils/logger.js'
 import { commandExists } from './utils/exec.js'
 import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
@@ -26,6 +27,7 @@ import {
   getChangesSummary,
   getProjectStructureContext,
   formatProjectStructureContext,
+  type ReviewProgress,
 } from './review/index.js'
 import {
   detectCiPlatform,
@@ -781,9 +783,16 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
     console.log('')
   }
 
-  const spinner = ctx.quiet ? null : ora(
-    options.agentic ? 'Running agentic code review...' : 'Running code review...'
-  ).start()
+  const baseSpinnerLabel = options.agentic
+    ? 'Running agentic code review...'
+    : 'Running code review...'
+  const spinner = ctx.quiet ? null : ora(baseSpinnerLabel).start()
+  const progressUpdater = spinner
+    ? createThrottledProgressUpdater(spinner, { baseLabel: baseSpinnerLabel })
+    : null
+  const onProgress: ((p: ReviewProgress) => void) | undefined = progressUpdater
+    ? (p) => progressUpdater.update(p)
+    : undefined
 
   try {
     // Handle agentic review mode
@@ -814,6 +823,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       const repoUrl = await getRepoUrl()
       if (!repoUrl) {
+        progressUpdater?.dispose()
         spinner?.fail('Could not determine repository URL')
         throw new Error(
           'Could not determine repository URL. Ensure you have a git remote configured.'
@@ -833,10 +843,12 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         model: options.model,
         maxIterations: options.maxIterations,
         timeout: options.agenticTimeout,
+        onProgress,
       }
 
       const result = await runAgenticReview(agenticOptions)
 
+      progressUpdater?.dispose()
       spinner?.stop()
 
       // Apply CI / suppression handling on the agentic output. The filtered
@@ -869,10 +881,12 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         prDescriptionSummary,
         projectStructureContext,
         model: options.model,
+        onProgress,
       }
 
       const result = await runReview(reviewOptions)
 
+      progressUpdater?.dispose()
       spinner?.stop()
 
       // CI mode + suppressions apply to the non-agentic path too; the only
@@ -892,6 +906,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       }
     }
   } catch (error) {
+    progressUpdater?.dispose()
     spinner?.fail('Review failed')
     throw error
   }
