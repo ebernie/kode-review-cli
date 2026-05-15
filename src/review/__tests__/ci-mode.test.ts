@@ -4,11 +4,25 @@ import {
   extractPrNumber,
   resolveCiExitCode,
   buildCommentPayload,
+  buildCompositeCiCommentBody,
   parseReviewSummary,
   replaceStickyComment,
   STICKY_MARKER,
   type ReviewSummary,
 } from '../ci-mode.js'
+import type { UsageTotals } from '../usage.js'
+
+function usage(totalTokens: number, costTotal: number): UsageTotals {
+  return {
+    input: totalTokens / 2,
+    output: totalTokens / 2,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
+    assistantMessages: 1,
+  }
+}
 
 describe('detectCiPlatform', () => {
   it('detects GitHub Actions from GITHUB_ACTIONS=true', () => {
@@ -204,5 +218,72 @@ describe('replaceStickyComment', () => {
     const ok = await replaceStickyComment(runner, 42, `${STICKY}\n\nnew`)
     expect(ok).toBe(true)
     expect(runner.del).toHaveBeenCalledWith(7)
+  })
+})
+
+describe('buildCompositeCiCommentBody', () => {
+  it('produces one section per reviewer with the reviewer name as heading, preserving input order', () => {
+    const body = buildCompositeCiCommentBody([
+      { reviewer: { name: 'security' }, content: 'sec findings', usage: usage(100, 0.01) },
+      { reviewer: { name: 'architect' }, content: 'arch findings', usage: usage(200, 0.02) },
+    ])
+    // Each reviewer's section starts with a `## <name>` heading.
+    expect(body).toMatch(/## security\n\nsec findings/)
+    expect(body).toMatch(/## architect\n\narch findings/)
+    // Direct order check: `security` must come before `architect` in the output.
+    // (Indirectly checking via `indexOf('---')` would pass under a reversed-
+    // section regression because the footer also contains a `---`.)
+    expect(body.indexOf('## security')).toBeLessThan(body.indexOf('## architect'))
+  })
+
+  it('aggregates token AND cost totals across reviewers in the footer', () => {
+    const body = buildCompositeCiCommentBody([
+      { reviewer: { name: 'security' }, content: 'a', usage: usage(100, 0.01) },
+      { reviewer: { name: 'architect' }, content: 'b', usage: usage(250, 0.025) },
+    ])
+    // Tokens: 100 + 250 = 350
+    expect(body).toMatch(/Tokens: 350 total/)
+    // Cost: 0.01 + 0.025 = 0.035 (rendered to 4 decimal places by formatCost).
+    // Locking in the cost path catches a sumUsage bug that drops cost.* fields
+    // even when totalTokens still adds correctly.
+    expect(body).toMatch(/Cost: \$0\.0350 \(est\.\)/)
+    expect(body).toMatch(/across 2 reviewers/)
+  })
+
+  it('singular "reviewer" when exactly one reviewer succeeded', () => {
+    const body = buildCompositeCiCommentBody([
+      { reviewer: { name: 'general' }, content: 'g', usage: usage(50, 0.005) },
+    ])
+    expect(body).toMatch(/across 1 reviewer\)/)
+    expect(body).not.toMatch(/reviewers\)/)
+  })
+
+  it('handles reviewers without usage (failure-derived undefined)', () => {
+    const body = buildCompositeCiCommentBody([
+      { reviewer: { name: 'security' }, content: 'a', usage: usage(100, 0.01) },
+      { reviewer: { name: 'architect' }, content: 'b' }, // no usage
+    ])
+    // The non-usage reviewer still gets a section and is counted in "across N".
+    expect(body).toMatch(/## architect/)
+    expect(body).toMatch(/across 2 reviewers/)
+    // Aggregated tokens reflect only the reviewer that reported usage.
+    expect(body).toMatch(/Tokens: 100 total/)
+  })
+
+  it('emits an "n/a" footer with a placeholder section when no reviewers succeeded', () => {
+    const body = buildCompositeCiCommentBody([])
+    expect(body).toMatch(/No reviewer produced output/)
+    expect(body).toMatch(/Token usage and cost: n\/a/)
+  })
+
+  it('trims trailing whitespace on per-reviewer content so sections stay tight', () => {
+    const body = buildCompositeCiCommentBody([
+      { reviewer: { name: 'general' }, content: 'g\n\n\n', usage: usage(50, 0.005) },
+    ])
+    // Positive shape: trimmed content sits exactly one blank line before the
+    // separator. A regression that replaced `trim()` with a "leave one trailing
+    // newline" rule would still satisfy the negative-only assertion below.
+    expect(body).toMatch(/g\n\n---/)
+    expect(body).not.toMatch(/g\n\n\n+---/)
   })
 })

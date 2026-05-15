@@ -9,6 +9,7 @@
 
 import { exec as runProcess } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
+import { formatUsageOneLiner, sumUsage, type UsageTotals } from './usage.js'
 
 export type CiPlatform = 'github' | 'gitlab'
 
@@ -216,4 +217,36 @@ export function parseReviewSummary(reviewMarkdown: string): ReviewSummary {
   const verdictMatch = /RECOMMENDATION:\s*(APPROVE|REQUEST_CHANGES|NEEDS_DISCUSSION)/.exec(reviewMarkdown)
   const verdict = verdictMatch?.[1] ?? 'NEEDS_DISCUSSION'
   return { verdict, issuesByCount: counts }
+}
+
+/**
+ * Build a single composite sticky body for a multi-reviewer run: one
+ * `## <reviewer-name>` section per successful reviewer, separated by `---`,
+ * with a trailing usage footer summing tokens/cost across reviewers.
+ *
+ * Posted ONCE per run under the shared sticky marker — replaces the prior
+ * per-reviewer posting pattern which raced N reviewers under one marker
+ * and left only the last one's comment surviving.
+ */
+export function buildCompositeCiCommentBody(
+  successfulResults: ReadonlyArray<{
+    reviewer: { name: string }
+    content: string
+    usage?: UsageTotals
+  }>,
+): string {
+  if (successfulResults.length === 0) {
+    return `_No reviewer produced output._\n\n---\n_${formatUsageOneLiner(undefined)}_`
+  }
+  const sections = successfulResults.map(
+    (r) => `## ${r.reviewer.name}\n\n${r.content.trim()}`,
+  )
+  const totalUsage = sumUsage(
+    successfulResults
+      .map((r) => r.usage)
+      .filter((u): u is UsageTotals => u !== undefined),
+  )
+  const noun = successfulResults.length === 1 ? 'reviewer' : 'reviewers'
+  const footer = `---\n_${formatUsageOneLiner(totalUsage)} (across ${successfulResults.length} ${noun})_`
+  return `${sections.join('\n\n---\n\n')}\n\n${footer}`
 }

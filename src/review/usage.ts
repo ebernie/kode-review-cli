@@ -124,3 +124,38 @@ export function formatUsageOneLiner(usage: UsageTotals | null | undefined): stri
     : `Cost: ${formatCost(usage.cost.total)} (est.)`
   return `${tokens}  •  ${cost}`
 }
+
+/**
+ * Sum a list of UsageTotals into one aggregate. Returns undefined for an
+ * empty input so callers (e.g. `formatUsageOneLiner`) emit their
+ * not-available placeholder.
+ */
+export function sumUsage(parts: UsageTotals[]): UsageTotals | undefined {
+  if (parts.length === 0) return undefined
+  return parts.reduce<UsageTotals>(
+    (acc, u) => ({
+      input: acc.input + u.input,
+      output: acc.output + u.output,
+      cacheRead: acc.cacheRead + u.cacheRead,
+      cacheWrite: acc.cacheWrite + u.cacheWrite,
+      totalTokens: acc.totalTokens + u.totalTokens,
+      cost: {
+        input: acc.cost.input + u.cost.input,
+        output: acc.cost.output + u.cost.output,
+        cacheRead: acc.cost.cacheRead + u.cost.cacheRead,
+        cacheWrite: acc.cost.cacheWrite + u.cost.cacheWrite,
+        total: acc.cost.total + u.cost.total,
+      },
+      assistantMessages: acc.assistantMessages + u.assistantMessages,
+    }),
+    {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      assistantMessages: 0,
+    },
+  )
+}

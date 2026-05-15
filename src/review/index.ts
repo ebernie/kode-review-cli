@@ -43,5 +43,6 @@ export { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
 export {
   aggregateUsage,
   formatUsageOneLiner,
+  sumUsage,
   type UsageTotals,
 } from './usage.js'

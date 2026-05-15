@@ -35,6 +35,7 @@ import {
   extractPrNumber,
   resolveCiExitCode,
   buildCommentPayload,
+  buildCompositeCiCommentBody,
   parseReviewSummary,
   postCiComment,
   type CiPlatform,
@@ -925,11 +926,15 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       progressUpdater?.dispose()
       spinner?.stop()
 
-      // CI mode + suppressions apply per reviewer: each persona's content is
-      // filtered for suppression markers, and in --ci mode the worst
-      // (highest) exit code across reviewers wins so a single failing
-      // reviewer can still fail the CI run. Per-reviewer usage is passed
-      // through so the sticky comment carries an accurate cost footer.
+      // CI mode + suppressions for multi-reviewer:
+      //
+      // - Suppression filtering runs PER reviewer (so each persona's content
+      //   is filtered against the same source markers).
+      // - The CI exit code is the WORST (highest) across reviewers, so a
+      //   single failing persona can still fail the run.
+      // - The sticky comment is posted ONCE after the loop as a single
+      //   composite body with one section per reviewer — preventing each
+      //   per-reviewer call from racing under the shared sticky marker.
       let aggregateCiExitCode: number | undefined
       for (const r of results) {
         if (!r.ok || r.content === undefined) continue
@@ -938,6 +943,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           options,
           repoRoot!,
           r.usage,
+          { postComment: false },
         )
         r.content = filtered
         if (ciExitCode !== undefined) {
@@ -945,6 +951,15 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
             aggregateCiExitCode === undefined
               ? ciExitCode
               : Math.max(aggregateCiExitCode, ciExitCode)
+        }
+      }
+
+      if (options.ci) {
+        const successful = results
+          .filter((r) => r.ok && r.content !== undefined)
+          .map((r) => ({ reviewer: r.reviewer, content: r.content!, usage: r.usage }))
+        if (successful.length > 0) {
+          await postCiStickyComment(buildCompositeCiCommentBody(successful), options, repoRoot!)
         }
       }
 
@@ -984,7 +999,15 @@ async function applyCiAndSuppressions(
   // Optional because per-reviewer results may be in a failure state (no usage).
   // formatUsageOneLiner() handles undefined by emitting a "—" placeholder.
   usage?: UsageTotals,
+  // When the caller plans to post a single composite comment after running
+  // every reviewer (multi-reviewer CI), pass `postComment: false` so this
+  // function only filters + computes the exit code and leaves the sticky
+  // comment alone. Without this, N reviewers would post-and-delete N times
+  // under the same marker, leaving only the last reviewer's comment.
+  opts: { postComment?: boolean } = {},
 ): Promise<CiAndSuppressionsResult> {
+  const { postComment = true } = opts
+
   // 1) Suppressions — always-on; --no-suppressions disables.
   let reviewContent = rawContent
   if (!options.noSuppressions) {
@@ -999,37 +1022,62 @@ async function applyCiAndSuppressions(
     }
   }
 
-  // 2) CI mode — post the sticky comment + decide an exit code.
+  // 2) CI mode — compute the exit code (and optionally post the sticky).
   if (!options.ci) return { content: reviewContent }
-
-  const platform: CiPlatform | null = detectCiPlatform()
-  const envPr = platform ? extractPrNumber(platform) : null
-  const prNumber: number | null = options.pr ? Number(options.pr) : envPr
 
   const summary = parseReviewSummary(reviewContent)
   const exitCode = resolveCiExitCode(summary, options.failOn)
 
-  if (platform && prNumber) {
-    // Append the usage footer to the sticky comment only — keep it out of the
-    // terminal/file `reviewContent` so the structured parser doesn't see it.
+  if (postComment) {
     const commentBody = `${reviewContent}\n\n---\n_${formatUsageOneLiner(usage)}_`
-    const payload = buildCommentPayload(commentBody)
-    try {
-      const posted = await postCiComment(platform, prNumber, payload, repoRoot)
-      if (!posted) {
-        logger.warn(`Failed to post review comment to ${platform} PR/MR #${prNumber}`)
-      } else {
-        logger.info(`Posted review to ${platform} PR/MR #${prNumber} (sticky)`)
-      }
-    } catch (err) {
-      logger.warn(`Could not post CI comment: ${(err as Error).message}`)
-    }
-  } else if (!prNumber) {
-    logger.warn('CI mode active but no PR/MR number could be resolved — skipping comment post.')
+    await postCiStickyComment(commentBody, options, repoRoot)
   }
 
   return { content: reviewContent, ciExitCode: exitCode }
 }
+
+/**
+ * Post a single sticky CI comment under the shared `<!-- kode-review:sticky -->`
+ * marker. Resolves the PR number from `--pr` or the CI env, detects the
+ * platform, and delegates to the platform-specific runner. No-ops with a
+ * warning when either is missing.
+ *
+ * Centralized here so both the single-reviewer agentic path and the
+ * composite multi-reviewer path go through the same one-comment-per-run
+ * codepath — preventing N reviewers from racing each other under the
+ * sticky marker.
+ */
+async function postCiStickyComment(
+  commentBody: string,
+  options: CliOptions,
+  repoRoot: string,
+): Promise<void> {
+  const platform: CiPlatform | null = detectCiPlatform()
+  const envPr = platform ? extractPrNumber(platform) : null
+  const prNumber: number | null = options.pr ? Number(options.pr) : envPr
+
+  if (!platform || !prNumber) {
+    if (!prNumber) {
+      logger.warn('CI mode active but no PR/MR number could be resolved — skipping comment post.')
+    } else if (!platform) {
+      logger.warn('CI mode active but no CI platform detected (not running in GitHub Actions / GitLab CI) — skipping comment post.')
+    }
+    return
+  }
+
+  const payload = buildCommentPayload(commentBody)
+  try {
+    const posted = await postCiComment(platform, prNumber, payload, repoRoot)
+    if (!posted) {
+      logger.warn(`Failed to post review comment to ${platform} PR/MR #${prNumber}`)
+    } else {
+      logger.info(`Posted review to ${platform} PR/MR #${prNumber} (sticky)`)
+    }
+  } catch (err) {
+    logger.warn(`Could not post CI comment: ${(err as Error).message}`)
+  }
+}
+
 
 /**
  * Process and output review results based on options
