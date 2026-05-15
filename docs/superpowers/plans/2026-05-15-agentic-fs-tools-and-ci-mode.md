@@ -2203,7 +2203,7 @@ jobs:
         run: which rg || sudo apt-get install -y ripgrep
 
       - name: Install kode-review
-        run: npm install -g @kofikode/kode-review-cli
+        run: npm install -g @ebernie/kode-review-cli
 
       - name: Run review
         env:
@@ -2234,7 +2234,7 @@ ai_code_review:
     - curl -sL https://gitlab.com/gitlab-org/cli/-/releases/permalink/latest/downloads/glab_linux_amd64.deb -o /tmp/glab.deb
     - dpkg -i /tmp/glab.deb
     - glab auth login --token "$GITLAB_TOKEN" --hostname gitlab.com
-    - npm install -g @kofikode/kode-review-cli
+    - npm install -g @ebernie/kode-review-cli
   script:
     - kode-review --ci --pr "$CI_MERGE_REQUEST_IID" --fail-on critical
   allow_failure: false

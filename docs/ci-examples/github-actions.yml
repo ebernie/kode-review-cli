@@ -39,7 +39,7 @@ jobs:
         run: which rg || sudo apt-get install -y ripgrep
 
       - name: Install kode-review
-        run: npm install -g @kofikode/kode-review-cli
+        run: npm install -g @ebernie/kode-review-cli
 
       - name: Run review
         env:

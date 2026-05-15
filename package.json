@@ -1,5 +1,5 @@
 {
-  "name": "@kofikode/kode-review-cli",
+  "name": "@ebernie/kode-review-cli",
   "version": "0.5.0",
   "description": "AI-powered code review CLI built on pi (https://pi.dev)",
   "type": "module",

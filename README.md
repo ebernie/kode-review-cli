@@ -9,7 +9,7 @@ AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/mo
 > If you don't want this, **stay on 0.4.0**:
 >
 > ```bash
-> npm install -g @kofikode/kode-review-cli@0.4.0
+> npm install -g @ebernie/kode-review-cli@0.4.0
 > ```
 >
 > The migration prompts for a typed `wipe` confirmation. To script the upgrade, pass `--migrate-yes` or set `KODE_REVIEW_MIGRATE_YES=1`.
@@ -41,7 +41,7 @@ AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/mo
 
 ```bash
 # Clone the repository
-git clone https://github.com/kofikode/kode-review-cli.git
+git clone https://github.com/ebernie/kode-review-cli.git
 cd kode-review-cli
 
 # Install dependencies and build

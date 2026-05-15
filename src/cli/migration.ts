@@ -81,7 +81,7 @@ function printWarning(): void {
   console.error(yellow(bold('This is irreversible. There is no backup.')))
   console.error('')
   console.error('To keep your old setup, abort now and pin the previous release:')
-  console.error(dim('  npm install -g @kofikode/kode-review-cli@0.4.0'))
+  console.error(dim('  npm install -g @ebernie/kode-review-cli@0.4.0'))
   console.error('')
 }
 

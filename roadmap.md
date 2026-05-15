@@ -44,7 +44,7 @@ This document outlines planned improvements to transform kode-review from a pers
 
 - [ ] **GitHub Actions** - Create marketplace action for automatic PR reviews
   ```yaml
-  - uses: kofikode/kode-review@v1
+  - uses: ebernie/kode-review@v1
     with:
       scope: pr
       post-comment: true

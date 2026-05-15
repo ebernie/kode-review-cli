@@ -20,7 +20,7 @@ import { cyan, green, yellow, bold } from './colors.js'
 
 declare const PKG_VERSION: string
 
-const REPO_URL = 'https://github.com/kofikode/kode-review-cli'
+const REPO_URL = 'https://github.com/ebernie/kode-review-cli'
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 // --- Pure version helpers ---
