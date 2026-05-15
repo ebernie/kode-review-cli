@@ -24,17 +24,49 @@ export async function isPiInstalled(): Promise<boolean> {
 }
 
 /**
+ * Result of inspecting pi's model list.
+ *
+ *   - `ok`:    pi has at least one model with usable credentials.
+ *   - `none`:  pi ran successfully but reports no models.
+ *   - `error`: invoking `pi --list-models` failed (non-zero exit).
+ */
+export type PiModelInspection =
+  | { kind: 'ok' }
+  | { kind: 'none' }
+  | { kind: 'error'; details: string }
+
+/**
+ * Inspect pi's configured models by shelling out to `pi --list-models`.
+ *
+ * Shared by the onboarding wizard's pass/fail gate and the `--doctor`
+ * diagnostic so the stream-handling rules live in exactly one place.
+ *
+ * Note: pi writes its human-readable model table to stderr, and the
+ * "No models available" sentinel may appear on either stream depending
+ * on pi version. We inspect the combined output to stay robust across
+ * both.
+ */
+export async function inspectPiModels(): Promise<PiModelInspection> {
+  const result = await runCommand('pi', ['--list-models'])
+  const combined = `${result.stdout}\n${result.stderr}`
+  if (result.exitCode !== 0) {
+    return {
+      kind: 'error',
+      details: combined.trim() || `exit code ${result.exitCode}`,
+    }
+  }
+  if (/No models available/i.test(combined) || combined.trim().length === 0) {
+    return { kind: 'none' }
+  }
+  return { kind: 'ok' }
+}
+
+/**
  * True iff pi reports at least one model with valid credentials.
  *
- * Shells out to `pi --list-models` rather than constructing the SDK's
- * AuthStorage + ModelRegistry because (a) this check needs to be cheap
- * and side-effect-free, and (b) the CLI owns its own canonical "no models
- * available" sentinel.
+ * Thin wrapper around `inspectPiModels` for callers that only need the
+ * yes/no answer (the onboarding wizard's Step 2 gate).
  */
 export async function piHasUsableModel(): Promise<boolean> {
-  const result = await runCommand('pi', ['--list-models'])
-  if (result.exitCode !== 0) return false
-  const stdout = result.stdout
-  if (/No models available/i.test(stdout)) return false
-  return stdout.trim().length > 0
+  return (await inspectPiModels()).kind === 'ok'
 }

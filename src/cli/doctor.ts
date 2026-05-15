@@ -10,7 +10,8 @@
  */
 
 import { exec, commandExists } from '../utils/exec.js'
-import { getConfig, getConfigPath, isOnboardingComplete } from '../config/index.js'
+import { inspectPiModels } from '../onboarding/pi.js'
+import { getConfig, getConfigPath, hasOldSchema, isOnboardingComplete } from '../config/index.js'
 import {
   isDockerAvailable,
   isDockerRunning,
@@ -47,8 +48,9 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
   const config = getConfig()
 
   // Run independent checks in parallel
-  const [configCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck] = await Promise.all([
+  const [configCheck, legacyCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck] = await Promise.all([
     checkConfig(),
+    checkLegacyConfig(),
     checkNodeVersion(),
     checkGit(),
     checkPi(),
@@ -56,7 +58,11 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
     checkGitLabCli(),
   ])
 
-  const checks: DiagnosticCheck[] = [configCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck]
+  // Legacy-config row is only surfaced when it actually fires; a clean install
+  // shouldn't carry a "no legacy config detected" pass row forever.
+  const checks: DiagnosticCheck[] = [configCheck]
+  if (legacyCheck) checks.push(legacyCheck)
+  checks.push(nodeCheck, gitCheck, piCheck, ghCheck, glabCheck)
 
   // Conditional checks (depend on config/runtime state)
   if (config.indexer.enabled || await isDockerAvailable()) {
@@ -161,6 +167,20 @@ async function checkConfig(): Promise<DiagnosticCheck> {
   }
 }
 
+async function checkLegacyConfig(): Promise<DiagnosticCheck | null> {
+  try {
+    if (!hasOldSchema()) return null
+  } catch {
+    return null
+  }
+  return {
+    name: 'Legacy Config',
+    status: 'warn',
+    message: 'Pre-1.0 (opencode-era) config detected — migrate before running reviews',
+    details: 'Run `kode-review --migrate-yes` or set KODE_REVIEW_MIGRATE_YES=1. This wipes the old config, watch state, and indexer Docker volumes (irreversible).',
+  }
+}
+
 async function checkNodeVersion(): Promise<DiagnosticCheck> {
   try {
     const result = await exec('node', ['--version'])
@@ -219,20 +239,16 @@ async function checkPi(): Promise<DiagnosticCheck> {
     }
   }
 
-  const runner = exec
-  const listResult = await runner('pi', ['--list-models'])
-  const stdout = listResult.stdout
-
-  if (listResult.exitCode !== 0) {
+  const inspection = await inspectPiModels()
+  if (inspection.kind === 'error') {
     return {
       name: 'pi',
       status: 'fail',
       message: 'Installed but `pi --list-models` failed',
-      details: stdout.trim() || listResult.stderr.trim() || `exit code ${listResult.exitCode}`,
+      details: inspection.details,
     }
   }
-
-  if (/No models available/i.test(stdout) || stdout.trim().length === 0) {
+  if (inspection.kind === 'none') {
     return {
       name: 'pi',
       status: 'fail',
@@ -243,6 +259,7 @@ async function checkPi(): Promise<DiagnosticCheck> {
 
   let version = ''
   try {
+    const runner = exec
     const verResult = await runner('pi', ['--version'])
     version = verResult.stdout.trim()
   } catch {
@@ -394,6 +411,7 @@ function getStatusColor(status: 'pass' | 'warn' | 'fail'): (text: string) => str
 function getSuggestion(checkName: string): string | undefined {
   const suggestions: Record<string, string> = {
     'Configuration': 'Run "kode-review --setup" to complete configuration',
+    'Legacy Config': 'Run "kode-review --migrate-yes" or set KODE_REVIEW_MIGRATE_YES=1',
     'Node.js': 'Install Node.js 18 or later from https://nodejs.org/',
     'Git': 'Install Git from https://git-scm.com/',
     'pi': 'Run: npm install -g @mariozechner/pi-coding-agent — then `pi /login`',

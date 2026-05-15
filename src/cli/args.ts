@@ -10,7 +10,6 @@ export interface CliOptions {
   scope?: ReviewScope
   pr?: string
   quiet: boolean
-  json: boolean
 
   // Output options
   format: OutputFormat
@@ -37,7 +36,6 @@ export interface CliOptions {
   // Indexer commands
   setupIndexer: boolean
   index: boolean
-  indexWatch: boolean
   indexReset: boolean
   indexStatus: boolean
   indexerCleanup: boolean
@@ -79,7 +77,6 @@ export function createProgram(): Command {
     .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto (default: auto)', 'auto')
     .option('-p, --pr <number>', 'Specific PR/MR number to review')
     .option('-q, --quiet', 'Minimal output (suitable for agents)', false)
-    .option('-j, --json', 'Output in JSON format (deprecated, use --format json)', false)
 
   // Output options
   program
@@ -112,7 +109,6 @@ export function createProgram(): Command {
   program
     .option('--setup-indexer', 'Interactive indexer setup wizard', false)
     .option('--index', 'Index/update current repository', false)
-    .option('--index-watch', 'Continuous indexing (watch mode)', false)
     .option('--index-reset', 'Drop and rebuild index for current repo', false)
     .option('--index-status', 'Show indexer status (running, indexed repos, stats)', false)
     .option('--indexer-cleanup', 'Remove indexer containers, volumes, and all indexed data', false)
@@ -182,12 +178,7 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`Invalid agentic-timeout: "${agenticTimeoutRaw}". Must be a number between 30 and 600 seconds.`)
   }
 
-  // Validate and determine output format
-  // --json flag takes precedence for backward compatibility
-  let format: OutputFormat = (opts.format ?? 'text') as OutputFormat
-  if (opts.json) {
-    format = 'json'
-  }
+  const format: OutputFormat = (opts.format ?? 'text') as OutputFormat
   if (!['text', 'json', 'markdown'].includes(format)) {
     throw new Error(`Invalid format: "${format}". Must be text, json, or markdown.`)
   }
@@ -196,7 +187,6 @@ export function parseArgs(argv: string[]): CliOptions {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,
     quiet: opts.quiet ?? false,
-    json: opts.json ?? false,
     format,
     outputFile: opts.outputFile,
     postToPr: opts.postToPr ?? false,
@@ -211,7 +201,6 @@ export function parseArgs(argv: string[]): CliOptions {
     migrateYes: opts.migrateYes ?? false,
     setupIndexer: opts.setupIndexer ?? false,
     index: opts.index ?? false,
-    indexWatch: opts.indexWatch ?? false,
     indexReset: opts.indexReset ?? false,
     indexStatus: opts.indexStatus ?? false,
     indexerCleanup: opts.indexerCleanup ?? false,

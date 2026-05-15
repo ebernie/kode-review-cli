@@ -51,6 +51,28 @@ describe('piHasUsableModel', () => {
     expect(await piHasUsableModel()).toBe(true)
   })
 
+  it('returns true when pi writes the model table to stderr instead of stdout', async () => {
+    // Real-world pi behavior: the human-readable model table is emitted on
+    // stderr with stdout empty. Treat the combined stream as the signal.
+    mockExec.mockResolvedValue({
+      stdout: '',
+      stderr:
+        'provider  model         context  max-out  thinking  images\n' +
+        'minimax   MiniMax-M2.7  204.8K   131.1K   yes       no\n',
+      exitCode: 0,
+    })
+    expect(await piHasUsableModel()).toBe(true)
+  })
+
+  it('returns false when "No models available" appears on stderr', async () => {
+    mockExec.mockResolvedValue({
+      stdout: '',
+      stderr: 'No models available. Use /login to log into a provider.',
+      exitCode: 0,
+    })
+    expect(await piHasUsableModel()).toBe(false)
+  })
+
   it('returns false when the pi command exits non-zero', async () => {
     mockExec.mockResolvedValue({ stdout: '', stderr: 'pi: command not found', exitCode: 127 })
     expect(await piHasUsableModel()).toBe(false)

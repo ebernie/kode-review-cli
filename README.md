@@ -91,8 +91,8 @@ When run in a terminal, `kode-review` provides an interactive experience with co
 For automation, use non-interactive flags:
 
 ```bash
-kode-review --scope local --quiet        # Minimal output
-kode-review --scope pr --pr 123 --json   # JSON error output
+kode-review --scope local --quiet              # Minimal output
+kode-review --scope pr --pr 123 --format json  # JSON output
 ```
 
 ### Review Options
@@ -346,7 +346,6 @@ kode-review --scope pr --pr 123 --with-context
 | `--with-context` | Include semantic context in review |
 | `--context-top-k <n>` | Number of code chunks to include (default: 5) |
 | `--index-branch <branch>` | Branch to index (default: current) |
-| `--index-watch` | Continuous indexing (watch mode) |
 | `--background-indexer` | Background daemon for large repos |
 | `--index-queue` | Show pending background jobs |
 | `--index-queue-clear` | Clear pending background jobs |

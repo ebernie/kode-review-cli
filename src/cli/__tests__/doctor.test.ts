@@ -10,6 +10,7 @@ vi.mock('../../utils/exec.js', () => ({
 vi.mock('../../config/index.js', () => ({
   getConfig: vi.fn(),
   getConfigPath: vi.fn(),
+  hasOldSchema: vi.fn(),
   isOnboardingComplete: vi.fn(),
 }))
 
@@ -20,13 +21,14 @@ vi.mock('../../indexer/index.js', () => ({
 }))
 
 import { exec, commandExists } from '../../utils/exec.js'
-import { getConfig, getConfigPath, isOnboardingComplete } from '../../config/index.js'
+import { getConfig, getConfigPath, hasOldSchema, isOnboardingComplete } from '../../config/index.js'
 import { isDockerAvailable, isDockerRunning, isIndexerRunning } from '../../indexer/index.js'
 
 const mockExec = exec as unknown as ReturnType<typeof vi.fn>
 const mockCommandExists = commandExists as unknown as ReturnType<typeof vi.fn>
 const mockGetConfig = getConfig as unknown as ReturnType<typeof vi.fn>
 const mockGetConfigPath = getConfigPath as unknown as ReturnType<typeof vi.fn>
+const mockHasOldSchema = hasOldSchema as unknown as ReturnType<typeof vi.fn>
 const mockIsOnboardingComplete = isOnboardingComplete as unknown as ReturnType<typeof vi.fn>
 const mockIsDockerAvailable = isDockerAvailable as unknown as ReturnType<typeof vi.fn>
 const mockIsDockerRunning = isDockerRunning as unknown as ReturnType<typeof vi.fn>
@@ -290,6 +292,7 @@ describe('runDiagnostics', () => {
   function setupDefaults() {
     mockGetConfig.mockReturnValue({ indexer: { enabled: false } })
     mockGetConfigPath.mockReturnValue('/home/user/.config/kode-review/config.json')
+    mockHasOldSchema.mockReturnValue(false)
     mockIsOnboardingComplete.mockReturnValue(true)
     mockIsDockerAvailable.mockResolvedValue(false)
     mockIsDockerRunning.mockResolvedValue(false)
@@ -344,6 +347,58 @@ describe('runDiagnostics', () => {
       if (cmd === 'gh') return { stdout: 'Logged in', exitCode: 0 }
       if (cmd === 'glab') return { stdout: 'Logged in', exitCode: 0 }
       return { stdout: '', exitCode: 0 }
+    })
+
+    const result = await runDiagnostics()
+    const piCheck = result.checks.find((c) => c.name === 'pi')
+    expect(piCheck).toBeDefined()
+    expect(piCheck!.status).toBe('fail')
+    expect(piCheck!.message).toContain('no provider')
+  })
+
+  it('reports pi as passing when the model table is written to stderr only', async () => {
+    // Real-world pi behavior: model list goes to stderr with empty stdout.
+    // Regression test for the bug where checkPi inspected only stdout.
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
+      if (cmd === 'node') return { stdout: 'v20.10.0', stderr: '', exitCode: 0 }
+      if (cmd === 'git') return { stdout: 'git version 2.43.0', stderr: '', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) {
+        return {
+          stdout: '',
+          stderr:
+            'provider  model         context  max-out  thinking  images\n' +
+            'minimax   MiniMax-M2.7  204.8K   131.1K   yes       no\n',
+          exitCode: 0,
+        }
+      }
+      if (cmd === 'pi' && args?.includes('--version')) {
+        return { stdout: '0.70.2', stderr: '', exitCode: 0 }
+      }
+      if (cmd === 'gh') return { stdout: 'Logged in', stderr: '', exitCode: 0 }
+      if (cmd === 'glab') return { stdout: 'Logged in', stderr: '', exitCode: 0 }
+      return { stdout: '', stderr: '', exitCode: 0 }
+    })
+
+    const result = await runDiagnostics()
+    const piCheck = result.checks.find((c) => c.name === 'pi')
+    expect(piCheck).toBeDefined()
+    expect(piCheck!.status).toBe('pass')
+  })
+
+  it('reports pi as failing when "No models available" appears on stderr', async () => {
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
+      if (cmd === 'node') return { stdout: 'v20.10.0', stderr: '', exitCode: 0 }
+      if (cmd === 'git') return { stdout: 'git version 2.43.0', stderr: '', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) {
+        return {
+          stdout: '',
+          stderr: 'No models available. Use /login to log into a provider.',
+          exitCode: 0,
+        }
+      }
+      if (cmd === 'gh') return { stdout: 'Logged in', stderr: '', exitCode: 0 }
+      if (cmd === 'glab') return { stdout: 'Logged in', stderr: '', exitCode: 0 }
+      return { stdout: '', stderr: '', exitCode: 0 }
     })
 
     const result = await runDiagnostics()
@@ -423,6 +478,32 @@ describe('runDiagnostics', () => {
     expect(configCheck).toBeDefined()
     expect(configCheck!.status).toBe('fail')
     expect(result.failCount).toBeGreaterThanOrEqual(1)
+  })
+
+  it('does not include a Legacy Config row when on-disk config is current', async () => {
+    mockHasOldSchema.mockReturnValue(false)
+    const result = await runDiagnostics()
+    expect(result.checks.some((c) => c.name === 'Legacy Config')).toBe(false)
+  })
+
+  it('emits a Legacy Config warn row pointing to --migrate-yes when hasOldSchema() is true', async () => {
+    mockHasOldSchema.mockReturnValue(true)
+    const result = await runDiagnostics()
+    const legacy = result.checks.find((c) => c.name === 'Legacy Config')
+    expect(legacy).toBeDefined()
+    expect(legacy!.status).toBe('warn')
+    // Body must point to the documented escape hatches.
+    expect(legacy!.details).toContain('--migrate-yes')
+    expect(legacy!.details).toContain('KODE_REVIEW_MIGRATE_YES')
+    expect(result.warnCount).toBeGreaterThanOrEqual(1)
+  })
+
+  it('Legacy Config check tolerates a hasOldSchema throw (corrupt store) without breaking diagnostics', async () => {
+    mockHasOldSchema.mockImplementation(() => { throw new Error('store unreadable') })
+    const result = await runDiagnostics()
+    // Other checks must still complete; Legacy Config row is omitted (not a failure).
+    expect(result.checks.some((c) => c.name === 'Legacy Config')).toBe(false)
+    expect(result.checks.some((c) => c.name === 'Configuration')).toBe(true)
   })
 
   it('returns warn when VCS CLI is installed but not authenticated', async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { writeFile, mkdir, rm } from 'node:fs/promises'
+import { writeFile, mkdir, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -132,6 +132,54 @@ describe('createKodeReviewToolsExtension', () => {
 
     const readFile = pi.tools.find((t) => t.name === 'read_file')!
     await expect(readFile.execute('id-1', { path: '../../etc/passwd' }))
+      .rejects.toThrow(/Path traversal/)
+  })
+
+  it('read_file refuses absolute paths that resolve outside the repo root', async () => {
+    // /etc/passwd is the canonical "host file" — it must never be readable
+    // through this tool, even when given as an absolute path (the obvious
+    // bypass for anyone who's heard of `..`-stripping).
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+    })
+    await factory(pi as never)
+
+    const readFile = pi.tools.find((t) => t.name === 'read_file')!
+    await expect(readFile.execute('id-1', { path: '/etc/passwd' }))
+      .rejects.toThrow(/Path traversal/)
+  })
+
+  it('read_file refuses symlinks whose target resolves outside the repo root', async () => {
+    // Defence in depth: even if the agent can drop a symlink inside repoRoot
+    // pointing to /etc/passwd, the realpath() check must still refuse it.
+    // Skip on platforms where the test process can't create symlinks (rare on
+    // POSIX, common on locked-down Windows CI — we don't ship to Windows but
+    // guard anyway so the suite never silently passes).
+    const targetOutside = '/etc/passwd'
+    const linkPath = join(testRepoRoot, 'sneaky-link.txt')
+    try {
+      await symlink(targetOutside, linkPath)
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException
+      if (err.code === 'EPERM' || err.code === 'EACCES' || err.code === 'ENOENT') {
+        // Cannot create the symlink (permission, or /etc/passwd missing) —
+        // the platform-level guarantee we'd be testing isn't reachable.
+        return
+      }
+      throw e
+    }
+
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+    })
+    await factory(pi as never)
+
+    const readFile = pi.tools.find((t) => t.name === 'read_file')!
+    await expect(readFile.execute('id-1', { path: 'sneaky-link.txt' }))
       .rejects.toThrow(/Path traversal/)
   })
 

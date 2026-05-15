@@ -74,7 +74,7 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   // Info commands (no side effects, can run without onboarding)
   if (options.showConfig) {
-    showConfig({ json: options.json })
+    showConfig({ json: options.format === 'json' })
     return true
   }
 
@@ -194,12 +194,6 @@ async function handleIndexerCommands(options: CliOptions): Promise<boolean> {
     if (confirmed) {
       await resetIndex(repoUrl, branch)
     }
-    return true
-  }
-
-  // Watch mode indexing (continuous)
-  if (options.indexWatch) {
-    logger.warn('Watch mode indexing is not yet implemented.')
     return true
   }
 
@@ -972,10 +966,6 @@ async function processReviewOutput(
   }
 }
 
-/**
- * Mapping of deprecated Antigravity model IDs to their replacements.
- * When a user's configured model is deprecated, it's automatically migrated.
- */
 async function main(): Promise<void> {
   const options = parseArgs(process.argv)
   const ctx = createContext(options)
@@ -1050,7 +1040,7 @@ async function main(): Promise<void> {
       ? error
       : wrapError(error, categorizeError(error))
 
-    if (options.json) {
+    if (options.format === 'json') {
       // JSON output includes category and recovery hint
       console.log(JSON.stringify({
         error: appError.message,
