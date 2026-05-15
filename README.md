@@ -318,7 +318,7 @@ Pi owns model providers. Set one up with:
 ```bash
 pi              # opens interactive UI
 # Inside pi, run: /login
-# Pick Anthropic, Google (Gemini / Antigravity), OpenAI Codex, GitHub Copilot, etc.
+# Pick Anthropic, Google (Gemini API key), OpenAI Codex, GitHub Copilot, etc.
 ```
 
 `pi --list-models` shows what is currently usable. Kode-review picks the first available model unless you override with `--model <provider>/<id>` per invocation.
