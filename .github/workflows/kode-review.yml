@@ -1,0 +1,47 @@
+# Run kode-review on every PR. Posts a sticky markdown review as a PR comment
+# and fails the check when CRITICAL findings are reported.
+#
+# Required secrets:
+#   MINIMAX_API_KEY  — provider key picked up by pi (https://pi.dev).
+# Built-in:
+#   GITHUB_TOKEN     — provided by Actions; lets gh post and replace comments.
+
+name: kode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so kode-review can resolve merge-base and read commits.
+          fetch-depth: 0
+          # Review the PR head as the author wrote it, not the merge ref.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ripgrep is preinstalled on ubuntu-latest; this is a safety net.
+      - name: Ensure ripgrep is installed
+        run: which rg || sudo apt-get install -y ripgrep
+
+      - name: Install kode-review
+        # TODO: remove prior to commit
+        run: npm install -g @kofikode/kode-review-cli
+
+      - name: Run review
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: kode-review --ci --pr "$PR_NUMBER" --fail-on critical
