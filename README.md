@@ -18,6 +18,7 @@ AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/mo
 
 - **First-pass AI code reviews** powered by pi
 - **Diff, semantic, or agentic review modes**: pick a tier based on cost vs. depth
+- **Multi-reviewer personas**: run `security`, `architect`, `doc-reviewer`, `test-auditor`, `general`, or custom personas — sequentially or in parallel
 - **Multi-platform VCS**: GitHub PRs and GitLab MRs
 - **Interactive & CI modes**: human-friendly output or quiet/JSON for automation
 - **Watch mode**: continuous monitoring of PRs/MRs assigned to you
@@ -189,6 +190,67 @@ apt (`sudo apt-get install ripgrep`), or [the official instructions](https://git
 | `--no-agentic` | Diff-only review — disable agent tool access |
 | `--max-iterations <n>` | Max tool call iterations (default: 10) |
 | `--agentic-timeout <s>` | Timeout in seconds (default: 600, max: 600) |
+
+---
+
+## Reviewer Personas
+
+Reviewer personas swap the system prompt the model runs under. Pick one or
+several, and each runs in its own pi session — in parallel — with its own
+focus. Default: a single `general` reviewer.
+
+### Built-in personas
+
+| Persona | Focus |
+|---------|-------|
+| `general` | Thorough general-purpose review (security, bugs, quality, conventions). Default if no `--reviewer` is passed. |
+| `security` | Application security: vulnerabilities, authn/authz, secrets, dependencies. |
+| `architect` | Architecture compliance, design quality, simplicity (YAGNI). |
+| `doc-reviewer` | Public API documentation: presence, accuracy, completeness. |
+| `test-auditor` | Test quality and coverage; flags anti-gaming patterns. |
+
+```bash
+kode-review --list-reviewers              # discover what's available
+kode-review --reviewer security           # one persona
+kode-review --reviewer security,architect # comma-separated
+kode-review --reviewer security --reviewer architect   # repeatable flag (same effect)
+kode-review --reviewer all                # every available persona, in parallel
+```
+
+`--reviewer` composes with every other flag: `-a` (agent mode), `-c` (CI),
+`-p <pr>`, etc. Each persona reviews the same diff/PR but produces its own
+output.
+
+### Multi-reviewer in CI mode
+
+When `--ci` is active and multiple reviewers run, the sticky PR comment is
+posted **once** as a composite body — one `## <reviewer-name>` section per
+reviewer, with a single trailing usage footer summing tokens and cost across
+all of them. The CI exit code is the worst (most severe) across reviewers, so
+a single failing persona still fails the run.
+
+### Defining your own persona
+
+A persona is just a markdown file containing the system prompt. Drop one in:
+
+```
+~/.config/kode-review/reviewers/<name>.md
+```
+
+(or set `KODE_REVIEW_REVIEWERS_DIR` to override the location). A user file
+with the same name as a built-in **overrides** the built-in — the
+`--list-reviewers` output marks it as `[user]` or `(user override)` so you
+always know which prompt the model is running.
+
+Persona names must match `^[a-z0-9][a-z0-9_-]{0,63}$` (lowercase letters,
+digits, underscore, hyphen; starts with alphanumeric; ≤64 chars).
+
+### Reviewer Options
+
+| Flag | Description |
+|------|-------------|
+| `--reviewer <name>` | Reviewer persona(s) to run. Repeatable; comma-separated; `all` runs every reviewer. Default: `general`. |
+| `--list-reviewers` | List available reviewers (built-in + user-defined) and exit. |
 
 ---
 
