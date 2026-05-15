@@ -39,3 +39,9 @@ export {
 } from './agentic-prompt.js'
 
 export { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
+
+export {
+  aggregateUsage,
+  formatUsageOneLiner,
+  type UsageTotals,
+} from './usage.js'

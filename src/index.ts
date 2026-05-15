@@ -27,6 +27,8 @@ import {
   getChangesSummary,
   getProjectStructureContext,
   formatProjectStructureContext,
+  formatUsageOneLiner,
+  type UsageTotals,
   type ReviewProgress,
 } from './review/index.js'
 import {
@@ -857,6 +859,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         result.content,
         options,
         repoRoot!,
+        result.usage,
       )
 
       // Process review output. When --ci posted a sticky comment we suppress
@@ -866,6 +869,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         toolCallCount: result.toolCallCount,
         truncated: result.truncated,
         truncationReason: result.truncationReason,
+        usage: result.usage,
       })
 
       if (ciExitCode !== undefined) {
@@ -895,10 +899,12 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         result.content,
         options,
         repoRoot!,
+        result.usage,
       )
 
       await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
         agentic: false,
+        usage: result.usage,
       })
 
       if (ciExitCode !== undefined) {
@@ -932,6 +938,7 @@ async function applyCiAndSuppressions(
   rawContent: string,
   options: CliOptions,
   repoRoot: string,
+  usage: UsageTotals,
 ): Promise<CiAndSuppressionsResult> {
   // 1) Suppressions — always-on; --no-suppressions disables.
   let reviewContent = rawContent
@@ -958,7 +965,10 @@ async function applyCiAndSuppressions(
   const exitCode = resolveCiExitCode(summary, options.failOn)
 
   if (platform && prNumber) {
-    const payload = buildCommentPayload(reviewContent)
+    // Append the usage footer to the sticky comment only — keep it out of the
+    // terminal/file `reviewContent` so the structured parser doesn't see it.
+    const commentBody = `${reviewContent}\n\n---\n_${formatUsageOneLiner(usage)}_`
+    const payload = buildCommentPayload(commentBody)
     try {
       const posted = await postCiComment(platform, prNumber, payload, repoRoot)
       if (!posted) {
@@ -990,6 +1000,7 @@ async function processReviewOutput(
     toolCallCount?: number
     truncated?: boolean
     truncationReason?: string
+    usage?: UsageTotals
   }
 ): Promise<void> {
   // Parse review content into structured data
@@ -1018,6 +1029,7 @@ async function processReviewOutput(
       mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
       branch,
       model: options.model,
+      usage: metadata.usage,
     }
   }
 
@@ -1042,11 +1054,13 @@ async function processReviewOutput(
       if (metadata.truncated) {
         console.log(cyan(`Note: Review was truncated (${metadata.truncationReason})`))
       }
+      console.log(cyan(formatUsageOneLiner(metadata.usage)))
       console.log('')
       console.log(green('========================================'))
       console.log(green('       AGENTIC REVIEW COMPLETE          '))
       console.log(green('========================================'))
     } else {
+      console.log(cyan(formatUsageOneLiner(metadata.usage)))
       console.log('')
       console.log(green('========================================'))
       console.log(green('           REVIEW COMPLETE             '))

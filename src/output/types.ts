@@ -2,6 +2,8 @@
  * Output formatting types for structured review data
  */
 
+import type { UsageTotals } from '../review/usage.js'
+
 export type OutputFormat = 'text' | 'json' | 'markdown'
 
 export type Severity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
@@ -61,6 +63,8 @@ export interface ReviewMetadata {
   prNumber?: number
   mrIid?: number
   branch?: string
+  /** Aggregated token usage + estimated cost across all model calls. */
+  usage?: UsageTotals
 }
 
 /**

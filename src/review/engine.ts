@@ -31,6 +31,7 @@ import {
 import { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
 import { attachReviewListener, type ReviewProgress } from './session-events.js'
 import { extractReviewContent } from './response.js'
+import { aggregateUsage, type UsageTotals } from './usage.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
@@ -66,6 +67,7 @@ export interface AgenticReviewOptions extends ReviewOptions {
 
 export interface ReviewResult {
   content: string
+  usage: UsageTotals
 }
 
 export interface AgenticReviewResult {
@@ -73,6 +75,7 @@ export interface AgenticReviewResult {
   toolCallCount: number
   truncated: boolean
   truncationReason?: string
+  usage: UsageTotals
 }
 
 /**
@@ -141,6 +144,7 @@ interface RunOutcome {
   content: string
   toolCallCount: number
   truncated: boolean
+  usage: UsageTotals
 }
 
 async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
@@ -188,6 +192,9 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
 
   let content: string
   let toolCallCount: number
+  // Initialize to zeroed totals so any future early-return path before the
+  // try block still produces a valid (n/a) usage report.
+  let usage: UsageTotals = aggregateUsage([])
   try {
     await Promise.race([session.prompt(opts.userPrompt), timeout, listener.done])
     // Read state BEFORE the finally block disposes the session. pi's current
@@ -195,6 +202,7 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
     // pattern that future SDK versions could break.
     content = extractReviewContent(session.state.messages)
     toolCallCount = listener.toolCallCount
+    usage = aggregateUsage(session.state.messages)
   } catch (err) {
     if (err === reviewTimeout) {
       try {
@@ -211,7 +219,7 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
   }
 
   const truncated = opts.maxIterations !== undefined && toolCallCount >= opts.maxIterations
-  return { content, toolCallCount, truncated }
+  return { content, toolCallCount, truncated, usage }
 }
 
 /**
@@ -235,7 +243,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     onProgress: options.onProgress,
   })
 
-  return { content: outcome.content }
+  return { content: outcome.content, usage: outcome.usage }
 }
 
 /**
@@ -282,5 +290,6 @@ export async function runAgenticReview(
     truncationReason: outcome.truncated
       ? `Maximum iteration limit (${maxIterations}) reached`
       : undefined,
+    usage: outcome.usage,
   }
 }
