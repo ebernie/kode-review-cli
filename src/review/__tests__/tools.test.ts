@@ -6,11 +6,11 @@ import ignore from 'ignore'
 
 import {
   readFileHandler,
-  searchCodeHandler,
-  findDefinitionsHandler,
-  findUsagesHandler,
-  getCallGraphHandler,
-  getImpactHandler,
+  searchCodeIndexerHandler as searchCodeHandler,
+  findDefinitionsIndexerHandler as findDefinitionsHandler,
+  findUsagesIndexerHandler as findUsagesHandler,
+  getCallGraphIndexerHandler as getCallGraphHandler,
+  getImpactIndexerHandler as getImpactHandler,
   type ReadFileInput,
   type SearchCodeInput,
   type FindDefinitionsInput,

@@ -1,0 +1,23 @@
+# .gitlab-ci.yml fragment for kode-review on every MR.
+#
+# Required CI variables (Project → Settings → CI/CD → Variables):
+#   ANTHROPIC_API_KEY   (masked, not protected so it works on MR pipelines)
+#   GITLAB_TOKEN        (personal access token with `api` scope, used by glab)
+
+ai_code_review:
+  stage: test
+  image: node:20-bookworm
+  variables:
+    # Full history — GitLab CI defaults to shallow.
+    GIT_DEPTH: 0
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  before_script:
+    - apt-get update && apt-get install -y ripgrep git
+    - curl -sL https://gitlab.com/gitlab-org/cli/-/releases/permalink/latest/downloads/glab_linux_amd64.deb -o /tmp/glab.deb
+    - dpkg -i /tmp/glab.deb
+    - glab auth login --token "$GITLAB_TOKEN" --hostname gitlab.com
+    - npm install -g @kofikode/kode-review-cli
+  script:
+    - kode-review --ci --pr "$CI_MERGE_REQUEST_IID" --fail-on critical
+  allow_failure: false

@@ -33,7 +33,7 @@ import { attachReviewListener } from './session-events.js'
 import { extractReviewContent } from './response.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
-const DEFAULT_AGENTIC_TIMEOUT_SEC = 120
+const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
 const DEFAULT_AGENTIC_MAX_ITERATIONS = 10
 
 export interface ReviewOptions {
@@ -55,7 +55,7 @@ export interface AgenticReviewOptions extends ReviewOptions {
   indexerUrl?: string
   /** Maximum tool-call iterations before pi forces a text-only response. */
   maxIterations?: number
-  /** Hard ceiling in seconds for the whole review. Default: 120. */
+  /** Hard ceiling in seconds for the whole review. Default: 600. */
   timeout?: number
 }
 

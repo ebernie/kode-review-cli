@@ -1,0 +1,48 @@
+# .github/workflows/kode-review.yml
+#
+# Run kode-review on every PR. Posts the review as a PR comment and fails
+# the check when CRITICAL issues are found.
+#
+# Required secrets:
+#   ANTHROPIC_API_KEY  (or whichever provider you've configured in pi)
+# Built-in token used:
+#   GITHUB_TOKEN       (auto-provided by Actions; lets gh post comments)
+
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so kode-review can resolve merge-base and read commits.
+          fetch-depth: 0
+          # Use the PR's head commit, not the merge ref — the review applies
+          # to the source as the author wrote it.
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # ripgrep is preinstalled on ubuntu-latest; this is a safety net.
+      - name: Ensure ripgrep is installed
+        run: which rg || sudo apt-get install -y ripgrep
+
+      - name: Install kode-review
+        run: npm install -g @kofikode/kode-review-cli
+
+      - name: Run review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: kode-review --ci --pr ${{ github.event.pull_request.number }} --fail-on critical

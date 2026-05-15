@@ -62,6 +62,11 @@ export interface CliOptions {
 
   // Update command
   update: boolean
+
+  // CI mode
+  ci: boolean
+  failOn: 'critical' | 'high' | 'none'
+  noSuppressions: boolean
 }
 
 export function createProgram(): Command {
@@ -72,40 +77,54 @@ export function createProgram(): Command {
     .description('AI-powered code review CLI built on pi (https://pi.dev)')
     .version(PKG_VERSION)
 
-  // Review options
+  // ── Review modes (the primary commands) ────────────────────────────────────
+  // Agent mode (file/search/git tools) is the DEFAULT. Pass --no-agentic for a
+  // diff-only review (faster, no tool calls, no model exploration).
   program
-    .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto (default: auto)', 'auto')
+    .option('-a, --agentic', 'Agent mode: review with file/search/git tools', true)
+    .option('--no-agentic', 'Diff-only review — disable agent tool access')
+    .option('-c, --ci', 'CI mode: agentic + markdown + post-to-PR + non-zero exit on CRITICAL', false)
+    .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto', 'auto')
     .option('-p, --pr <number>', 'Specific PR/MR number to review')
-    .option('-q, --quiet', 'Minimal output (suitable for agents)', false)
 
-  // Output options
+  // ── Output ─────────────────────────────────────────────────────────────────
   program
-    .option('-f, --format <format>', 'Output format: text, json, markdown (default: text)', 'text')
+    .option('-f, --format <format>', 'Output format: text, json, markdown', 'text')
     .option('-o, --output-file <path>', 'Write output to file instead of stdout')
+    .option('-q, --quiet', 'Minimal output (suitable for agents)', false)
     .option('--post-to-pr', 'Post review as PR/MR comment', false)
 
-  // Hook generation
+  // ── Agent / CI tuning ──────────────────────────────────────────────────────
   program
-    .option('--init-hooks', 'Generate pre-commit hook for code review', false)
+    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 10)', '10')
+    .option('--agentic-timeout <s>', 'Timeout in seconds for agent mode (default: 600)', '600')
+    .option('--fail-on <level>', 'In --ci mode, exit non-zero on findings of this severity (critical|high|none)', 'critical')
+    .option('--no-suppressions', 'Disable kode-review: ignore markers in source — report every finding')
 
-  // Model override (passed through to pi as `provider/id` or `id`)
+  // ── Context retrieval (non-agentic) ────────────────────────────────────────
   program
-    .option('--model <model>', 'Override model used for this review (e.g., anthropic/claude-sonnet-4-6)')
+    .option('--with-context', 'Include semantic context in review', false)
+    .option('--context-top-k <n>', 'Number of similar code chunks to include (default: 5)', '5')
 
-  // Watch mode
+  // ── Watch mode ─────────────────────────────────────────────────────────────
   program
     .option('-w, --watch', 'Watch mode: monitor for PRs/MRs where you are a reviewer', false)
     .option('--watch-interval <seconds>', 'Polling interval in seconds (default: 300)', '300')
     .option('--watch-interactive', 'Prompt to select PR/MR instead of auto-reviewing', false)
 
-  // Setup commands
+  // ── Model override ─────────────────────────────────────────────────────────
+  program
+    .option('--model <model>', 'Override model used for this review (e.g., anthropic/claude-sonnet-4-6)')
+
+  // ── Setup & onboarding ─────────────────────────────────────────────────────
   program
     .option('--setup', 'Run the full onboarding wizard', false)
     .option('--setup-vcs', 'Re-configure GitHub/GitLab only', false)
     .option('--reset', 'Reset all configuration', false)
+    .option('--init-hooks', 'Generate pre-commit hook for code review', false)
     .option('--migrate-yes', 'Skip the typed-confirmation prompt during the v1.0 clean-break migration', false)
 
-  // Indexer commands
+  // ── Indexer ────────────────────────────────────────────────────────────────
   program
     .option('--setup-indexer', 'Interactive indexer setup wizard', false)
     .option('--index', 'Index/update current repository', false)
@@ -114,32 +133,24 @@ export function createProgram(): Command {
     .option('--indexer-cleanup', 'Remove indexer containers, volumes, and all indexed data', false)
     .option('--index-branch <branch>', 'Branch to index (defaults to current branch)')
     .option('--index-list-repos', 'List all indexed repositories with their branches', false)
-
-  // Background indexer commands
-  program
     .option('--background-indexer', 'Start background indexer daemon for large repo re-indexing', false)
     .option('--index-queue', 'Show pending background indexing jobs', false)
     .option('--index-queue-clear', 'Clear all pending background indexing jobs', false)
 
-  // Review context options
-  program
-    .option('--with-context', 'Include semantic context in review', false)
-    .option('--context-top-k <n>', 'Number of similar code chunks to include (default: 5)', '5')
-
-  // Agentic review mode
-  program
-    .option('--agentic', 'Enable agentic review with file/indexer tool access', false)
-    .option('--max-iterations <n>', 'Max tool call iterations for agentic mode (default: 10)', '10')
-    .option('--agentic-timeout <s>', 'Timeout in seconds for agentic mode (default: 120)', '120')
-
-  // Info commands
+  // ── Info & maintenance ─────────────────────────────────────────────────────
   program
     .option('--show-config', 'Display current configuration', false)
     .option('--doctor', 'Run system diagnostics', false)
-
-  // Update command
-  program
     .option('--update', 'Check for and install the latest version', false)
+
+  program.addHelpText('after', `
+Primary modes:
+  $ kode-review                          Agent review of local/PR changes (auto-detect scope) — DEFAULT
+  $ kode-review --no-agentic             Diff-only review (faster, no tool calls)
+  $ kode-review -c                       CI mode (agent + markdown + post-to-PR + fail-on-CRITICAL)
+  $ kode-review -p 1234                  Agent review of PR #1234
+  $ kode-review -s local -f markdown     Agent review of working-tree changes, markdown output
+`)
 
   return program
 }
@@ -172,24 +183,51 @@ export function parseArgs(argv: string[]): CliOptions {
   }
 
   // Validate agentic timeout
-  const agenticTimeoutRaw = opts.agenticTimeout ?? '120'
+  const agenticTimeoutRaw = opts.agenticTimeout ?? '600'
   const agenticTimeout = parseInt(agenticTimeoutRaw, 10)
   if (isNaN(agenticTimeout) || agenticTimeout < 30 || agenticTimeout > 600) {
     throw new Error(`Invalid agentic-timeout: "${agenticTimeoutRaw}". Must be a number between 30 and 600 seconds.`)
   }
 
-  const format: OutputFormat = (opts.format ?? 'text') as OutputFormat
+  let format: OutputFormat = (opts.format ?? 'text') as OutputFormat
   if (!['text', 'json', 'markdown'].includes(format)) {
     throw new Error(`Invalid format: "${format}". Must be text, json, or markdown.`)
   }
 
+  // --ci convenience: bundle agentic + quiet + markdown + post-to-PR unless the
+  // user explicitly overrode each flag. Commander stores explicit-vs-default
+  // intent on `program.opts().__source` (not available here), so we infer
+  // "user didn't pass it" by checking if the value still equals the default.
+  const ci: boolean = opts.ci ?? false
+  const explicitFlagSet = new Set<string>(argv.slice(2).map((a) => a.split('=')[0]))
+  // opts.agentic comes from Commander with default=true; --no-agentic flips it
+  // to false. CI mode is authoritative — it always requires tool access.
+  let agentic: boolean = opts.agentic ?? true
+  let quiet: boolean = opts.quiet ?? false
+  let postToPr: boolean = opts.postToPr ?? false
+  if (ci) {
+    agentic = true
+    if (!explicitFlagSet.has('-q') && !explicitFlagSet.has('--quiet')) quiet = true
+    if (!explicitFlagSet.has('--format') && !explicitFlagSet.has('-f')) format = 'markdown'
+    if (!explicitFlagSet.has('--post-to-pr')) postToPr = true
+  }
+
+  const failOnRaw: string = String(opts.failOn ?? 'critical')
+  if (!['critical', 'high', 'none'].includes(failOnRaw)) {
+    throw new Error(`Invalid --fail-on: "${failOnRaw}". Must be one of: critical, high, none.`)
+  }
+  const failOn = failOnRaw as 'critical' | 'high' | 'none'
+
+  // Commander auto-inverts --no-suppressions into opts.suppressions=false.
+  const noSuppressions = opts.suppressions === false
+
   return {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,
-    quiet: opts.quiet ?? false,
+    quiet,
     format,
     outputFile: opts.outputFile,
-    postToPr: opts.postToPr ?? false,
+    postToPr,
     initHooks: opts.initHooks ?? false,
     model: opts.model,
     watch: opts.watch ?? false,
@@ -211,11 +249,14 @@ export function parseArgs(argv: string[]): CliOptions {
     indexQueueClear: opts.indexQueueClear ?? false,
     withContext: opts.withContext ?? false,
     contextTopK,
-    agentic: opts.agentic ?? false,
+    agentic,
     maxIterations,
     agenticTimeout,
     showConfig: opts.showConfig ?? false,
     doctor: opts.doctor ?? false,
     update: opts.update ?? false,
+    ci,
+    failOn,
+    noSuppressions,
   }
 }

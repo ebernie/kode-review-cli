@@ -107,9 +107,10 @@ kode-review --scope pr --pr 123 --format json  # JSON output
 | `--post-to-pr` | Post review as PR/MR comment with inline annotations |
 | `--model <pattern>` | Override the pi model for this review (e.g., `anthropic/claude-sonnet-4-6`). When omitted, pi's default applies. |
 | `--migrate-yes` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
-| `--agentic` | Enable agent mode with dynamic codebase exploration |
+| `-a, --agentic` | Agent mode with dynamic codebase exploration (default: **on**) |
+| `--no-agentic` | Diff-only review — disable tool access (faster, cheaper) |
 | `--max-iterations <n>` | Max tool call iterations for agent mode (default: 10) |
-| `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 120) |
+| `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 600, max: 600) |
 
 ---
 
@@ -141,37 +142,53 @@ kode-review --watch --quiet              # Background monitoring
 
 ## Agent Mode
 
-Agent mode enables dynamic codebase exploration during reviews. Instead of only seeing the diff, the AI can actively read files, search for patterns, and analyze code relationships.
+Agent mode enables dynamic codebase exploration during reviews. Instead of only seeing the diff, the AI can actively read files, search for patterns, and analyze code relationships. **Agent mode is the default** — pass `--no-agentic` for a diff-only review.
 
 ```bash
-# Basic agent mode (read_file tool only)
-kode-review --agentic
+# Default — agent mode against auto-detected scope (local changes or current PR)
+kode-review
 
 # Agent mode with full tool suite (requires indexer)
-kode-review --agentic --with-context
+kode-review --with-context
 
 # With custom limits
-kode-review --agentic --max-iterations 15 --agentic-timeout 180
+kode-review --max-iterations 15 --agentic-timeout 600
+
+# Diff-only review (no tools, fastest, cheapest)
+kode-review --no-agentic
 ```
 
 ### Available Tools in Agent Mode
 
-| Tool | Description | Requires Indexer |
-|------|-------------|------------------|
-| `read_file` | Read file content from the repository | No |
-| `search_code` | Hybrid semantic + keyword search | Yes |
-| `find_definitions` | Find where symbols are defined | Yes |
-| `find_usages` | Find all usages of a symbol | Yes |
-| `get_call_graph` | Get function call relationships | Yes |
-| `get_impact` | Analyze file dependencies | Yes |
+Agent mode now works with or without the indexer. When the indexer is reachable,
+indexer-backed search tools are used; when it isn't, drop-in **ripgrep + git**
+fallbacks take over transparently. `get_call_graph` and `get_impact` degrade
+gracefully when running without the indexer (call graph reports
+`available: false`, impact reports `isPartial: true` — direct importers only).
+
+| Tool | Description | Without indexer |
+|------|-------------|-----------------|
+| `read_file` | Read file content from the repository | ✓ always available |
+| `search_code` | Hybrid semantic + keyword search | ripgrep fallback |
+| `find_definitions` | Find where symbols are defined | ripgrep fallback |
+| `find_usages` | Find all usages of a symbol | ripgrep fallback |
+| `get_call_graph` | Get function call relationships | degraded stub |
+| `get_impact` | Analyze file dependencies (direct importers) | ripgrep fallback (isPartial) |
+| `get_commits` | List commits in a ref range (default merge-base..HEAD) | ✓ always available |
+| `get_file_history` | Recent commits that touched a specific file | ✓ always available |
+
+`ripgrep` is required for the filesystem fallbacks. It's preinstalled on most
+CI runners; on a dev laptop install via Homebrew (`brew install ripgrep`),
+apt (`sudo apt-get install ripgrep`), or [the official instructions](https://github.com/BurntSushi/ripgrep#installation).
 
 ### Agent Mode Options
 
 | Flag | Description |
 |------|-------------|
-| `--agentic` | Enable agent mode |
+| `-a, --agentic` | Agent mode (default: **on**) — flag kept for explicit intent / backward compat |
+| `--no-agentic` | Diff-only review — disable agent tool access |
 | `--max-iterations <n>` | Max tool call iterations (default: 10) |
-| `--agentic-timeout <s>` | Timeout in seconds (default: 120, max: 600) |
+| `--agentic-timeout <s>` | Timeout in seconds (default: 600, max: 600) |
 
 ---
 
@@ -181,15 +198,15 @@ Choose the review mode that fits your needs:
 
 | Mode | Command | Description |
 |------|---------|-------------|
-| **Diff** | `kode-review` | Reviews the diff only |
-| **Diff + Index** | `kode-review --with-context` | Reviews diff with pre-retrieved semantic context |
-| **Agent** | `kode-review --agentic` | AI dynamically explores codebase |
-| **Agent + Index** | `kode-review --agentic --with-context` | Full agent capabilities with all tools |
+| **Agent** (default) | `kode-review` | AI dynamically explores codebase via ripgrep + git tools |
+| **Agent + Index** | `kode-review --with-context` | Full agent capabilities, augmented with semantic index lookups |
+| **Diff** | `kode-review --no-agentic` | Diff-only review, no tool calls — fastest |
+| **Diff + Index** | `kode-review --no-agentic --with-context` | Diff plus pre-retrieved semantic context |
 
 ### Pros and Cons
 
 <details>
-<summary><strong>Diff Review (Default)</strong></summary>
+<summary><strong>Diff Review (--no-agentic)</strong></summary>
 
 **Pros:**
 - Fastest execution time
@@ -502,6 +519,32 @@ kode-review --scope local --quiet || {
 
 ---
 
+## CI Usage
+
+Run kode-review against every pull/merge request in CI. The `--ci` flag bundles
+agentic mode + quiet output + markdown formatting + sticky PR comment posting +
+severity-gated exit codes.
+
+```bash
+kode-review --ci --pr 42 --fail-on critical
+```
+
+The indexer is **not required** in CI mode — the agentic tools fall back to
+`ripgrep` + `git` transparently.
+
+Ready-to-copy workflow files for GitHub Actions and GitLab CI live in
+[`docs/ci-examples/`](docs/ci-examples/README.md), including notes on:
+
+- Checking out the right ref (PR head, not the merge ref).
+- Required permissions (`pull-requests: write` on GitHub; an `api`-scoped
+  token on GitLab).
+- Sticky-comment behavior — each run posts one comment and deletes prior
+  kode-review comments, leaving human comments untouched.
+- Severity gating via `--fail-on critical|high|none`.
+- Suppressing specific findings inline with `// kode-review: ignore`.
+
+---
+
 ## Output Formats
 
 Control how review results are displayed and saved.
@@ -529,8 +572,8 @@ Automatically post reviews as comments on GitHub PRs or GitLab MRs:
 # Post review as PR comment with inline code annotations
 kode-review --scope pr --pr 123 --post-to-pr
 
-# Combined with other options
-kode-review --scope pr --pr 123 --agentic --post-to-pr
+# Combined with other options (agent mode is the default)
+kode-review --scope pr --pr 123 --post-to-pr
 ```
 
 Features:

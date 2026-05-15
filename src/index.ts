@@ -8,6 +8,7 @@ import { initHooks } from './cli/init-hooks.js'
 import { runUpdate, checkForUpdateNotification } from './cli/update.js'
 import { cyan, green } from './cli/colors.js'
 import { logger, setQuietMode, setDebugMode } from './utils/logger.js'
+import { commandExists } from './utils/exec.js'
 import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
 import {
   isOnboardingComplete,
@@ -26,6 +27,16 @@ import {
   getProjectStructureContext,
   formatProjectStructureContext,
 } from './review/index.js'
+import {
+  detectCiPlatform,
+  extractPrNumber,
+  resolveCiExitCode,
+  buildCommentPayload,
+  parseReviewSummary,
+  postCiComment,
+  type CiPlatform,
+} from './review/ci-mode.js'
+import { filterSuppressedFindings } from './review/suppressions.js'
 import {
   detectPlatform,
   getCurrentBranch,
@@ -780,16 +791,25 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       // Check indexer status - optional for agentic mode
       const indexerStatus = await getIndexerStatus()
 
-      // Determine indexer URL (undefined if not running)
+      // Determine indexer URL (undefined if not running) and pick a one-line
+      // info message describing which toolset is active.
       let indexerUrl: string | undefined
       if (indexerStatus.running && indexerStatus.apiUrl) {
         indexerUrl = indexerStatus.apiUrl
-        logger.info('Indexer is running - full tool suite available')
+        logger.info('Agentic mode: indexer reachable — using indexer-backed search/definitions/usages/call-graph/impact tools')
       } else {
-        logger.warn(
-          'Indexer not running - agentic review will have limited tools (read_file only).\n' +
-          'For full capabilities, start the indexer with: kode-review --setup-indexer'
-        )
+        const rgAvailable = await commandExists('rg')
+        if (rgAvailable) {
+          logger.info(
+            'Agentic mode: indexer not running — using filesystem-backed tools (ripgrep + git). ' +
+            'read_file, search_code, find_definitions, find_usages, get_impact, get_commits, get_file_history active. get_call_graph degraded.'
+          )
+        } else {
+          logger.warn(
+            'Agentic mode: no indexer and no ripgrep — only read_file, get_call_graph (degraded), get_commits, and get_file_history will be active. ' +
+            'Install ripgrep (https://github.com/BurntSushi/ripgrep#installation) for full coverage, or start the indexer with: kode-review --setup-indexer'
+          )
+        }
       }
 
       const repoUrl = await getRepoUrl()
@@ -819,13 +839,26 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       spinner?.stop()
 
-      // Process review output
-      await processReviewOutput(result.content, options, ctx, prMr, branch, {
+      // Apply CI / suppression handling on the agentic output. The filtered
+      // content is what we both render to the user AND post to the PR.
+      const { content: reviewContent, ciExitCode } = await applyCiAndSuppressions(
+        result.content,
+        options,
+        repoRoot!,
+      )
+
+      // Process review output. When --ci posted a sticky comment we suppress
+      // the legacy `--post-to-pr` path so we don't double-post.
+      await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
         agentic: true,
         toolCallCount: result.toolCallCount,
         truncated: result.truncated,
         truncationReason: result.truncationReason,
       })
+
+      if (ciExitCode !== undefined) {
+        process.exit(ciExitCode)
+      }
     } else {
       // Standard review mode
       const reviewOptions = {
@@ -842,15 +875,90 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
 
       spinner?.stop()
 
-      // Process review output
-      await processReviewOutput(result.content, options, ctx, prMr, branch, {
+      // CI mode + suppressions apply to the non-agentic path too; the only
+      // thing different about agentic mode is the tool-call metadata.
+      const { content: reviewContent, ciExitCode } = await applyCiAndSuppressions(
+        result.content,
+        options,
+        repoRoot!,
+      )
+
+      await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
         agentic: false,
       })
+
+      if (ciExitCode !== undefined) {
+        process.exit(ciExitCode)
+      }
     }
   } catch (error) {
     spinner?.fail('Review failed')
     throw error
   }
+}
+
+interface CiAndSuppressionsResult {
+  content: string
+  /** Defined only when --ci was passed; caller must process.exit(ciExitCode). */
+  ciExitCode?: number
+}
+
+/**
+ * Apply post-model filters (suppressions) and — if --ci was passed — post
+ * the sticky comment and compute the CI exit code.
+ *
+ * The caller is responsible for calling `process.exit(ciExitCode)` AFTER the
+ * rendered review has been printed. We do not register a `beforeExit` hook
+ * here because explicit `process.exit()` calls elsewhere would bypass it,
+ * masking real exit codes (e.g., a review-engine crash would silently
+ * override a CI exit code of 0).
+ */
+async function applyCiAndSuppressions(
+  rawContent: string,
+  options: CliOptions,
+  repoRoot: string,
+): Promise<CiAndSuppressionsResult> {
+  // 1) Suppressions — always-on; --no-suppressions disables.
+  let reviewContent = rawContent
+  if (!options.noSuppressions) {
+    try {
+      const { filtered, suppressedCount } = await filterSuppressedFindings(rawContent, repoRoot)
+      reviewContent = filtered
+      if (suppressedCount > 0) {
+        logger.info(`Suppressed ${suppressedCount} finding(s) via kode-review: ignore markers`)
+      }
+    } catch (err) {
+      logger.warn(`Suppression filter failed — using raw review: ${(err as Error).message}`)
+    }
+  }
+
+  // 2) CI mode — post the sticky comment + decide an exit code.
+  if (!options.ci) return { content: reviewContent }
+
+  const platform: CiPlatform | null = detectCiPlatform()
+  const envPr = platform ? extractPrNumber(platform) : null
+  const prNumber: number | null = options.pr ? Number(options.pr) : envPr
+
+  const summary = parseReviewSummary(reviewContent)
+  const exitCode = resolveCiExitCode(summary, options.failOn)
+
+  if (platform && prNumber) {
+    const payload = buildCommentPayload(reviewContent)
+    try {
+      const posted = await postCiComment(platform, prNumber, payload, repoRoot)
+      if (!posted) {
+        logger.warn(`Failed to post review comment to ${platform} PR/MR #${prNumber}`)
+      } else {
+        logger.info(`Posted review to ${platform} PR/MR #${prNumber} (sticky)`)
+      }
+    } catch (err) {
+      logger.warn(`Could not post CI comment: ${(err as Error).message}`)
+    }
+  } else if (!prNumber) {
+    logger.warn('CI mode active but no PR/MR number could be resolved — skipping comment post.')
+  }
+
+  return { content: reviewContent, ciExitCode: exitCode }
 }
 
 /**
@@ -931,8 +1039,12 @@ async function processReviewOutput(
     }
   }
 
-  // Post to PR/MR if requested
-  if (options.postToPr && prMr && reviewOutput.structured) {
+  // Post to PR/MR if requested.
+  // When --ci is active, the sticky-comment path in applyCiAndSuppressions
+  // already posted; skip the legacy poster to avoid duplicate comments.
+  if (options.ci) {
+    // no-op — sticky comment handled upstream
+  } else if (options.postToPr && prMr && reviewOutput.structured) {
     logger.info('Posting review to PR/MR...')
 
     const postResult = await postReviewToPR(

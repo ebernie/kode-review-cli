@@ -506,6 +506,38 @@ describe('runDiagnostics', () => {
     expect(result.checks.some((c) => c.name === 'Configuration')).toBe(true)
   })
 
+  it('reports ripgrep as pass with version when rg is on PATH', async () => {
+    mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
+      if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }
+      if (cmd === 'git') return { stdout: 'git version 2.43.0', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--list-models')) return { stdout: 'anthropic/claude-sonnet-4-6\n', exitCode: 0 }
+      if (cmd === 'pi' && args?.includes('--version')) return { stdout: '0.70.2', exitCode: 0 }
+      if (cmd === 'gh') return { stdout: 'Logged in', exitCode: 0 }
+      if (cmd === 'glab') return { stdout: 'Logged in', exitCode: 0 }
+      if (cmd === 'rg' && args?.includes('--version')) return { stdout: 'ripgrep 14.1.0\nfeatures:simd\n', exitCode: 0 }
+      return { stdout: '', exitCode: 0 }
+    })
+
+    const result = await runDiagnostics()
+    const rg = result.checks.find((c) => c.name === 'ripgrep')
+    expect(rg).toBeDefined()
+    expect(rg!.status).toBe('pass')
+    expect(rg!.message).toContain('ripgrep 14.1.0')
+  })
+
+  it('reports ripgrep as warn with install hint when rg is missing', async () => {
+    mockCommandExists.mockImplementation(async (cmd: string) => {
+      if (cmd === 'rg') return false
+      return true
+    })
+
+    const result = await runDiagnostics()
+    const rg = result.checks.find((c) => c.name === 'ripgrep')
+    expect(rg).toBeDefined()
+    expect(rg!.status).toBe('warn')
+    expect(rg!.details).toContain('https://github.com/BurntSushi/ripgrep')
+  })
+
   it('returns warn when VCS CLI is installed but not authenticated', async () => {
     mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }

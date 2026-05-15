@@ -7,4 +7,7 @@ export default defineConfig({
   define: {
     PKG_VERSION: JSON.stringify(pkg.version),
   },
+  test: {
+    exclude: ['**/node_modules/**', '**/dist/**', '.claude/worktrees/**'],
+  },
 })

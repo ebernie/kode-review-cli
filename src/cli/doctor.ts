@@ -48,7 +48,7 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
   const config = getConfig()
 
   // Run independent checks in parallel
-  const [configCheck, legacyCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck] = await Promise.all([
+  const [configCheck, legacyCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck, rgCheck] = await Promise.all([
     checkConfig(),
     checkLegacyConfig(),
     checkNodeVersion(),
@@ -56,13 +56,14 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
     checkPi(),
     checkGitHubCli(),
     checkGitLabCli(),
+    checkRipgrep(),
   ])
 
   // Legacy-config row is only surfaced when it actually fires; a clean install
   // shouldn't carry a "no legacy config detected" pass row forever.
   const checks: DiagnosticCheck[] = [configCheck]
   if (legacyCheck) checks.push(legacyCheck)
-  checks.push(nodeCheck, gitCheck, piCheck, ghCheck, glabCheck)
+  checks.push(nodeCheck, gitCheck, piCheck, ghCheck, glabCheck, rgCheck)
 
   // Conditional checks (depend on config/runtime state)
   if (config.indexer.enabled || await isDockerAvailable()) {
@@ -205,6 +206,34 @@ async function checkNodeVersion(): Promise<DiagnosticCheck> {
       name: 'Node.js',
       status: 'fail',
       message: 'Not found in PATH',
+    }
+  }
+}
+
+async function checkRipgrep(): Promise<DiagnosticCheck> {
+  const exists = await commandExists('rg')
+  if (!exists) {
+    return {
+      name: 'ripgrep',
+      status: 'warn',
+      message: 'Not found in PATH',
+      details: 'Required for agentic mode when the indexer is not running. Install: https://github.com/BurntSushi/ripgrep#installation',
+    }
+  }
+  const runner = exec
+  try {
+    const result = await runner('rg', ['--version'])
+    const firstLine = result.stdout.split('\n')[0]?.trim() ?? ''
+    return {
+      name: 'ripgrep',
+      status: 'pass',
+      message: firstLine || 'Installed',
+    }
+  } catch {
+    return {
+      name: 'ripgrep',
+      status: 'warn',
+      message: 'Installed but `rg --version` failed',
     }
   }
 }
@@ -419,6 +448,7 @@ function getSuggestion(checkName: string): string | undefined {
     'GitLab CLI (glab)': 'Run: glab auth login',
     'Docker': 'Install and start Docker from https://docker.com/',
     'Indexer Containers': 'Run: kode-review --setup-indexer',
+    'ripgrep': 'Install ripgrep from https://github.com/BurntSushi/ripgrep#installation',
   }
 
   return suggestions[checkName]

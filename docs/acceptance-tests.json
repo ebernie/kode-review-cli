@@ -1,0 +1,309 @@
+{
+  "$schema": "kode-review-acceptance-tests/v1",
+  "title": "Acceptance criteria — pi.dev port (v1.0)",
+  "scope": "Behaviour impacted by the @opencode-ai/sdk → @mariozechner/pi-coding-agent migration, including the legacy-config wipe, the rebuilt onboarding flow, the unified review engine (basic + agentic), the pi tools extension, and the doctor/setup CLI surface.",
+  "convention": {
+    "id_prefix": "AC",
+    "test_command": "bun run test",
+    "result_file_pattern": "docs/acceptance-tests-results-YYYYMMDD-HHMMSS.json"
+  },
+  "use_cases": [
+    {
+      "id": "AC-01",
+      "title": "Legacy config detection and clean-break wipe",
+      "description": "User upgrades to v1.0 with an old-schema config on disk. The CLI must refuse to run normal commands until the user has explicitly typed 'wipe' (or passed --migrate-yes / KODE_REVIEW_MIGRATE_YES=1). The migration tears down the old indexer Docker project, removes the watch-config dir, and resets the main config to fresh defaults — in that order.",
+      "impacted_modules": ["src/cli/migration.ts", "src/config/store.ts", "src/index.ts"],
+      "acceptance_criteria": [
+        "needsMigration() returns true iff the on-disk config has the legacy `provider` key and false otherwise.",
+        "runMigration() is a no-op when no legacy schema is detected (returns { performed: false, skipReason: 'no-old-schema' }) — does NOT reset config or call docker.",
+        "Typed confirmation must equal exactly 'wipe' (case-sensitive). Any other input aborts with skipReason: 'aborted' and leaves config + docker untouched.",
+        "--migrate-yes flag and KODE_REVIEW_MIGRATE_YES=1 env var both bypass the prompt.",
+        "When stdin is not a TTY and no readLine override is given, runMigration aborts with skipReason: 'no-tty' rather than hanging.",
+        "composeProject is read from the legacy config BEFORE resetConfig() wipes it (regression guard for the previous-name tear-down).",
+        "Docker tear-down uses `docker compose -p <legacy-project-name> down -v` (note `-v` to wipe volumes).",
+        "If `docker` is not on PATH, migration skips the docker step but still wipes config + watch dir.",
+        "If docker tear-down exits non-zero, migration logs and continues — config wipe still happens.",
+        "rm() is invoked on the watch-config directory (path contains `kode-review-watch`), not the main config path.",
+        "After resetConfig() the on-disk config has the new schema (no `provider`, `model`, `variant`, or `antigravity` fields).",
+        "Top-level main() in src/index.ts gates all commands except --doctor on `!needsMigration()` — running any other command on a legacy config exits non-zero with a migration message."
+      ]
+    },
+    {
+      "id": "AC-02",
+      "title": "Onboarding wizard requires pi prerequisites",
+      "description": "First-run flow checks pi installed, pi has at least one usable model, and a VCS CLI is available. If pi prerequisites fail the wizard does NOT mark onboarding complete and the post-wizard 'run a review now?' prompt is suppressed.",
+      "impacted_modules": ["src/onboarding/pi.ts", "src/onboarding/wizard.ts", "src/index.ts"],
+      "acceptance_criteria": [
+        "isPiInstalled() returns true iff `pi` is on PATH (commandExists).",
+        "piHasUsableModel() returns false when `pi --list-models` exits non-zero, when stdout matches /No models available/i, or when stdout is empty/whitespace; true otherwise.",
+        "Wizard returns false when pi is missing — caller must NOT proceed to ask 'run a review now?'.",
+        "Wizard returns false when pi has no usable model — caller must NOT proceed.",
+        "Wizard returns true only when pi installed AND model present AND VCS step completed; only then is setOnboardingComplete(true) called.",
+        "src/index.ts: when wizard returns false, the function exits cleanly without prompting for or attempting a review.",
+        "Wizard text directs the user to run `pi /login` (not a built-in OAuth flow) — auth is delegated to pi."
+      ]
+    },
+    {
+      "id": "AC-03",
+      "title": "Basic review (runReview) — no tools",
+      "description": "Non-agentic review path: hand the diff + prompt to pi, disable ALL tools, return the assistant's final text.",
+      "impacted_modules": ["src/review/engine.ts", "src/review/response.ts", "src/review/session-events.ts"],
+      "acceptance_criteria": [
+        "createAgentSession is called with noTools: 'all' (no built-ins, no extensions).",
+        "When --model is not provided, the first available model from ModelRegistry.getAvailable() is used.",
+        "When --model matches `provider/id`, that exact model is selected and passed to createAgentSession.",
+        "When --model is provided but matches no available model, runReview throws with a message containing 'not available in pi'.",
+        "When ModelRegistry returns an empty list, runReview throws an error containing 'No pi provider has usable credentials' (NO_PI_AUTH-style).",
+        "On agent_end, runReview returns the text of the final assistant message (extractReviewContent walks backwards to the last assistant message).",
+        "session.dispose() is called exactly once whether the prompt succeeds, throws, or times out (verified via finally).",
+        "session.prompt() rejection is surfaced to the caller AND session is still disposed (no leak)."
+      ]
+    },
+    {
+      "id": "AC-04",
+      "title": "Agentic review (runAgenticReview) — extensions enabled",
+      "description": "Agentic path enables extension tools (read_file + indexer tools) but keeps pi's built-ins disabled. Iteration count and truncation flag are surfaced.",
+      "impacted_modules": ["src/review/engine.ts", "src/review/pi-tools.ts", "src/review/session-events.ts"],
+      "acceptance_criteria": [
+        "createAgentSession is called with noTools: 'builtin' (NOT 'all') — extension tools must remain enabled.",
+        "Each tool_execution_end event increments toolCallCount; tool_execution_start events do NOT increment.",
+        "When toolCallCount < maxIterations, result.truncated is false and truncationReason is undefined.",
+        "When toolCallCount >= maxIterations, result.truncated is true and truncationReason contains 'Maximum iteration limit'.",
+        "result.content is the text of the final assistant message after agent_end.",
+        "Tool call errors (isError=true) emit a logger.warn that includes the tool name; they do NOT throw or abort the session."
+      ]
+    },
+    {
+      "id": "AC-05",
+      "title": "Pi tools extension registration",
+      "description": "Extension factory registers the right set of tools depending on whether an indexer URL is configured.",
+      "impacted_modules": ["src/review/pi-tools.ts"],
+      "acceptance_criteria": [
+        "Without indexerUrl, only read_file is registered.",
+        "With indexerUrl, exactly six tools are registered: read_file, search_code, find_definitions, find_usages, get_call_graph, get_impact.",
+        "Every registered tool has a non-empty label and a description longer than 20 characters.",
+        "Every tool's parameters field is a TypeBox object schema (type: 'object' with a properties map).",
+        "search_code.execute() forwards (query, repoUrl, branch, limit=10) to IndexerClient.hybridSearch and JSON-stringifies the result into content[0].text.",
+        "When IndexerClient.hybridSearch rejects, the tool's execute() rejects with the same error (no swallowing)."
+      ]
+    },
+    {
+      "id": "AC-06",
+      "title": "read_file tool — path traversal guard",
+      "description": "read_file must resolve paths under repoRoot and refuse anything that escapes it.",
+      "impacted_modules": ["src/review/pi-tools.ts"],
+      "acceptance_criteria": [
+        "read_file with a relative path inside repoRoot returns the file's content as a text content block.",
+        "read_file with `../../etc/passwd` (or any path that resolves outside repoRoot) rejects with a message matching /Path traversal/.",
+        "Absolute paths that resolve outside repoRoot are also rejected.",
+        "Symlinks pointing outside repoRoot are rejected (defence in depth)."
+      ]
+    },
+    {
+      "id": "AC-07",
+      "title": "Session lifecycle — timeout / abort / dispose",
+      "description": "Timeout must fire deterministically, call session.abort(), and ALWAYS dispose, even when abort() itself rejects.",
+      "impacted_modules": ["src/review/engine.ts", "src/review/session-events.ts"],
+      "acceptance_criteria": [
+        "When the timeout fires, the promise rejects with a message matching /did not complete within/.",
+        "session.abort() is called exactly once on timeout.",
+        "session.dispose() is called exactly once on timeout.",
+        "If abort() throws/rejects during cleanup, the timeout error still propagates to the caller AND dispose() is still called.",
+        "extractReviewContent is called BEFORE session.dispose() (regression guard — content must be read while session.state is still valid).",
+        "session-events listener.unsubscribe() does NOT reject the `done` promise (regression guard for UnhandledPromiseRejection on Node 15+)."
+      ]
+    },
+    {
+      "id": "AC-08",
+      "title": "Config schema — no legacy fields",
+      "description": "Fresh config (post-migration or first install) contains none of the dropped fields.",
+      "impacted_modules": ["src/config/schema.ts", "src/config/store.ts"],
+      "acceptance_criteria": [
+        "Fresh config validates against the v1 Zod schema.",
+        "Fresh config does NOT contain `provider`, `model`, `variant`, or `antigravity` keys.",
+        "isLegacyConfig() returns true for any object containing the `provider` key, false otherwise.",
+        "resetConfig() writes fresh defaults after clear() (not just an empty object) — readConfig() immediately after returns a valid v1 config."
+      ]
+    },
+    {
+      "id": "AC-09",
+      "title": "Doctor command surfaces pi state",
+      "description": "`kode-review --doctor` must run even when migration is pending, and report pi installation, model availability, VCS status, and config schema version.",
+      "impacted_modules": ["src/cli/doctor.ts", "src/index.ts"],
+      "acceptance_criteria": [
+        "--doctor runs successfully even when needsMigration() is true (i.e. is exempt from the migration gate).",
+        "Doctor output includes whether pi is installed (yes/no).",
+        "Doctor output includes whether pi has at least one usable model (yes/no).",
+        "Doctor output includes detected VCS CLI(s) — gh and/or glab.",
+        "Doctor output flags legacy config schema if present and tells the user to run --migrate or set KODE_REVIEW_MIGRATE_YES=1."
+      ]
+    },
+    {
+      "id": "AC-10",
+      "title": "show-config redacts and renders v1 schema only",
+      "description": "show-config must not leak credentials and must reflect the new schema shape.",
+      "impacted_modules": ["src/cli/show-config.ts"],
+      "acceptance_criteria": [
+        "show-config never prints fields named `provider`, `model`, `variant`, or `antigravity` (those fields no longer exist in the schema; assertion guards against accidental re-introduction).",
+        "show-config does not print any value that looks like a token/key (any sk-…, glpat-…, gho_…, ghp_… patterns are masked or absent).",
+        "show-config exits 0 on a fresh/default config."
+      ]
+    },
+    {
+      "id": "AC-11",
+      "title": "CLI entry — migration gate ordering",
+      "description": "src/index.ts must check migration before doing any work other than --doctor.",
+      "impacted_modules": ["src/index.ts"],
+      "acceptance_criteria": [
+        "When needsMigration() is true and the user runs a review/setup/index command, main() emits a migration-required message and exits non-zero WITHOUT touching pi, indexer, or git.",
+        "When needsMigration() is true and the user runs --doctor, main() proceeds (doctor is exempt).",
+        "When needsMigration() is false, main() proceeds normally.",
+        "Onboarding wizard return value is honoured — if it returns false, main() exits without prompting for a review."
+      ]
+    },
+    {
+      "id": "AC-15",
+      "title": "ripgrep wrapper parses --json output",
+      "description": "The ripgrep wrapper (src/review/tools/ripgrep.ts) shells out via the project's exec helper and produces typed matches the fs tools rely on.",
+      "impacted_modules": ["src/review/tools/ripgrep.ts"],
+      "acceptance_criteria": [
+        "parseRipgrepJsonOutput extracts {path, line, text, matchText, column} for type=match events; column is 1-based.",
+        "parseRipgrepJsonOutput ignores type=begin, type=end, type=summary, type=context events.",
+        "parseRipgrepJsonOutput returns [] for empty input.",
+        "parseRipgrepJsonOutput throws an Error containing 'parse' (case-insensitive) when given malformed JSON.",
+        "ripgrepSearch passes -F by default, -w when wholeWord=true, --type T when type='T', and -g for each entry of globs[].",
+        "ripgrepSearch treats rg exit code 1 (no matches) as success and returns [].",
+        "ripgrepSearch throws a clear error mentioning ripgrep and the install URL when rg is not on PATH.",
+        "ripgrepSearch caps results at maxResults (default 200) after parsing."
+      ]
+    },
+    {
+      "id": "AC-16",
+      "title": "git-helpers wrap log and merge-base",
+      "description": "src/review/tools/git-helpers.ts provides typed wrappers used by the agentic git tools and the dispatch layer.",
+      "impacted_modules": ["src/review/tools/git-helpers.ts"],
+      "acceptance_criteria": [
+        "getCommitsInRange(repo, base, head) returns commits newest-first with {sha, shortSha, author, authorEmail, timestamp, subject} populated; sha is 40 hex chars.",
+        "getCommitsInRange includes a populated `body` field iff options.includeBody is true.",
+        "getCommitsInRange honours options.limit (default 50).",
+        "getCommitsInRange returns [] for an empty range (e.g. HEAD..HEAD).",
+        "getFileHistory(repo, path) returns commits that touched the named path, newest-first, capped at options.limit (default 10).",
+        "getMergeBase(repo, refA, refB) returns the 40-char SHA of the merge-base; throws when either ref is invalid."
+      ]
+    },
+    {
+      "id": "AC-17",
+      "title": "Filesystem-backed agentic tools mirror indexer output shapes",
+      "description": "Each fs-backed handler (search_code, find_definitions, find_usages, get_impact, get_call_graph) returns the same TypeScript output shape as its indexer counterpart so the dispatcher and the prompt do not branch on availability.",
+      "impacted_modules": [
+        "src/review/tools/search-code-fs.ts",
+        "src/review/tools/find-definitions-fs.ts",
+        "src/review/tools/find-usages-fs.ts",
+        "src/review/tools/get-impact-fs.ts",
+        "src/review/tools/get-call-graph-fs.ts"
+      ],
+      "acceptance_criteria": [
+        "searchCodeFsHandler({query}) returns SearchCodeOutput with results[].matchTypes === ['lexical'] and results.length <= 20 (MAX_LIMIT).",
+        "searchCodeFsHandler returns {results: [], totalMatches: 0} for queries with no matches; does not throw.",
+        "findDefinitionsFsHandler locates TypeScript `function`, `class`, `const`, and `interface` definitions; locates Python `def` and `class`.",
+        "findDefinitionsFsHandler returns {definitions: [], totalCount: 0} for unknown symbols; does not throw.",
+        "findUsagesFsHandler returns matches but excludes the line containing the definition keyword (function|class|def|fn|...).",
+        "findUsagesFsHandler uses whole-word matching (rg -w) so substrings of larger identifiers are not matched.",
+        "getImpactFsHandler resolves direct importers via ESM `from '...'`, CommonJS `require('...')`, and Python `from X import` patterns; sets isPartial=true and indirectImporters=[].",
+        "getImpactFsHandler sets isHighImpact=true iff directImporters.length >= 5.",
+        "getCallGraphFsHandler returns {callers: [], callees: [], available: false, reason: string} preserving the indexer schema."
+      ]
+    },
+    {
+      "id": "AC-18",
+      "title": "get_commits and get_file_history tools",
+      "description": "Two new always-on agentic tools that expose git commit metadata to the model.",
+      "impacted_modules": [
+        "src/review/tools/get-commits.ts",
+        "src/review/tools/get-file-history.ts"
+      ],
+      "acceptance_criteria": [
+        "getCommitsHandler({}) uses the resolved defaultBase (merge-base with origin/HEAD or origin/main or origin/master, falling back to HEAD~20) as base, and HEAD as head.",
+        "getCommitsHandler honours input.base / input.head when provided.",
+        "getCommitsHandler caps results at limit=100 (MAX_LIMIT) and defaults to 20.",
+        "getCommitsHandler includes commit bodies iff includeBody=true.",
+        "getFileHistoryHandler returns only commits that touched the named filePath, newest-first, capped at limit=50 (MAX_LIMIT, default 10).",
+        "getFileHistoryHandler rejects path-traversal input (..) before invoking git.",
+        "Both handlers produce the documented Output shapes ({commits: CommitInfo[], totalCount: number, ...}) with no extra fields."
+      ]
+    },
+    {
+      "id": "AC-19",
+      "title": "Agentic dispatch routes per tool based on indexer + ripgrep availability",
+      "description": "The agentic tool factory (src/review/pi-tools.ts) registers tools per the table below. Replaces AC-05 behaviour for the indexer-missing case.",
+      "impacted_modules": ["src/review/pi-tools.ts", "src/review/agentic-prompt.ts"],
+      "acceptance_criteria": [
+        "When indexerUrl is set, exactly 8 tools are registered: read_file, search_code, find_definitions, find_usages, get_call_graph, get_impact, get_commits, get_file_history. The five indexer-backed tools route to their *-indexer handlers.",
+        "When indexerUrl is undefined AND rg is on PATH, the same 8 tools are registered. search_code, find_definitions, find_usages, get_impact route to their *-fs handlers. get_call_graph routes to the fs stub.",
+        "When indexerUrl is undefined AND rg is NOT on PATH, only read_file, get_call_graph (stub), get_commits, get_file_history are registered. A warning is logged naming ripgrep.",
+        "AGENTIC_SYSTEM_PROMPT lists get_commits and get_file_history alongside the original six tools, and explicitly notes that get_call_graph / get_impact may return available:false or isPartial:true.",
+        "resolveDefaultBase tries origin/HEAD, then origin/main, then origin/master, falling back to HEAD~20 — the chosen base is the merge-base of HEAD and the first reachable candidate.",
+        "Each registered tool's execute() JSON-stringifies the handler output into content[0].text — no shape change vs. existing tools."
+      ]
+    },
+    {
+      "id": "AC-20",
+      "title": "--ci flag and ci-mode helpers",
+      "description": "src/cli/args.ts adds --ci and --fail-on. src/review/ci-mode.ts owns CI-specific logic: platform detection, PR-number resolution, exit-code policy, sticky comment posting.",
+      "impacted_modules": ["src/cli/args.ts", "src/review/ci-mode.ts", "src/index.ts"],
+      "acceptance_criteria": [
+        "--ci defaults the user's options to agentic=true, quiet=true, format='markdown', postToPr=true ONLY when those flags were not passed explicitly.",
+        "--fail-on accepts exactly 'critical' | 'high' | 'none'; any other value throws an error mentioning the allowed values.",
+        "detectCiPlatform returns 'github' iff env.GITHUB_ACTIONS === 'true'; 'gitlab' iff env.GITLAB_CI === 'true'; null otherwise.",
+        "extractPrNumber('github', env) reads /^refs\\/pull\\/(\\d+)\\// from env.GITHUB_REF; returns null when unset or non-matching.",
+        "extractPrNumber('gitlab', env) reads env.CI_MERGE_REQUEST_IID as a number; returns null when unset.",
+        "resolveCiExitCode returns 0 when verdict is APPROVE regardless of fail-on; 0 when fail-on='none' regardless of counts; 1 when fail-on='critical' and critical > 0; 1 when fail-on='high' and (critical > 0 OR high > 0).",
+        "buildCommentPayload prefixes the markdown with the literal sticky marker '<!-- kode-review:sticky -->' on its own line.",
+        "postCiComment routes to githubRunner or gitlabRunner and delegates orchestration to replaceStickyComment.",
+        "When --ci is set and a PR number is resolvable (--pr or env), the CLI posts the comment; on post failure the CLI logs a warning and continues — it does not swallow the error silently and does not abort the process before exiting with the verdict-derived code.",
+        "When --ci is active the legacy --post-to-pr code path is skipped (no duplicate posts)."
+      ]
+    },
+    {
+      "id": "AC-21",
+      "title": "Sticky comment replacement on PR/MR",
+      "description": "replaceStickyComment lists prior comments, identifies the ones bearing the sticky marker, posts the new comment, then deletes the priors. The orchestration is exercised against a fake CiCommentRunner.",
+      "impacted_modules": ["src/review/ci-mode.ts"],
+      "acceptance_criteria": [
+        "replaceStickyComment posts the new comment BEFORE deleting any prior comments — the PR is never left without a current review.",
+        "replaceStickyComment deletes ALL prior comments whose body contains '<!-- kode-review:sticky -->'.",
+        "replaceStickyComment does NOT delete comments that lack the sticky marker (human comments are preserved).",
+        "When the new-comment post fails, replaceStickyComment returns false and performs no deletions.",
+        "When listing prior comments throws (e.g., rate-limit), replaceStickyComment falls back to plain post and logs a warning — the new comment is still created.",
+        "When a delete fails after the post succeeded, replaceStickyComment logs a warning and returns true — partial success is reported, not retried in v1.",
+        "githubRunner.list uses `gh api --paginate repos/{owner}/{repo}/issues/<pr>/comments` and selects {id, body} via --jq.",
+        "githubRunner.del uses `gh api -X DELETE repos/{owner}/{repo}/issues/comments/<id>`.",
+        "gitlabRunner.list uses `glab api projects/:id/merge_requests/<iid>/notes`.",
+        "gitlabRunner.del uses `glab api -X DELETE projects/:id/merge_requests/<iid>/notes/<id>`."
+      ]
+    },
+    {
+      "id": "AC-22",
+      "title": "kode-review: ignore suppression markers",
+      "description": "Source-level magic comments tell the review to drop specific findings. The filter runs after the model returns and before the exit-code and PR-comment posting use the result. Disabled via --no-suppressions.",
+      "impacted_modules": ["src/review/suppressions.ts", "src/review/agentic-prompt.ts", "src/cli/args.ts", "src/index.ts"],
+      "acceptance_criteria": [
+        "hasIgnoreMarker returns true for lines containing 'kode-review: ignore' in any comment syntax (//, #, --, /* */, <!-- -->).",
+        "hasIgnoreMarker is whitespace-tolerant between the colon and the keyword ('kode-review:   ignore' matches).",
+        "hasIgnoreMarker is case-sensitive on the keyword — 'Kode-Review: ignore' does NOT match.",
+        "hasIgnoreMarker does NOT match 'kode-review: ignore-file' (that is the file-level marker, distinct).",
+        "hasIgnoreFileMarker returns true when any line in the file contains 'kode-review: ignore-file'.",
+        "filterSuppressedFindings drops a finding when the referenced line carries the ignore marker.",
+        "filterSuppressedFindings drops a finding when the line IMMEDIATELY ABOVE the referenced line carries the ignore marker (next-line idiom).",
+        "filterSuppressedFindings drops every finding in a file containing the ignore-file marker.",
+        "filterSuppressedFindings keeps findings when the referenced file cannot be read (deleted, permission denied) — never silently drop on error.",
+        "filterSuppressedFindings keeps findings when the referenced path attempts traversal (e.g. '../../etc/passwd') — the path guard rejects access, the finding survives.",
+        "filterSuppressedFindings rewrites the 'Issues Summary: X CRITICAL, Y HIGH, ...' line to reflect the new counts.",
+        "filterSuppressedFindings appends a 'Suppressed: N finding(s) via `kode-review: ignore` markers.' footer when N > 0.",
+        "The CLI runs the filter ONLY when options.noSuppressions is false (default). With --no-suppressions, the raw review output is used unchanged.",
+        "The CLI runs the filter BEFORE counting severities and posting the comment — suppressed findings affect neither the exit code nor the PR comment.",
+        "AGENTIC_SYSTEM_PROMPT instructs the model to honor 'kode-review: ignore' and 'kode-review: ignore-file' markers so suppressed findings ideally never appear in the first place (defense-in-depth)."
+      ]
+    }
+  ]
+}

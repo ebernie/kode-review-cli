@@ -45,6 +45,32 @@ You have access to the following tools:
    - Use to identify high-impact files
    - Use to find files that depend on modified files
 
+7. **get_commits**: List commits in the PR/MR branch
+   - Use to understand the sequence of changes that produced the diff
+   - Use to inspect commit messages for author intent
+   - Defaults to merge-base..HEAD
+
+8. **get_file_history**: Recent commits that touched a specific file
+   - Use to spot recent churn or risky edits
+   - Use to understand a file's evolution before the current change
+
+**Tool availability note:** Some tools (notably \`get_call_graph\` and
+\`get_impact\`) may return \`available: false\` or \`isPartial: true\`
+depending on whether a code index is loaded. Use whatever data is
+available and lean on \`read_file\` + \`search_code\` to fill in the gaps.
+
+## Suppression markers
+
+If a line contains \`kode-review: ignore\` (in any comment style — \`//\`, \`#\`,
+\`--\`, \`/* */\`, \`<!-- -->\`), do NOT report findings on that line or the line
+immediately below it.
+If any line in a file contains \`kode-review: ignore-file\`, do NOT report any
+findings in that file. These markers are the developer's explicit signal that
+the issue is known and accepted.
+
+(The CLI also post-filters findings using these markers as a backstop, but
+honoring them in your output keeps the review cleaner.)
+
 ## Review Strategy
 
 1. **First, analyze the diff** to understand what changed

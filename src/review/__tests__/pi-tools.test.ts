@@ -14,7 +14,25 @@ vi.mock('../../indexer/client.js', () => ({
   })),
 }))
 
+// Ripgrep availability + search are mocked so registration tests don't depend
+// on whether the host machine has rg installed. Tests that exercise the actual
+// fs handlers against a real binary live in src/review/tools/__tests__ and skip
+// when rg is genuinely missing.
+let mockRgMatches: Array<{ path: string; line: number; text: string; matchText: string; column: number }> = []
+
+vi.mock('../tools/ripgrep.js', async () => {
+  const actual = await vi.importActual<typeof import('../tools/ripgrep.js')>('../tools/ripgrep.js')
+  return {
+    ...actual,
+    isRipgrepAvailable: vi.fn(async () => true),
+    ripgrepSearch: vi.fn(async () => mockRgMatches),
+  }
+})
+
 import { createKodeReviewToolsExtension } from '../pi-tools.js'
+import { isRipgrepAvailable } from '../tools/ripgrep.js'
+
+const mockRgAvailable = isRipgrepAvailable as unknown as ReturnType<typeof vi.fn>
 
 interface RegisteredTool {
   name: string
@@ -51,9 +69,12 @@ describe('createKodeReviewToolsExtension', () => {
     await mkdir(testRepoRoot, { recursive: true })
     await writeFile(join(testRepoRoot, '.gitignore'), 'node_modules\ndist\n')
     mockClientImpl = {}
+    mockRgAvailable.mockResolvedValue(true)
+    mockRgMatches = []
   })
 
-  it('always registers the read_file tool, even without an indexer URL', async () => {
+  it('always registers the 4 always-on tools (no indexer, no rg)', async () => {
+    mockRgAvailable.mockResolvedValue(false)
     const pi = createFakePi()
     const factory = createKodeReviewToolsExtension({
       repoRoot: testRepoRoot,
@@ -61,10 +82,15 @@ describe('createKodeReviewToolsExtension', () => {
     })
     await factory(pi as never)
 
-    expect(pi.tools.map((t) => t.name)).toEqual(['read_file'])
+    expect(pi.tools.map((t) => t.name).sort()).toEqual([
+      'get_call_graph',
+      'get_commits',
+      'get_file_history',
+      'read_file',
+    ])
   })
 
-  it('registers all six tools when indexerUrl is provided', async () => {
+  it('registers all 8 tools when indexerUrl is provided', async () => {
     const pi = createFakePi()
     const factory = createKodeReviewToolsExtension({
       repoRoot: testRepoRoot,
@@ -78,10 +104,104 @@ describe('createKodeReviewToolsExtension', () => {
       'find_definitions',
       'find_usages',
       'get_call_graph',
+      'get_commits',
+      'get_file_history',
       'get_impact',
       'read_file',
       'search_code',
     ])
+  })
+
+  it('registers all 8 tools when indexer is absent but rg is present (fs path)', async () => {
+    mockRgAvailable.mockResolvedValue(true)
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+    })
+    await factory(pi as never)
+
+    expect(pi.tools.map((t) => t.name).sort()).toEqual([
+      'find_definitions',
+      'find_usages',
+      'get_call_graph',
+      'get_commits',
+      'get_file_history',
+      'get_impact',
+      'read_file',
+      'search_code',
+    ])
+  })
+
+  it('fs-path search_code execute() routes to the fs handler (matchTypes=["lexical"])', async () => {
+    // Concrete behavioural assertion that the dispatch ternary is wired correctly:
+    // when indexerUrl is absent, executing search_code must produce the fs-handler
+    // output shape (matchTypes=['lexical']) — not the indexer one.
+    mockRgAvailable.mockResolvedValue(true)
+    mockRgMatches = [
+      { path: 'sample.ts', line: 1, text: 'export const fsPathMarker = 1', matchText: 'fsPathMarker', column: 14 },
+    ]
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+    })
+    await factory(pi as never)
+    const searchCode = pi.tools.find((t) => t.name === 'search_code')!
+    const result = (await searchCode.execute('id-1', { query: 'fsPathMarker' })) as {
+      content: { type: string; text: string }[]
+    }
+    const parsed = JSON.parse(result.content[0].text) as {
+      results: Array<{ matchTypes: string[]; path: string }>
+      query: string
+    }
+    expect(parsed.query).toBe('fsPathMarker')
+    expect(parsed.results).toHaveLength(1)
+    expect(parsed.results[0].matchTypes).toEqual(['lexical'])
+    expect(parsed.results[0].path).toBe('sample.ts')
+  })
+
+  it('get_call_graph stub execute() returns available:false when indexer is absent', async () => {
+    mockRgAvailable.mockResolvedValue(false)
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+    })
+    await factory(pi as never)
+    const callGraph = pi.tools.find((t) => t.name === 'get_call_graph')!
+    const result = (await callGraph.execute('id-1', { functionName: 'foo' })) as {
+      content: { type: string; text: string }[]
+    }
+    const parsed = JSON.parse(result.content[0].text) as {
+      available: boolean
+      reason: string
+      callers: unknown[]
+      callees: unknown[]
+    }
+    expect(parsed.available).toBe(false)
+    expect(parsed.reason).toMatch(/indexer/i)
+    expect(parsed.callers).toEqual([])
+    expect(parsed.callees).toEqual([])
+  })
+
+  it('logs a warning when neither indexer nor rg is available', async () => {
+    mockRgAvailable.mockResolvedValue(false)
+    const { logger } = await import('../../utils/logger.js')
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    try {
+      const pi = createFakePi()
+      const factory = createKodeReviewToolsExtension({
+        repoRoot: testRepoRoot,
+        repoUrl: 'https://github.com/x/y',
+      })
+      await factory(pi as never)
+      expect(warnSpy).toHaveBeenCalled()
+      const message = warnSpy.mock.calls[0][0]
+      expect(message).toMatch(/ripgrep/i)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('every registered tool has a non-empty description and a TypeBox parameters schema', async () => {
