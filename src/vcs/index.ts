@@ -1,4 +1,5 @@
 export { detectPlatform, getCurrentBranch, isGitRepository, getRepoUrl, getRepoRoot, type VcsPlatform } from './detect.js'
+export { resolveBranchLabel } from './branch-label.js'
 export {
   isGhInstalled,
   isGhAuthenticated,
