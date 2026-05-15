@@ -16,7 +16,7 @@ import {
   resetConfig,
   getConfig,
 } from './config/index.js'
-import { runOnboardingWizard, setupVcs } from './onboarding/index.js'
+import { runOnboardingWizard, setupVcs, shouldEnforceOnboardingGate } from './onboarding/index.js'
 import { needsMigration, runMigration } from './cli/migration.js'
 import {
   runAgenticReview,
@@ -1406,7 +1406,7 @@ async function main(): Promise<void> {
     }
 
     // Check if onboarding is needed
-    if (!isOnboardingComplete()) {
+    if (shouldEnforceOnboardingGate(options, isOnboardingComplete())) {
       if (ctx.interactive) {
         const setupOk = await runOnboardingWizard()
         // Wizard returns false if pi isn't installed or has no usable model.
