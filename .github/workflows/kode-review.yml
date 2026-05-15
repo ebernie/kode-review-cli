@@ -31,17 +31,22 @@ jobs:
         with:
           node-version: '20'
 
+      - uses: oven-sh/setup-bun@v2
+
       # ripgrep is preinstalled on ubuntu-latest; this is a safety net.
       - name: Ensure ripgrep is installed
         run: which rg || sudo apt-get install -y ripgrep
 
-      - name: Install kode-review
+      - name: Install dependencies
         # TODO: remove prior to commit
-        run: npm install -g @kofikode/kode-review-cli
+        run: bun install --frozen-lockfile
+
+      - name: Build kode-review
+        run: bun run build
 
       - name: Run review
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: kode-review --ci --pr "$PR_NUMBER" --fail-on critical
+        run: node ./bin/kode-review.js --ci --pr "$PR_NUMBER" --fail-on critical
