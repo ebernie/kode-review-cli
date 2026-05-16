@@ -2,18 +2,6 @@
 
 AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/model auth — kode-review handles the review.
 
-> ## ⚠️ Upgrading from 0.x?
->
-> v1.0 is a clean break. The first run on a 0.x install will offer to **wipe everything** (config, watch state, indexer Docker containers AND volumes) before re-onboarding. There is no backup.
->
-> If you don't want this, **stay on 0.4.0**:
->
-> ```bash
-> npm install -g @ebernie/kode-review-cli@0.4.0
-> ```
->
-> The migration prompts for a typed `wipe` confirmation. To script the upgrade, pass `--migrate-yes` or set `KODE_REVIEW_MIGRATE_YES=1`.
-
 ## Features
 
 - **First-pass AI code reviews** powered by pi
@@ -40,28 +28,32 @@ AI-powered code review CLI built on [pi](https://pi.dev). Pi handles provider/mo
 ## Installation
 
 ```bash
-# Clone the repository
+npm install -g @ebernie/kode-review-cli
+```
+
+Or with Bun:
+
+```bash
+bun add -g @ebernie/kode-review-cli
+```
+
+### Install from source
+
+```bash
 git clone https://github.com/ebernie/kode-review-cli.git
 cd kode-review-cli
-
-# Install dependencies and build
 bun install
 bun run build
-
-# Link globally for CLI access
 bun link
 ```
 
 ## Updating
 
 ```bash
-# Check for updates and install the latest version
-kode-review --update
+npm install -g @ebernie/kode-review-cli@latest
 ```
 
-This checks for newer versions via git tags, shows what's changed, and (after confirmation) runs `git pull`, `bun install`, and `bun run build` in the installation directory. Only works for git-clone installations.
-
-A daily background check also runs automatically and notifies you when a new version is available.
+If you installed from source, run `kode-review --update` to pull the latest tag and rebuild. A daily background check notifies you when a new version is available.
 
 ## Quick Start
 
