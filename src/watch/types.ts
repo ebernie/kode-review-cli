@@ -1,3 +1,5 @@
+import type { Finding } from '../review/finding-schema.js'
+
 /**
  * Platform types
  */
@@ -41,6 +43,10 @@ export interface ReviewOutcome {
   reviewedAt: string
   /** Error message if review failed */
   error?: string
+  /** Head commit SHA at review time. Enables revalidation when the PR head moves. */
+  headRef?: string
+  /** Parsed structured findings from the review. */
+  findings?: Finding[]
 }
 
 /**

@@ -1,6 +1,7 @@
 import Conf from 'conf'
 import { z } from 'zod'
 import type { ReviewRequestKey, ReviewOutcome } from './types.js'
+import { FindingSchema } from '../review/finding-schema.js'
 
 /**
  * Schema for persisted review outcomes
@@ -10,6 +11,8 @@ const ReviewOutcomeSchema = z.object({
   success: z.boolean(),
   reviewedAt: z.string(),
   error: z.string().optional(),
+  headRef: z.string().optional(),
+  findings: z.array(FindingSchema).optional(),
 })
 
 /**
