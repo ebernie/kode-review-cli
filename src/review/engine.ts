@@ -32,6 +32,8 @@ import { createKodeReviewToolsExtension, type ToolContext } from './pi-tools.js'
 import { attachReviewListener, type ReviewProgress } from './session-events.js'
 import { extractReviewContent } from './response.js'
 import { aggregateUsage, type UsageTotals } from './usage.js'
+import { parseFindingsBlock } from './finding-parser.js'
+import type { Finding } from './finding-schema.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
@@ -84,6 +86,7 @@ export interface AgenticReviewOptions extends ReviewOptions {
 export interface ReviewResult {
   content: string
   usage: UsageTotals
+  findings: Finding[]
 }
 
 export interface AgenticReviewResult {
@@ -92,6 +95,7 @@ export interface AgenticReviewResult {
   truncated: boolean
   truncationReason?: string
   usage: UsageTotals
+  findings: Finding[]
 }
 
 /**
@@ -266,7 +270,11 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     onProgress: options.onProgress,
   })
 
-  return { content: outcome.content, usage: outcome.usage }
+  return {
+    content: outcome.content,
+    usage: outcome.usage,
+    findings: extractFindings(outcome.content),
+  }
 }
 
 /**
@@ -314,5 +322,26 @@ export async function runAgenticReview(
       ? `Maximum iteration limit (${maxIterations}) reached`
       : undefined,
     usage: outcome.usage,
+    findings: extractFindings(outcome.content),
   }
+}
+
+/**
+ * Parse the fenced kode-findings block from the assistant's text output.
+ *
+ * Never throws — missing/invalid blocks log a warning and return [].
+ * Downstream consumers treat zero findings the same regardless of cause.
+ */
+function extractFindings(content: string): Finding[] {
+  const parsed = parseFindingsBlock(content)
+  if (parsed.error === 'missing') {
+    logger.warn(
+      'Review output missing kode-findings block; downstream consumers will see zero structured findings.',
+    )
+  } else if (parsed.error) {
+    logger.warn(
+      `Review output kode-findings block failed validation (${parsed.error}): ${parsed.detail ?? ''}`,
+    )
+  }
+  return parsed.findings
 }

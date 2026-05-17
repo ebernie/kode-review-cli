@@ -76,6 +76,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
 })
 
 import { runReview, runAgenticReview } from '../engine.js'
+import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
 
 beforeEach(() => {
   captured.options = null
@@ -172,6 +173,50 @@ describe('runReview', () => {
       { toolCallCount: 0, lastToolName: 'read_file' },
       { toolCallCount: 1, lastToolName: 'read_file' },
     ])
+  })
+
+  it('returns parsed findings when output contains a kode-findings block', async () => {
+    const fenced = [
+      '### Summary',
+      'sum',
+      '',
+      '```' + FINDINGS_FENCE_TAG,
+      JSON.stringify({
+        findings: [{
+          severity: 'HIGH',
+          category: 'security',
+          confidence: 'HIGH',
+          title: 't',
+          file: 'a.ts',
+          lineStart: 1,
+          lineEnd: 2,
+          evidence: 'e',
+          problem: 'p',
+          recommendation: 'r',
+        }],
+      }),
+      '```',
+    ].join('\n')
+
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText(fenced)
+    captured.resolvePrompt()
+
+    const result = await promise
+    expect(result.findings).toHaveLength(1)
+    expect(result.findings[0].category).toBe('security')
+    expect(result.findings[0].severity).toBe('HIGH')
+  })
+
+  it('returns empty findings when no kode-findings block is present', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('### Summary\nno block')
+    captured.resolvePrompt()
+
+    const result = await promise
+    expect(result.findings).toEqual([])
   })
 })
 

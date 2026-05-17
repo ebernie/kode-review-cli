@@ -46,3 +46,20 @@ export {
   sumUsage,
   type UsageTotals,
 } from './usage.js'
+
+export {
+  FindingSchema,
+  FindingsBlockSchema,
+  SEVERITIES,
+  CATEGORIES,
+  CONFIDENCES,
+  type Finding,
+  type FindingsBlock,
+} from './finding-schema.js'
+
+export {
+  parseFindingsBlock,
+  FINDINGS_FENCE_TAG,
+  type ParseFindingsResult,
+  type FindingsParseError,
+} from './finding-parser.js'
