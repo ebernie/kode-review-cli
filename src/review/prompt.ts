@@ -145,12 +145,14 @@ Focus primarily on **changed lines** (+ lines in the diff). Only flag issues in 
 
 ## Output Format
 
-Provide your review in the following structure:
+Provide your review in TWO parts:
 
-### Summary
+### Part 1 — Human-readable markdown
+
+#### Summary
 A brief 2-3 sentence overview of the changes and overall code quality.
 
-### Issues Found
+#### Issues Found
 
 Report ALL issues found. For each issue:
 
@@ -175,10 +177,46 @@ Suggested Fix:
 Confidence: HIGH|MEDIUM|LOW
 \`\`\`
 
+**Severity and Confidence are independent axes — do not collapse them.**
+- *Severity* describes the impact IF the issue is real.
+- *Confidence* describes how certain you are the issue IS real given the visible code.
+- A CRITICAL-severity / LOW-confidence finding is valid and useful — emit it; the downstream consumer triages on both axes.
+
 **Confidence Guidelines:**
 - **HIGH**: You are certain this is an issue based on visible code
 - **MEDIUM**: Likely an issue, but depends on context you can't fully see
-- **LOW**: Possible issue, but could be intentional or handled elsewhere`
+- **LOW**: Possible issue, but could be intentional or handled elsewhere
+
+### Part 2 — Structured findings (REQUIRED)
+
+After the markdown section, you are REQUIRED to emit a fenced code block tagged \`kode-findings\` containing a JSON object that mirrors the issues above. Downstream tooling parses this block; without it the review is incomplete.
+
+\`\`\`kode-findings
+{
+  "findings": [
+    {
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      "category": "security" | "correctness" | "performance" | "maintainability" | "concurrency" | "api-contract" | "error-handling" | "testing" | "documentation" | "other",
+      "confidence": "HIGH" | "MEDIUM" | "LOW",
+      "title": "Short one-line title",
+      "file": "path/relative/to/repo.ts",
+      "lineStart": 42,
+      "lineEnd": 48,
+      "evidence": "The exact code or quoted text that demonstrates the issue. REQUIRED. Empty strings are rejected.",
+      "problem": "Why this is wrong.",
+      "recommendation": "What to do instead."
+    }
+  ]
+}
+\`\`\`
+
+Rules for the structured block:
+- Every finding must include \`evidence\` quoting the actual code that proves the issue. No evidence = no finding.
+- \`category\` must be one of the listed values — do not invent new categories ("style", "nit", "readability" → use \`maintainability\`).
+- \`severity\` and \`confidence\` must each be one of the listed values, treated as independent axes.
+- If there are no issues, emit \`{ "findings": [] }\`.
+- Emit exactly ONE \`kode-findings\` block, after the markdown.
+`
 
 /**
  * Enhanced confidence guidelines when semantic context is available
@@ -196,7 +234,7 @@ const CONFIDENCE_GUIDELINES_WITH_CONTEXT = `
  */
 const CONFIDENCE_GUIDELINES_BASE = `
 
-**Formatting note:** For large reviews with more than 5 HIGH/CRITICAL issues, you may abbreviate MEDIUM/LOW issues to just the title and one-line description.
+**Formatting note:** For large reviews with more than 5 HIGH/CRITICAL issues, you may abbreviate MEDIUM/LOW issues to just the title and one-line description in the markdown — but every finding (full or abbreviated) MUST appear in the structured kode-findings block with complete fields.
 
 ### Positive Observations
 Note 2-3 things done well (good patterns, security practices, clean code, etc.).
