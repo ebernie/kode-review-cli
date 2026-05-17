@@ -47,3 +47,16 @@ describe('buildReviewPrompt — tests as ground truth', () => {
     expect(p).not.toMatch(/tests as ground truth/i)
   })
 })
+
+describe('buildReviewPrompt — findings scope', () => {
+  it('forbids findings against retrieved context', () => {
+    const p = buildReviewPrompt({ ...baseOptions, semanticContext: 'ctx' })
+    expect(p).toMatch(/findings.*only.*diff|may not.*context.*findings/i)
+    expect(p).toMatch(/<related_code>.*read-only|read-only.*<related_code>/i)
+  })
+
+  it('omits the scope section when there is no semantic context', () => {
+    const p = buildReviewPrompt(baseOptions)
+    expect(p).not.toMatch(/Findings Scope/i)
+  })
+})

@@ -150,6 +150,20 @@ Cite the test by path:lines when you skip or downgrade (e.g., "downgraded — \`
 `
 
 /**
+ * Findings scope instruction (only when semantic context is available)
+ *
+ * Prevents the model from issuing findings against retrieved context code.
+ * Findings must target lines in `<diff_content>` only; `<related_code>` is read-only.
+ */
+const FINDINGS_SCOPE = `
+## Findings Scope
+
+You may issue findings ONLY against lines that appear in \`<diff_content>\` (added \`+\` or modified context lines directly adjacent to changes). The \`<related_code>\` section is read-only: use it to understand the surrounding system, verify patterns, and judge confidence — but DO NOT emit findings whose \`file\`/\`lineStart\` point at code that only appears in \`<related_code>\` and not in \`<diff_content>\`.
+
+If you spot a problem in retrieved context that is not in the diff, note it in the \`### Positive Observations\` or \`### Summary\` section as an aside, not as a finding.
+`
+
+/**
  * Review scope section
  */
 const REVIEW_SCOPE = `
@@ -363,6 +377,11 @@ function buildReviewTemplate(hasSemanticContext: boolean): string {
   // Add tests-as-ground-truth instruction if semantic context is available
   if (hasSemanticContext) {
     parts.push(TESTS_AS_GROUND_TRUTH)
+  }
+
+  // Add findings-scope instruction if semantic context is available
+  if (hasSemanticContext) {
+    parts.push(FINDINGS_SCOPE)
   }
 
   // Add review scope and output format
