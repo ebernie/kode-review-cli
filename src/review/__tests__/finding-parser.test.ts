@@ -63,7 +63,7 @@ describe('parseFindingsBlock', () => {
     expect(out.findings[0].title).toBe('second')
   })
 
-  it('does not match the fence tag inside another code block', () => {
+  it('does not match the fence tag when not anchored at column 0', () => {
     const body = [
       '```ts',
       '// fake: ```' + FINDINGS_FENCE_TAG,
