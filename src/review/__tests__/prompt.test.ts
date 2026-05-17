@@ -33,3 +33,17 @@ describe('buildReviewPrompt — schema-strict output', () => {
     expect(p).toMatch(/evidence.*required/i)
   })
 })
+
+describe('buildReviewPrompt — tests as ground truth', () => {
+  it('emits the tests-as-ground-truth section when semantic context is present', () => {
+    const p = buildReviewPrompt({ ...baseOptions, semanticContext: '<context type="test" path="x" lines="1-2">x</context>' })
+    expect(p).toMatch(/tests as ground truth/i)
+    expect(p).toMatch(/downgrade.*confidence|skip the finding/i)
+    expect(p).toContain('<test>')
+  })
+
+  it('does NOT emit the tests-as-ground-truth section without semantic context', () => {
+    const p = buildReviewPrompt(baseOptions)
+    expect(p).not.toMatch(/tests as ground truth/i)
+  })
+})

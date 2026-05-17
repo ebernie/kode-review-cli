@@ -134,6 +134,22 @@ When citing impact concerns:
 - GOOD: "Per \`<import_tree>\`, 8 files import this module - ensure backward compatibility"`
 
 /**
+ * Tests-as-ground-truth instruction (only when semantic context is available)
+ */
+const TESTS_AS_GROUND_TRUTH = `
+## Tests as Ground Truth
+
+The \`<test>\` sections in \`<related_code>\` are not just signals of test coverage — they are evidence of intended behavior. Before emitting a finding, check whether the behavior you're about to flag is exercised by visible test code.
+
+Apply these rules in order:
+1. If a \`<test>\` section explicitly asserts the behavior is correct as written, **skip the finding**.
+2. If a \`<test>\` section exercises the code path but does not directly assert the disputed behavior, **downgrade confidence to LOW** and say so in the finding's \`problem\` field (e.g., "tests exercise this path but do not assert the boundary condition").
+3. If no \`<test>\` section covers the code path at all, proceed with your original confidence — and consider whether "missing test coverage" is itself a \`testing\`-category finding.
+
+Cite the test by path:lines when you skip or downgrade (e.g., "downgraded — \`src/foo/__tests__/bar.test.ts:45-60\` asserts this behavior").
+`
+
+/**
  * Review scope section
  */
 const REVIEW_SCOPE = `
@@ -342,6 +358,11 @@ function buildReviewTemplate(hasSemanticContext: boolean): string {
   // Add context-aware criteria if semantic context is available
   if (hasSemanticContext) {
     parts.push(REVIEW_CRITERIA_WITH_CONTEXT)
+  }
+
+  // Add tests-as-ground-truth instruction if semantic context is available
+  if (hasSemanticContext) {
+    parts.push(TESTS_AS_GROUND_TRUTH)
   }
 
   // Add review scope and output format
