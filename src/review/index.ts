@@ -70,3 +70,15 @@ export {
   TRUST_BOUNDARIES,
   type TrustBoundary,
 } from './trust-boundaries.js'
+
+export {
+  buildRevalidatePrompt,
+  parseRevalidationBlock,
+  RevalidationOutcomeSchema,
+  RevalidationBlockSchema,
+  REVALIDATION_FENCE_TAG,
+  type RevalidationOutcome,
+  type RevalidatePromptOptions,
+  type ParseRevalidationResult,
+  type RevalidationParseError,
+} from './revalidate-prompt.js'
