@@ -60,3 +60,20 @@ describe('buildReviewPrompt — findings scope', () => {
     expect(p).not.toMatch(/Findings Scope/i)
   })
 })
+
+describe('buildReviewPrompt — trust boundaries', () => {
+  it('emits a Trust Boundary Signals section when provided', () => {
+    const p = buildReviewPrompt({
+      ...baseOptions,
+      trustBoundarySummary: 'network: src/routes/users.ts\ndatabase: src/db/users.ts',
+    })
+    expect(p).toMatch(/Trust Boundary Signals/i)
+    expect(p).toContain('network: src/routes/users.ts')
+    expect(p).toContain('database: src/db/users.ts')
+  })
+
+  it('omits the section when not provided', () => {
+    const p = buildReviewPrompt(baseOptions)
+    expect(p).not.toMatch(/Trust Boundary Signals/i)
+  })
+})

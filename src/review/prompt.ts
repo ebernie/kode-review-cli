@@ -298,6 +298,8 @@ export interface ReviewPromptOptions {
   prDescriptionSummary?: string
   /** Project structure context (directory tree, README, architecture docs) */
   projectStructureContext?: string
+  /** Path-based trust-boundary summary, e.g. "network: src/routes/x.ts\nauth: src/auth/y.ts". */
+  trustBoundarySummary?: string
 }
 
 /**
@@ -310,6 +312,7 @@ const STRUCTURAL_TAGS = [
   'diff_content',
   'author_intent',
   'project_structure',
+  'trust_boundaries',
   // XML context section tags
   'modified',
   'similar',
@@ -433,6 +436,17 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     parts.push('<project_structure>')
     parts.push(sanitizeXmlContent(options.projectStructureContext, 'project_structure'))
     parts.push('</project_structure>')
+    parts.push('')
+  }
+
+  if (options.trustBoundarySummary) {
+    parts.push('## Trust Boundary Signals')
+    parts.push('')
+    parts.push('The following files in this diff touch sensitive trust boundaries. Use these signals to scope your findings — security/correctness issues in these areas should be weighed more heavily. Do NOT introduce findings just because a boundary is present; flag concrete issues.')
+    parts.push('')
+    parts.push('<trust_boundaries>')
+    parts.push(sanitizeXmlContent(options.trustBoundarySummary, 'trust_boundaries'))
+    parts.push('</trust_boundaries>')
     parts.push('')
   }
 

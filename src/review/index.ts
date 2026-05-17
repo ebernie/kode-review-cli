@@ -63,3 +63,10 @@ export {
   type ParseFindingsResult,
   type FindingsParseError,
 } from './finding-parser.js'
+
+export {
+  classifyTrustBoundaries,
+  summarizeBoundariesForFiles,
+  TRUST_BOUNDARIES,
+  type TrustBoundary,
+} from './trust-boundaries.js'

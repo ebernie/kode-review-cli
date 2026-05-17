@@ -34,6 +34,7 @@ import { extractReviewContent } from './response.js'
 import { aggregateUsage, type UsageTotals } from './usage.js'
 import { parseFindingsBlock } from './finding-parser.js'
 import type { Finding } from './finding-schema.js'
+import { summarizeBoundariesForFiles } from './trust-boundaries.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
@@ -257,6 +258,7 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
       semanticContext: options.semanticContext,
       prDescriptionSummary: options.prDescriptionSummary,
       projectStructureContext: options.projectStructureContext,
+      trustBoundarySummary: buildTrustBoundarySummary(options.diffContent),
     }
     userPrompt = buildReviewPrompt(promptOptions)
   }
@@ -344,4 +346,30 @@ function extractFindings(content: string): Finding[] {
     )
   }
   return parsed.findings
+}
+
+const DIFF_FILE_RE = /^diff --git a\/(\S+) b\/\S+/gm
+
+function filesInDiff(diff: string): string[] {
+  const seen = new Set<string>()
+  DIFF_FILE_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = DIFF_FILE_RE.exec(diff)) !== null) {
+    seen.add(m[1])
+  }
+  return [...seen]
+}
+
+// Used by the non-agentic runReview path only; agentic reviews infer
+// boundaries from the codebase via tool calls.
+function buildTrustBoundarySummary(diff: string): string | undefined {
+  const files = filesInDiff(diff)
+  if (files.length === 0) return undefined
+  const summary = summarizeBoundariesForFiles(files)
+  if (summary.size === 0) return undefined
+  const lines: string[] = []
+  for (const [boundary, paths] of summary) {
+    lines.push(`${boundary}: ${paths.join(', ')}`)
+  }
+  return lines.join('\n')
 }
