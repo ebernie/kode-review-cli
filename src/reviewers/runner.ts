@@ -8,6 +8,7 @@
  */
 
 import { runReview, type ReviewOptions } from '../review/engine.js'
+import type { Finding } from '../review/finding-schema.js'
 import type { UsageTotals } from '../review/usage.js'
 import {
   buildReviewerUserPrompt,
@@ -33,6 +34,11 @@ export interface ReviewerRunResult {
   durationMs: number
   /** Aggregated token usage + estimated cost. Present when `ok` is true. */
   usage?: UsageTotals
+  /**
+   * Structured findings parsed from the reviewer's output. Optional — failure
+   * cases have nothing to populate, and not every consumer asks for them.
+   */
+  findings?: Finding[]
 }
 
 export interface RunReviewersOptions {
@@ -138,13 +144,14 @@ export async function runReviewers(
         userPromptOverride: userPrompt,
         timeoutMs: options.timeoutMs,
       }
-      const { content, usage } = await runReview(reviewOptions)
+      const { content, usage, findings } = await runReview(reviewOptions)
       const result: ReviewerRunResult = {
         reviewer,
         ok: true,
         content,
         durationMs: Date.now() - started,
         usage,
+        findings,
       }
       options.onReviewerComplete?.(result)
       return result

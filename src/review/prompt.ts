@@ -1,3 +1,5 @@
+import { sanitizeXmlContent } from './xml-sanitize.js'
+
 /**
  * Review prompt template - base instructions
  */
@@ -300,60 +302,6 @@ export interface ReviewPromptOptions {
   projectStructureContext?: string
   /** Path-based trust-boundary summary, e.g. "network: src/routes/x.ts\nauth: src/auth/y.ts". */
   trustBoundarySummary?: string
-}
-
-/**
- * Known structural XML tags used in prompts
- * These must be escaped in user content to prevent tag injection
- */
-const STRUCTURAL_TAGS = [
-  'pr_mr_info',
-  'related_code',
-  'diff_content',
-  'author_intent',
-  'project_structure',
-  'trust_boundaries',
-  // XML context section tags
-  'modified',
-  'similar',
-  'test',
-  'definition',
-  'config',
-  'import',
-  'context',
-  // Impact analysis tags
-  'impact',
-  'warning',
-  'affected_files',
-  'cycle',
-  'import_tree',
-  'imports',
-  'imported_by',
-]
-
-/**
- * Sanitize content to prevent XML tag injection
- * Escapes all structural tags that could break prompt structure
- */
-function sanitizeXmlContent(content: string, _tagName: string): string {
-  let sanitized = content
-
-  // Escape all known structural tags (both opening and closing)
-  // This prevents content from injecting fake boundaries
-  for (const tag of STRUCTURAL_TAGS) {
-    // Escape closing tags: </tag> -> <\/tag>
-    sanitized = sanitized.replace(
-      new RegExp(`</${tag}>`, 'gi'),
-      `<\\/${tag}>`
-    )
-    // Escape opening tags: <tag> -> <\tag>
-    sanitized = sanitized.replace(
-      new RegExp(`<${tag}>`, 'gi'),
-      `<\\${tag}>`
-    )
-  }
-
-  return sanitized
 }
 
 /**

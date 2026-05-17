@@ -490,6 +490,21 @@ async function revalidateRequest(
     // still-present issue. A composite key would require extending the
     // RevalidationOutcomeSchema, which is out of scope here.
     const survivingTitles = new Set(still.map((o) => o.findingTitle))
+
+    // Detect findings the LLM omitted entirely (not marked still-present, resolved, or
+    // unverifiable). Conservative default: treat them as still-present rather than
+    // silently dropping them.
+    const respondedTitles = new Set(parsed.outcomes.map((o) => o.findingTitle))
+    const omitted = priorFindings.filter((f) => !respondedTitles.has(f.title))
+    if (omitted.length > 0) {
+      logger.warn(
+        `Revalidation response omitted ${omitted.length} prior finding(s): ${omitted
+          .map((f) => f.title)
+          .join(', ')}. Retaining them as still-present to avoid silent loss.`,
+      )
+      for (const f of omitted) survivingTitles.add(f.title)
+    }
+
     const survivingFindings = priorFindings.filter((f) => survivingTitles.has(f.title))
 
     stateManager.markReviewed({

@@ -8,6 +8,7 @@
  */
 import { z } from 'zod'
 import type { Finding } from './finding-schema.js'
+import { sanitizeXmlContent } from './xml-sanitize.js'
 
 export const REVALIDATION_FENCE_TAG = 'kode-revalidation'
 
@@ -42,11 +43,11 @@ export function buildRevalidatePrompt(opts: RevalidatePromptOptions): string {
     findingsJson,
     '```',
     '',
-    opts.prMrInfo ? '## PR/MR Information\n\n```\n' + opts.prMrInfo + '\n```\n' : '',
+    opts.prMrInfo ? '## PR/MR Information\n\n<pr_mr_info>\n' + sanitizeXmlContent(opts.prMrInfo, 'pr_mr_info') + '\n</pr_mr_info>\n' : '',
     '## New diff (current state of the PR)',
     '',
     '<diff_content>',
-    opts.newDiff,
+    sanitizeXmlContent(opts.newDiff, 'diff_content'),
     '</diff_content>',
     '',
     '## Output Format',
