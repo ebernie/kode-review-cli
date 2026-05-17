@@ -14,6 +14,7 @@ export interface PullRequestInfo {
   author: { login: string }
   baseRefName: string
   headRefName: string
+  headRefOid: string
   additions: number
   deletions: number
   changedFiles: number
@@ -85,7 +86,7 @@ export async function getGitHubPRInfo(prNumber: number): Promise<PullRequestInfo
     'view',
     String(prNumber),
     '--json',
-    'title,body,author,baseRefName,headRefName,additions,deletions,changedFiles',
+    'title,body,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles',
   ])
 
   if (result.exitCode !== 0) {

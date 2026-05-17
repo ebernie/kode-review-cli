@@ -7,15 +7,44 @@ import type { CliOptions } from '../cli/args.js'
 import { getGitHubPRDiff, getGitHubPRInfo } from '../vcs/github.js'
 import { getGitLabMRDiff, getGitLabMRInfo } from '../vcs/gitlab.js'
 import { runReview, type ReviewOptions } from '../review/engine.js'
+import { buildRevalidatePrompt, parseRevalidationBlock } from '../review/revalidate-prompt.js'
+import type { Finding } from '../review/finding-schema.js'
 import { WatchStateManager } from './state.js'
 import { detectReviewRequests, type DetectorConfig } from './detector.js'
 import {
   type ReviewRequest,
   type WatchConfig,
   type ReviewOutcome,
+  type Platform,
   makeReviewRequestKey,
   formatReviewRequest,
 } from './types.js'
+
+/**
+ * Extract the head commit SHA from a platform-specific PR/MR info object.
+ *
+ * GitHub: `gh pr view --json headRefOid` → `{ headRefOid: "abc..." }`.
+ * GitLab: `glab mr view -F json` → `{ sha: "abc..." }` and/or
+ *   `{ diff_refs: { head_sha: "abc..." } }`. We prefer `sha` and fall back
+ *   to `diff_refs.head_sha`.
+ *
+ * Returns undefined when the info is missing or the expected field is absent —
+ * callers must treat undefined as "head ref unknown, fall back to full review".
+ */
+export function extractHeadRef(platform: Platform, info: unknown): string | undefined {
+  if (!info || typeof info !== 'object') return undefined
+  const obj = info as Record<string, unknown>
+  if (platform === 'github') {
+    return typeof obj.headRefOid === 'string' ? obj.headRefOid : undefined
+  }
+  if (typeof obj.sha === 'string') return obj.sha
+  const refs = obj.diff_refs
+  if (refs && typeof refs === 'object') {
+    const headSha = (refs as Record<string, unknown>).head_sha
+    if (typeof headSha === 'string') return headSha
+  }
+  return undefined
+}
 
 /**
  * Options for starting watch mode
@@ -143,18 +172,28 @@ async function runPollCycle(options: {
 
     logger.success(`Found ${detection.found.length} PR/MR(s) where you are a reviewer`)
 
-    // Filter out already reviewed
-    const newRequests = detection.found.filter(
-      (req) => !stateManager.hasBeenReviewed(makeReviewRequestKey(req))
-    )
+    // Filter out PRs/MRs with permanent failures so we don't hammer them on
+    // every poll. Successfully-reviewed entries still flow through so
+    // `reviewRequest` can decide whether the head moved (revalidate) or is
+    // unchanged (skip) — that decision needs the live head SHA from the API
+    // and is made there, not here.
+    const newRequests = detection.found.filter((req) => {
+      const key = makeReviewRequestKey(req)
+      const outcome = stateManager.getOutcome(key)
+      if (!outcome) return true
+      // Permanent failures stay filtered. Successful prior reviews proceed —
+      // `reviewRequest` will fetch the new head SHA and either skip or
+      // revalidate as appropriate.
+      return outcome.success
+    })
 
     if (newRequests.length === 0) {
-      logger.info('All PRs/MRs have been reviewed previously')
+      logger.info('No PRs/MRs to (re)review this cycle')
       stateManager.updateLastPollTime()
       return
     }
 
-    logger.success(`${newRequests.length} new PR/MR(s) to review`)
+    logger.success(`${newRequests.length} PR/MR(s) to evaluate`)
 
     // Select which to review
     let toReview: ReviewRequest[]
@@ -239,8 +278,10 @@ async function reviewRequest(
   const spinner = ctx.quiet ? null : ora('Fetching diff...').start()
 
   try {
-    // Fetch diff and info
+    // Fetch diff and info; keep the parsed info object in scope so we can read
+    // the head SHA before serialising it for the prompt.
     let diffContent: string | null
+    let infoObj: unknown
     let prMrInfo: string | undefined
 
     if (request.platform === 'github') {
@@ -249,15 +290,16 @@ async function reviewRequest(
         getGitHubPRInfo(request.id),
       ])
       diffContent = diff
-      prMrInfo = info ? JSON.stringify(info, null, 2) : undefined
+      infoObj = info
     } else {
       const [diff, info] = await Promise.all([
         getGitLabMRDiff(request.id),
         getGitLabMRInfo(request.id),
       ])
       diffContent = diff
-      prMrInfo = info ? JSON.stringify(info, null, 2) : undefined
+      infoObj = info
     }
+    prMrInfo = infoObj ? JSON.stringify(infoObj, null, 2) : undefined
 
     if (!diffContent) {
       throw new Error('Failed to fetch diff')
@@ -271,6 +313,38 @@ async function reviewRequest(
 
     if (diffLines > 5000) {
       logger.warn(`Large diff detected (${diffLines} lines). Review may take longer.`)
+    }
+
+    // Decide between skip / revalidate / full review based on prior head SHA.
+    const headRef = extractHeadRef(request.platform, infoObj)
+    const prior = stateManager.getOutcome(key)
+
+    // Head unchanged → nothing to do. This must run BEFORE the revalidation
+    // branch so a no-op cycle never triggers a needless model call.
+    if (prior?.headRef && headRef && prior.headRef === headRef) {
+      logger.info(`Skipping ${label}: head unchanged since last review (${headRef.slice(0, 7)})`)
+      return
+    }
+
+    // Head moved AND we have prior findings → triage them instead of a full review.
+    if (
+      prior?.headRef &&
+      prior.findings &&
+      prior.findings.length > 0 &&
+      headRef &&
+      prior.headRef !== headRef
+    ) {
+      await revalidateRequest(
+        request,
+        prior.findings,
+        diffContent,
+        prMrInfo,
+        headRef,
+        cliOptions,
+        ctx,
+        stateManager,
+      )
+      return
     }
 
     // Build review options
@@ -311,6 +385,8 @@ async function reviewRequest(
       key,
       success: true,
       reviewedAt: new Date().toISOString(),
+      headRef,
+      findings: result.findings,
     }
     stateManager.markReviewed(outcome)
   } catch (error) {
@@ -334,6 +410,104 @@ async function reviewRequest(
       }
       stateManager.markReviewed(outcome)
     }
+  }
+}
+
+/**
+ * Triage prior findings against a new diff after the PR/MR head has moved.
+ *
+ * Persists only the still-present findings as the new baseline. Resolved and
+ * unverifiable findings drop off so a future head-move revalidation only
+ * checks the issues that still matter.
+ */
+async function revalidateRequest(
+  request: ReviewRequest,
+  priorFindings: Finding[],
+  newDiff: string,
+  prMrInfo: string | undefined,
+  headRef: string,
+  cliOptions: CliOptions,
+  ctx: CliContext,
+  stateManager: WatchStateManager,
+): Promise<void> {
+  const key = makeReviewRequestKey(request)
+  const label = formatReviewRequest(request)
+
+  console.log('')
+  console.log(cyan('========================================'))
+  console.log(cyan(`Revalidating: ${request.repository} #${request.id}`))
+  console.log(cyan(`Prior findings: ${priorFindings.length}`))
+  console.log(cyan('========================================'))
+
+  const userPrompt = buildRevalidatePrompt({ priorFindings, newDiff, prMrInfo })
+
+  const spinner = ctx.quiet ? null : ora('Re-checking prior findings against new diff...').start()
+  try {
+    const result = await runReview({
+      diffContent: newDiff,
+      context: `Revalidating prior findings on ${request.platform} #${request.id}`,
+      prMrInfo,
+      model: cliOptions.model,
+      userPromptOverride: userPrompt,
+    })
+    spinner?.stop()
+
+    const parsed = parseRevalidationBlock(result.content)
+    if (parsed.error) {
+      logger.warn(
+        `Revalidation output failed to parse (${parsed.error}): ${parsed.detail ?? ''}. Keeping prior findings as-is.`,
+      )
+      stateManager.markReviewed({
+        key,
+        success: true,
+        reviewedAt: new Date().toISOString(),
+        headRef,
+        findings: priorFindings,
+      })
+      return
+    }
+
+    const resolved = parsed.outcomes.filter((o) => o.status === 'resolved')
+    const still = parsed.outcomes.filter((o) => o.status === 'still-present')
+    const unverifiable = parsed.outcomes.filter((o) => o.status === 'unverifiable')
+
+    console.log('')
+    console.log(green(`Resolved (${resolved.length}):`))
+    for (const o of resolved) console.log(`  - ${o.findingTitle} — ${o.rationale}`)
+    console.log('')
+    console.log(yellow(`Still present (${still.length}):`))
+    for (const o of still) console.log(`  - ${o.findingTitle} — ${o.rationale}`)
+    if (unverifiable.length > 0) {
+      console.log('')
+      console.log(`Unverifiable (${unverifiable.length}):`)
+      for (const o of unverifiable) console.log(`  - ${o.findingTitle} — ${o.rationale}`)
+    }
+
+    // Persist only still-present findings as the new baseline. The model
+    // reports `findingTitle` only, so we match by title. If two priors share
+    // a title (rare) they are both kept on a still-present match — that's
+    // intentional: better to keep a false-positive than silently drop a
+    // still-present issue. A composite key would require extending the
+    // RevalidationOutcomeSchema, which is out of scope here.
+    const survivingTitles = new Set(still.map((o) => o.findingTitle))
+    const survivingFindings = priorFindings.filter((f) => survivingTitles.has(f.title))
+
+    stateManager.markReviewed({
+      key,
+      success: true,
+      reviewedAt: new Date().toISOString(),
+      headRef,
+      findings: survivingFindings,
+    })
+
+    logger.success(
+      `Revalidation complete: ${label} (${resolved.length} resolved, ${still.length} remaining)`,
+    )
+  } catch (error) {
+    spinner?.fail('Revalidation failed')
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    logger.error(`Failed to revalidate ${label}: ${errorMessage}`)
+    // Fall through without marking — next poll will retry.
   }
 }
 

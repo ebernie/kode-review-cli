@@ -14,6 +14,8 @@ export interface MergeRequestInfo {
   author: { username: string }
   target_branch: string
   source_branch: string
+  sha?: string
+  diff_refs?: { head_sha?: string }
 }
 
 /**
