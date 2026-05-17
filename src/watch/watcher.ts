@@ -507,7 +507,20 @@ async function revalidateRequest(
     spinner?.fail('Revalidation failed')
     const errorMessage = error instanceof Error ? error.message : String(error)
     logger.error(`Failed to revalidate ${label}: ${errorMessage}`)
-    // Fall through without marking — next poll will retry.
+
+    const isRetryable = isRetryableError(errorMessage)
+    if (isRetryable) {
+      logger.info('Error appears transient - will retry in next poll cycle')
+      // Don't mark as reviewed, so it will be retried
+    } else {
+      const outcome: ReviewOutcome = {
+        key,
+        success: false,
+        reviewedAt: new Date().toISOString(),
+        error: errorMessage,
+      }
+      stateManager.markReviewed(outcome)
+    }
   }
 }
 
