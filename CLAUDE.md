@@ -42,10 +42,11 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 | `src/cli/` | CLI argument parsing (Commander), colors (Chalk), interactive context, self-update (`update.ts`) |
 | `src/config/` | Zod schemas, Conf-based persistent config store (~/.config/kode-review/) |
 | `src/onboarding/` | Setup wizard, pi installation check, VCS CLI detection |
-| `src/review/` | OpenCode SDK integration, prompt construction, git diff extraction, project structure analysis |
+| `src/review/` | pi-coding-agent integration, prompt construction, git diff extraction, project structure analysis, agentic tool dispatch (ripgrep/git/indexer) |
 | `src/vcs/` | GitHub/GitLab CLI wrappers (`gh`/`glab`), platform detection from git remote |
 | `src/watch/` | Polling-based PR/MR monitoring with persistent state tracking |
 | `src/indexer/` | Semantic code indexer with multi-stage retrieval pipeline |
+| `src/repo-audit/` | `--scope repo` whole-codebase audit: clawpatch-powered mapper + kode-agent reviewer |
 | `src/utils/` | Logger with quiet mode, command execution wrapper (`execa`) |
 
 ### Key Patterns
@@ -58,11 +59,12 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 
 ### Review Engine Flow
 
-`src/review/engine.ts` creates an OpenCode server instance per review:
-1. Creates session via `createOpencode()` (ephemeral server on random port)
-2. Builds prompt with diff, context, PR info, and optional semantic context
-3. Sends prompt via `client.session.prompt()` with model specification
-4. Extracts text parts from response and returns review content
+`src/review/engine.ts` runs each review through a pi-coding-agent session:
+1. Resolves model via `ModelRegistry` (first available, or `--model provider/id`)
+2. Creates session via `createAgentSession()` (`noTools: 'all'` for basic, `noTools: 'builtin'` for agentic so the pi-tools extension stays enabled)
+3. Builds prompt with diff, PR info, and optional semantic context — or uses `options.systemPrompt` / `options.userPromptOverride` for persona dispatch and repo-scope feature review
+4. Subscribes to session events; counts tool calls, surfaces truncation when `>= maxIterations`
+5. Always disposes the session in `finally`; `extractReviewContent` reads the final assistant message *before* dispose
 
 ### Watch Mode
 
@@ -70,6 +72,35 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 - `detector.ts` - Queries GitHub/GitLab for PRs where user is a reviewer
 - `state.ts` - Persists reviewed PR/MR state to `~/.config/kode-review-watch/`
 - `watcher.ts` - Main polling loop with graceful shutdown handling
+
+### Repo-Scope Audit (`--scope repo`)
+
+`src/repo-audit/` provides whole-codebase review:
+
+**Architecture:** clawpatch-powered mapper, kode-agent–powered reviewer.
+
+- **`install.ts`** — detect `clawpatch` on PATH; package-manager-aware install hints; Node 22 version check
+- **`clawpatch-cli.ts`** — execa wrappers for `clawpatch map` / `clawpatch doctor`
+- **`features.ts`** — read `.clawpatch/features/*.json` into `FeatureRecord[]` (read-only consumer; never writes into `.clawpatch/`)
+- **`persona-dispatch.ts`** — `selectPersonas(feature)`: trust-boundary + kind → built-in reviewer set
+- **`prompts.ts`** — `buildFeatureReviewPrompt`: feature metadata + capped owned/context file contents + system-prompt suffix (`FEATURE_REVIEW_MODE_SUFFIX`) appended to the persona's template
+- **`engines/kode-agent.ts`** — `reviewFeatureWithAgent`: wraps `runAgenticReview()` with feature-shaped prompts and tools enabled
+- **`state.ts`** — `.kode-review/findings/` (atomic temp-write-rename), `.kode-review/locks/` (O_EXCL + rename-over-stale TOCTOU defense), `.kode-review/run-history.jsonl`
+- **`suppressions-structured.ts`** — `filterSuppressedStructured(Finding[], repoRoot)`: applies `kode-review: ignore` markers to structured findings (sibling of `src/review/suppressions.ts`)
+- **`feature-filter.ts`** — `--since <ref>` filter via `git diff --name-only ref...HEAD`
+- **`report.ts`** — text / markdown / json renderer with Feature × Severity matrix
+- **`orchestrator.ts`** — `runRepoAudit`: install gate → clawpatch map → readFeatures → since/already-reviewed filter → per-feature review with persona dispatch → write findings → render
+
+**State boundary:**
+
+| Path | Owner |
+|------|-------|
+| `.clawpatch/` | clawpatch (read-only consumer) |
+| `.kode-review/` | kode-review (findings, locks, run history) |
+
+**Engine surface:** `runAgenticReview` (`src/review/engine.ts`) was extended to honor `options.systemPrompt` and `options.userPromptOverride` so the same agent loop powers both diff-scope persona dispatch and repo-scope feature review.
+
+**Caps** (mirror clawpatch): `MAX_OWNED_FILES_IN_PROMPT=12`, `MAX_CONTEXT_FILES_IN_PROMPT=24`, `MAX_FINDINGS_PER_FEATURE=10` (in `types.ts`). Files past the cap are referenced by path with a `read_file`-via-tool hint — never silently truncated.
 
 ### Indexer Architecture
 

@@ -1,0 +1,64 @@
+{
+  "$schema": "kode-review-acceptance-tests/v1-results",
+  "ran_at": "2026-04-26T21:39:44-04:00",
+  "spec": "docs/acceptance-tests.json",
+  "follow_up_to": "docs/acceptance-tests-results-20260426-212754.json",
+  "purpose": "Verify the three findings from the previous run were addressed: (1) AC-09 doctor flag for legacy config, (2) AC-06 absolute-path-outside-repo guard, (3) AC-06 symlink-escape guard.",
+  "changes_landed": [
+    {
+      "file": "src/cli/doctor.ts",
+      "summary": "Added checkLegacyConfig() that returns a warn-status row when hasOldSchema() is true. The row is omitted entirely on fresh installs so doctor doesn't grow a permanent 'Legacy Config: clean' line. Suggestion map gained a `Legacy Config` entry pointing at --migrate-yes / KODE_REVIEW_MIGRATE_YES=1."
+    },
+    {
+      "file": "src/cli/__tests__/doctor.test.ts",
+      "summary": "Added vi.mock entry for hasOldSchema; updated setupDefaults() to mockHasOldSchema(false). Three new tests cover: row omitted when fresh, row present with warn + correct details when legacy, and graceful handling when hasOldSchema() throws (corrupt store)."
+    },
+    {
+      "file": "src/review/__tests__/pi-tools.test.ts",
+      "summary": "Added two new tests: 'read_file refuses absolute paths that resolve outside the repo root' and 'read_file refuses symlinks whose target resolves outside the repo root'. Symlink test self-skips when the test process can't create symlinks (EPERM/EACCES/ENOENT) so it never silently passes on a host where the underlying defence isn't reachable."
+    }
+  ],
+  "verification": [
+    {
+      "id": "AC-09-fix",
+      "previous_status": "fail",
+      "current_status": "pass",
+      "method": "Re-ran S4 (legacy-config + --doctor) against the rebuilt CLI in a sandboxed HOME.",
+      "observed_cli_output": "! Legacy Config: Pre-1.0 (opencode-era) config detected — migrate before running reviews\\n   Run `kode-review --migrate-yes` or set KODE_REVIEW_MIGRATE_YES=1. This wipes the old config, watch state, and indexer Docker volumes (irreversible).",
+      "negative_check": "Re-ran S1 (fresh sandbox) — confirmed 'Legacy Config' row is absent. Doctor stays clean for new users."
+    },
+    {
+      "id": "AC-06-absolute-path",
+      "previous_status": "gap",
+      "current_status": "pass",
+      "method": "vitest run src/review/__tests__/pi-tools.test.ts",
+      "test_name": "read_file refuses absolute paths that resolve outside the repo root",
+      "assertion": "readFile.execute('id-1', { path: '/etc/passwd' }) rejects with /Path traversal/."
+    },
+    {
+      "id": "AC-06-symlink",
+      "previous_status": "gap",
+      "current_status": "pass",
+      "method": "vitest run src/review/__tests__/pi-tools.test.ts",
+      "test_name": "read_file refuses symlinks whose target resolves outside the repo root",
+      "assertion": "After `symlink('/etc/passwd', repoRoot/sneaky-link.txt)`, readFile.execute on 'sneaky-link.txt' rejects with /Path traversal/.",
+      "platform_caveat": "Test self-skips on EPERM/EACCES/ENOENT so it doesn't silently pass on platforms where it can't construct the attack."
+    }
+  ],
+  "regression_check": {
+    "command": "bun run test",
+    "test_files": 26,
+    "tests_passed": 600,
+    "tests_failed": 0,
+    "delta_from_previous_run": "+5 tests (3 new doctor + 2 new pi-tools)"
+  },
+  "static_analysis": {
+    "typecheck": "clean",
+    "lint_changed_files": "clean",
+    "lint_repo_wide": "1 pre-existing error (src/output/parser.ts: no-useless-escape) and 8 pre-existing warnings — all unrelated to this change"
+  },
+  "summary": {
+    "verdict": "PASS — all three findings from the previous acceptance run are fixed and verified end-to-end. Test suite grew from 595 → 600.",
+    "open_items": []
+  }
+}

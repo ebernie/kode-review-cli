@@ -3,7 +3,9 @@ import type { OutputFormat } from '../output/types.js'
 
 declare const PKG_VERSION: string
 
-export type ReviewScope = 'local' | 'pr' | 'both' | 'auto'
+export type ReviewScope = 'local' | 'pr' | 'both' | 'auto' | 'repo'
+
+export type RepoEngine = 'kode-agent' | 'clawpatch'
 
 /**
  * Commander collector for `--reviewer`. Each invocation may carry one name
@@ -91,6 +93,15 @@ export interface CliOptions {
   ci: boolean
   failOn: 'critical' | 'high' | 'none'
   noSuppressions: boolean
+
+  // --scope repo (whole-codebase audit)
+  engine: RepoEngine
+  remap: boolean
+  jobs: number
+  since?: string
+  reportOnly: boolean
+  revalidate: boolean
+  clawpatchCompat: boolean
 }
 
 export function createProgram(): Command {
@@ -108,7 +119,7 @@ export function createProgram(): Command {
     .option('-a, --agentic', 'Agent mode: review with file/search/git tools', true)
     .option('--no-agentic', 'Diff-only review — disable agent tool access')
     .option('-c, --ci', 'CI mode: agentic + markdown + post-to-PR + non-zero exit on CRITICAL', false)
-    .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto', 'auto')
+    .option('-s, --scope <scope>', 'Review scope: local, pr, both, auto, repo', 'auto')
     .option('-p, --pr <number>', 'Specific PR/MR number to review')
 
   // ── Output ─────────────────────────────────────────────────────────────────
@@ -171,6 +182,18 @@ export function createProgram(): Command {
     .option('--index-queue', 'Show pending background indexing jobs', false)
     .option('--index-queue-clear', 'Clear all pending background indexing jobs', false)
 
+  // ── Repo-scope audit (`--scope repo`) ──────────────────────────────────────
+  // Whole-codebase review delegated to clawpatch for feature mapping; reviewed
+  // by kode-review's agentic engine with trust-boundary-driven persona dispatch.
+  program
+    .option('--engine <name>', 'Repo-audit engine: kode-agent (default) or clawpatch', 'kode-agent')
+    .option('--remap', 'Force clawpatch to re-detect features (pass --force to clawpatch map)', false)
+    .option('--jobs <n>', 'Worker concurrency for repo-scope reviews (default: 4)', '4')
+    .option('--since <ref>', 'Repo-scope: only review features whose owned files changed since <ref>')
+    .option('--report-only', 'Repo-scope: skip review; render findings already on disk', false)
+    .option('--revalidate', 'Repo-scope: re-check open findings against current code', false)
+    .option('--clawpatch-compat', 'Repo-scope: mirror findings into .clawpatch/findings/ in clawpatch schema', false)
+
   // ── Info & maintenance ─────────────────────────────────────────────────────
   program
     .option('--show-config', 'Display current configuration', false)
@@ -184,6 +207,9 @@ Primary modes:
   $ kode-review -c                       CI mode (agent + markdown + post-to-PR + fail-on-CRITICAL)
   $ kode-review -p 1234                  Agent review of PR #1234
   $ kode-review -s local -f markdown     Agent review of working-tree changes, markdown output
+  $ kode-review -s repo                  Whole-codebase audit (requires clawpatch on PATH)
+  $ kode-review -s repo --since main     Audit features whose owned files changed since main
+  $ kode-review -s repo --report-only    Render existing findings without calling the model
 `)
 
   return program
@@ -255,6 +281,29 @@ export function parseArgs(argv: string[]): CliOptions {
   // Commander auto-inverts --no-suppressions into opts.suppressions=false.
   const noSuppressions = opts.suppressions === false
 
+  // Repo-scope options (only meaningful when --scope repo).
+  const engineRaw = String(opts.engine ?? 'kode-agent')
+  if (!['kode-agent', 'clawpatch'].includes(engineRaw)) {
+    throw new Error(`Invalid --engine: "${engineRaw}". Must be one of: kode-agent, clawpatch.`)
+  }
+  const engine = engineRaw as RepoEngine
+
+  const jobsRaw = opts.jobs ?? '4'
+  const jobs = parseInt(jobsRaw, 10)
+  if (isNaN(jobs) || jobs < 1 || jobs > 32) {
+    throw new Error(`Invalid --jobs: "${jobsRaw}". Must be a number between 1 and 32.`)
+  }
+
+  // --scope repo is mutually exclusive with --pr (PR scope is diff-scoped).
+  if (opts.scope === 'repo' && opts.pr) {
+    throw new Error(`--scope repo cannot be combined with --pr <number>. Use --scope pr for PR review.`)
+  }
+
+  // --report-only and --revalidate have contradictory intent.
+  if (opts.reportOnly && opts.revalidate) {
+    throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
+  }
+
   return {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,
@@ -296,5 +345,12 @@ export function parseArgs(argv: string[]): CliOptions {
     ci,
     failOn,
     noSuppressions,
+    engine,
+    remap: opts.remap ?? false,
+    jobs,
+    since: opts.since,
+    reportOnly: opts.reportOnly ?? false,
+    revalidate: opts.revalidate ?? false,
+    clawpatchCompat: opts.clawpatchCompat ?? false,
   }
 }

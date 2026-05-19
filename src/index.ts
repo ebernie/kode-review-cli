@@ -66,6 +66,11 @@ import {
 } from './vcs/index.js'
 import { startWatchMode, type WatchConfig, type Platform } from './watch/index.js'
 import {
+  listFindings as listRepoAuditFindings,
+  runRepoAudit,
+  writeRepoReport,
+} from './repo-audit/index.js'
+import {
   parseReviewContent,
   writeReviewOutput,
   type ReviewOutput,
@@ -534,6 +539,92 @@ async function determineScope(
   return 'local' // Default
 }
 
+/**
+ * Dispatch `--scope repo`. Self-contained — does not consult local diffs or
+ * PR/MR detection. Delegates to runRepoAudit() in src/repo-audit/.
+ */
+async function runRepoScopeAudit(
+  options: CliOptions,
+  _ctx: CliContext,
+  branch: string,
+): Promise<void> {
+  const repoRoot = await getRepoRoot()
+  if (!repoRoot) {
+    throw new Error('Not in a git repository')
+  }
+
+  // repoUrl is only needed by the indexer + as a non-fatal hint for the
+  // agent. Don't gate --report-only on it: a local-only repo with cached
+  // findings should still render.
+  const repoUrl = (await getRepoUrl()) ?? ''
+  if (!repoUrl && !options.reportOnly) {
+    logger.warn(
+      'Repo has no origin URL. Proceeding without indexer integration — ' +
+        'the agent will use filesystem-only tools.',
+    )
+  }
+
+  // Optional indexer URL (used by agentic tools for richer search).
+  const indexerUrl = await resolveIndexerUrlIfRunning()
+
+  const result = await runRepoAudit({
+    repoRoot,
+    repoUrl,
+    branch,
+    indexerUrl,
+    cli: options,
+  })
+
+  // Concise summary line for CI / scripting consumers.
+  logger.success(
+    cyan(
+      `Repo audit complete: reviewed=${result.featuresReviewed} ` +
+        `skipped=${result.featuresSkipped} ` +
+        `findings=${result.findingsEmitted} ` +
+        `suppressed=${result.findingsSuppressed} ` +
+        `on-disk=${result.findingsOnDisk}`,
+    ),
+  )
+
+  // Read findings once and reuse for both rendering and the CI gate.
+  const allFindings = await listRepoAuditFindings(repoRoot)
+  await writeRepoReport({
+    records: allFindings,
+    format: options.format,
+    suppressionsDisabled: options.noSuppressions,
+    outputFile: options.outputFile,
+    quiet: options.quiet,
+  })
+
+  // CI mode: fail on CRITICAL (or HIGH if --fail-on=high).
+  if (options.ci) {
+    const triggerSev = options.failOn === 'high' ? ['CRITICAL', 'HIGH'] : ['CRITICAL']
+    const blockers = allFindings.filter(
+      (r) => r.status === 'open' && triggerSev.includes(r.finding.severity),
+    )
+    if (options.failOn !== 'none' && blockers.length > 0) {
+      logger.error(`CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s); failing.`)
+      process.exit(1)
+    }
+  }
+}
+
+/**
+ * Return the indexer URL if the indexer is running, else undefined.
+ * Mirrors the lookup performed by the diff-scope review path.
+ */
+async function resolveIndexerUrlIfRunning(): Promise<string | undefined> {
+  try {
+    const status = await getIndexerStatus()
+    if (status.running && status.apiUrl) return status.apiUrl
+  } catch {
+    // Indexer status probe failure is non-fatal for repo scope; the agent
+    // falls back to filesystem-only tools.
+  }
+  return undefined
+}
+
+
 async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void> {
   // Check if we're in a git repository
   if (!(await isGitRepository())) {
@@ -546,6 +637,15 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
   const branch = resolveBranchLabel(await getCurrentBranch(), options)
 
   logger.info(`Platform: ${platform}, Branch: ${branch}`)
+
+  // --scope repo dispatches to the whole-codebase audit, which has its own
+  // flow (clawpatch map → kode-agent review per feature → persist findings).
+  // It never consults local changes or PR/MR detection. The --watch +
+  // --scope repo guard fires earlier in main() before this point.
+  if (options.scope === 'repo') {
+    await runRepoScopeAudit(options, ctx, branch)
+    return
+  }
 
   // Check for local changes
   const localChanges = await getLocalChanges()
@@ -1433,6 +1533,14 @@ async function main(): Promise<void> {
 
     // Check if watch mode requested
     if (options.watch) {
+      // --watch + --scope repo is reserved for a future PR. Fail loudly
+      // rather than silently entering diff-scope watch.
+      if (options.scope === 'repo') {
+        throw new Error(
+          '--watch with --scope repo is not yet supported. Run `--scope repo` ' +
+            'manually on a schedule (e.g., via cron) for now.',
+        )
+      }
       await runWatchMode(options, ctx)
       return
     }

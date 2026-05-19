@@ -304,6 +304,231 @@
         "The CLI runs the filter BEFORE counting severities and posting the comment — suppressed findings affect neither the exit code nor the PR comment.",
         "AGENTIC_SYSTEM_PROMPT instructs the model to honor 'kode-review: ignore' and 'kode-review: ignore-file' markers so suppressed findings ideally never appear in the first place (defense-in-depth)."
       ]
+    },
+    {
+      "id": "AC-23",
+      "title": "Repo-scope install gate — clawpatch on PATH + Node 22 check",
+      "description": "Before --scope repo runs anything that needs clawpatch, the orchestrator must verify `clawpatch` is installed and the host Node major is at least clawpatch's minimum, and otherwise print a package-manager-aware install hint or a Node-upgrade hint.",
+      "impacted_modules": ["src/repo-audit/install.ts", "src/repo-audit/orchestrator.ts"],
+      "acceptance_criteria": [
+        "detectClawpatch() returns { installed: false, version: null } when `clawpatch` is not on PATH (commandExists returns false).",
+        "detectClawpatch() returns { installed: true, version: <string> } when `clawpatch --version` exits 0 with non-empty stdout.",
+        "detectClawpatch() returns { installed: true, version: null } when `clawpatch` exists on PATH but `clawpatch --version` exits non-zero or prints empty output (installed-but-unhealthy).",
+        "isNodeVersionCompatible() returns true iff the running Node major version parsed from process.version is >= 22 (CLAWPATCH_MIN_NODE_MAJOR).",
+        "detectPreferredPackageManager(repoRoot) returns 'bun' when `bun.lock` or `bun.lockb` exists, 'pnpm' when `pnpm-lock.yaml` exists, 'yarn' when `yarn.lock` exists, and 'npm' otherwise.",
+        "buildInstallHint(repoRoot) lists the preferred package manager's install command first (e.g. `bun add -g clawpatch`, `pnpm add -g clawpatch`, `yarn global add clawpatch`, or `npm install -g clawpatch`) and always includes the `npx clawpatch <command>` ephemeral fallback line.",
+        "buildInstallHint(repoRoot) appends `npm install -g clawpatch` as a secondary line whenever the preferred manager is not npm.",
+        "buildInstallHint(repoRoot) ends with a `(Requires Node.js >= 22)` line.",
+        "buildNodeUpgradeHint() includes the literal string 'requires Node.js >= 22' and the current `process.version` value.",
+        "runRepoAudit() throws an Error whose message equals buildNodeUpgradeHint() when isNodeVersionCompatible() returns false, before any clawpatch shell-out or feature read occurs.",
+        "runRepoAudit() throws an Error whose message equals buildInstallHint(repoRoot) when detectClawpatch() returns installed=false and cli.reportOnly is false.",
+        "runRepoAudit() does NOT call detectClawpatch() when cli.reportOnly is true — report-only mode reads `.kode-review/findings/` directly with no install gate."
+      ]
+    },
+    {
+      "id": "AC-24",
+      "title": "clawpatch CLI wrappers — map / doctor / passthrough",
+      "description": "src/repo-audit/clawpatch-cli.ts wraps the external `clawpatch` binary via the project's execa-based runCommand (no shell) for the `map`, `doctor`, and generic passthrough operations the orchestrator needs.",
+      "impacted_modules": ["src/repo-audit/clawpatch-cli.ts", "src/repo-audit/orchestrator.ts"],
+      "acceptance_criteria": [
+        "runClawpatchMap(repoRoot) invokes `clawpatch map` with cwd set to repoRoot and returns { exitCode, stdout, stderr } from the underlying runCommand.",
+        "runClawpatchMap(repoRoot, { force: true }) appends `--force` as the second argv token (after `map`).",
+        "runClawpatchMap(repoRoot, { force: false }) does NOT append `--force`.",
+        "runClawpatchDoctor(repoRoot) invokes `clawpatch doctor --json` with cwd set to repoRoot.",
+        "runClawpatchDoctor(repoRoot, { provider, model }) appends `--provider <provider>` and/or `--model <model>` when those options are defined and omits them when undefined.",
+        "runClawpatchDoctor() returns payload=<parsed JSON> when stdout parses as JSON, and payload=null when stdout is not valid JSON (the binary may be broken).",
+        "runClawpatch(repoRoot, args) invokes `clawpatch <args...>` verbatim and returns the same { exitCode, stdout, stderr } shape.",
+        "runRepoAudit() throws an Error containing 'clawpatch map failed' and the captured stderr when runClawpatchMap returns a non-zero exitCode.",
+        "runRepoAudit() forwards cli.remap to runClawpatchMap as { force: cli.remap } — `--remap` on the CLI translates to `--force` on `clawpatch map`."
+      ]
+    },
+    {
+      "id": "AC-25",
+      "title": "Feature record reading — read-only consumer of .clawpatch/features/",
+      "description": "src/repo-audit/features.ts reads `.clawpatch/features/*.json` into validated FeatureRecord[] and never writes to `.clawpatch/`. Malformed files are surfaced as warnings, not fatal errors.",
+      "impacted_modules": ["src/repo-audit/features.ts", "src/repo-audit/types.ts"],
+      "acceptance_criteria": [
+        "clawpatchFeaturesDir(repoRoot) returns `<repoRoot>/.clawpatch/features` using path.join (CLAWPATCH_STATE_DIR='.clawpatch', CLAWPATCH_FEATURES_DIR='features').",
+        "readFeatures(repoRoot) returns { features: [], skipped: [] } when `.clawpatch/features/` does not exist (ENOENT), so callers can treat this as 'no features mapped yet'.",
+        "readFeatures(repoRoot) rethrows readdir errors whose code is anything other than 'ENOENT'.",
+        "readFeatures(repoRoot) ignores non-`.json` entries in the directory.",
+        "readFeatures(repoRoot) records files with invalid JSON in `skipped` with a 'invalid JSON: ...' reason and emits a logger.warn naming the path — it does NOT throw.",
+        "readFeatures(repoRoot) records files that fail FeatureRecordSchema validation in `skipped` with the Zod issue messages joined by '; ' and emits a logger.warn — it does NOT throw.",
+        "readFeatures(repoRoot) accepts FeatureRecord JSON whose `schemaVersion` differs from SUPPORTED_FEATURE_SCHEMA_VERSION (=1) but emits a logger.warn telling the user to upgrade kode-review; the record is still returned in `features`.",
+        "readFeatures(repoRoot) returns features sorted by `featureId` (a.featureId.localeCompare(b.featureId)) so iteration order is deterministic across runs.",
+        "FeatureRecordSchema rejects payloads missing `featureId`, `title`, `summary`, `kind`, `source`, `confidence`, `status`, `createdAt`, or `updatedAt`.",
+        "FeatureRecordSchema defaults `entrypoints`, `ownedFiles`, `contextFiles`, `tests`, `tags`, and `trustBoundaries` to [] when absent in the source JSON (forward-compat cushion).",
+        "FeatureRecordSchema.kind is constrained to the FEATURE_KINDS enum (12 values including 'cli-command', 'route', 'ui-flow', 'service', 'job', 'agent-tool', 'library', 'config', 'release', 'test-suite', 'infra', 'unknown').",
+        "pendingFeatures(features) returns features whose status is 'pending' as-is; for status === 'error' it emits a logger.warn naming the featureId and still includes the feature in the result (retry-on-rerun policy); features in any other status are excluded.",
+        "No code path in src/repo-audit/features.ts (or any other src/repo-audit/* module) writes inside `.clawpatch/`."
+      ]
+    },
+    {
+      "id": "AC-26",
+      "title": "Persona dispatch — trust boundaries + kind → reviewer set",
+      "description": "selectPersonas(feature) maps a FeatureRecord's `trustBoundaries` and `kind` to the built-in reviewer set in a stable order. resolvePersonasWithOverride layers an explicit `--reviewer` override on top.",
+      "impacted_modules": ["src/repo-audit/persona-dispatch.ts"],
+      "acceptance_criteria": [
+        "selectPersonas always includes 'general' as the first element of the returned array.",
+        "selectPersonas appends 'architect' when feature.kind is 'library' or 'service' (ARCHITECT_KINDS) and not for any other kind.",
+        "selectPersonas appends 'security' when feature.trustBoundaries contains any of: 'user-input', 'network', 'serialization', 'external-api', 'auth', 'permissions', 'secrets' (SECURITY_BOUNDARIES).",
+        "selectPersonas does NOT append 'security' for features whose only trust boundaries are 'filesystem', 'database', 'process-exec', or 'concurrency' alone — those are not auto-triggers.",
+        "selectPersonas appends 'test-auditor' when feature.kind === 'test-suite' OR feature.tests.length > 0.",
+        "selectPersonas never auto-includes 'doc-reviewer' — doc review must be requested explicitly via `--reviewer doc-reviewer`.",
+        "selectPersonas returns personas in the fixed order: general → architect → security → test-auditor (matching the order downstream rendering uses to group findings).",
+        "resolvePersonasWithOverride(feature, []) returns selectPersonas(feature) verbatim — an empty override means auto-dispatch.",
+        "resolvePersonasWithOverride(feature, ['security','general','security']) returns ['security','general'] — the override is used verbatim, deduplicated, and order-preserving.",
+        "The orchestrator's call site treats cli.reviewers === undefined OR cli.reviewers deeply-equals ['general'] (the CLI default) as 'no override' — in those cases the override array passed to resolvePersonasWithOverride is []."
+      ]
+    },
+    {
+      "id": "AC-27",
+      "title": "Feature-review prompt construction with file caps",
+      "description": "buildFeatureReviewPrompt produces a (systemSuffix, userPrompt) pair that re-targets the persona's anti-hallucination rules from 'the diff' to 'owned/context files in this prompt or reachable via tools', and inlines up to MAX_OWNED_FILES_IN_PROMPT owned files and MAX_CONTEXT_FILES_IN_PROMPT context files. Files past the cap are referenced by path so the agent can fetch them with read_file.",
+      "impacted_modules": ["src/repo-audit/prompts.ts", "src/repo-audit/types.ts"],
+      "acceptance_criteria": [
+        "REPO_AUDIT_DEFAULTS.MAX_OWNED_FILES_IN_PROMPT equals 12.",
+        "REPO_AUDIT_DEFAULTS.MAX_CONTEXT_FILES_IN_PROMPT equals 24.",
+        "FEATURE_REVIEW_MODE_SUFFIX begins with the literal heading '## FEATURE REVIEW MODE (added by --scope repo)'.",
+        "buildFeatureReviewPrompt returns systemSuffix === FEATURE_REVIEW_MODE_SUFFIX verbatim.",
+        "buildFeatureReviewPrompt's userPrompt contains a '<feature_metadata>' block with the feature's featureId, title, kind, confidence, and summary.",
+        "buildFeatureReviewPrompt's userPrompt emits a 'trust_boundaries:' line iff feature.trustBoundaries.length > 0; emits a 'tags:' line iff feature.tags.length > 0.",
+        "buildFeatureReviewPrompt inlines the first maxOwnedFiles (default 12) of feature.ownedFiles inside `<file path=\"...\" reason=\"...\">` blocks with a fenced code block whose language hint is derived from the file extension via langHintFromPath; remaining owned files appear under a '### Additional owned files (use read_file to view)' header as `- <path>  (<reason>)` bullets.",
+        "buildFeatureReviewPrompt inlines the first maxContextFiles (default 24) of feature.contextFiles the same way and lists the remainder under '### Additional context files (use read_file to view)'.",
+        "buildFeatureReviewPrompt populates `inlinedFiles` with the paths whose bodies were embedded and `deferredFiles` with the paths that were over the cap or whose readFileSafe returned null.",
+        "When readFileSafe returns null for an owned/context file (missing, traversal-rejected), buildFeatureReviewPrompt emits a self-closing `<file ... deferred=\"true\" />` placeholder and adds the path to deferredFiles — it does NOT throw and does NOT inline a stale body.",
+        "buildFeatureReviewPrompt emits a '## Tests' section with a `<tests>` block iff feature.tests.length > 0.",
+        "buildFeatureReviewPrompt ends with a '## Output Instructions' section whose body names the per-feature cap from REPO_AUDIT_DEFAULTS.MAX_FINDINGS_PER_FEATURE (=10).",
+        "langHintFromPath maps 'ts'→'typescript', 'tsx'→'tsx', 'py'→'python', 'go'→'go', 'rs'→'rust', and returns '' for unknown extensions."
+      ]
+    },
+    {
+      "id": "AC-28",
+      "title": "kode-agent engine wiring — runAgenticReview honors systemPrompt + userPromptOverride",
+      "description": "reviewFeatureWithAgent builds the feature prompt, composes the persona system prompt with FEATURE_REVIEW_MODE_SUFFIX, and calls the shared runAgenticReview loop with overrides so the same agent path powers both diff-scope and repo-scope reviews. Findings are capped at MAX_FINDINGS_PER_FEATURE.",
+      "impacted_modules": ["src/repo-audit/engines/kode-agent.ts", "src/review/engine.ts"],
+      "acceptance_criteria": [
+        "reviewFeatureWithAgent calls buildFeatureReviewPrompt({ feature, repoRoot }) and forwards the resulting userPrompt as runAgenticReview's `userPromptOverride`.",
+        "reviewFeatureWithAgent composes systemPrompt as `loadReviewerSystemPrompt(persona) + '\\n\\n' + built.systemSuffix` and passes it as runAgenticReview's `systemPrompt`.",
+        "reviewFeatureWithAgent passes the placeholder diffContent='' and context=`repo-scope feature review: <featureId>` to runAgenticReview (the diff-mode inputs are unused when userPromptOverride is set, but the runAgenticReview signature requires them).",
+        "reviewFeatureWithAgent forwards repoRoot, repoUrl, branch, indexerUrl, model, maxIterations, and timeoutSec (as `timeout`) to runAgenticReview verbatim.",
+        "runAgenticReview's prompt resolution uses options.userPromptOverride as the user prompt when defined, falling back to buildAgenticPrompt otherwise (engine.ts line ~304).",
+        "runAgenticReview's system prompt resolution uses options.systemPrompt when defined, falling back to AGENTIC_SYSTEM_PROMPT otherwise (engine.ts line ~321).",
+        "runReview (non-agentic) also honors options.systemPrompt (passed as systemPromptOverride to the underlying session) and options.userPromptOverride (engine.ts lines ~255 and ~274) — the override surface is shared by both engines.",
+        "reviewFeatureWithAgent caps the returned findings at REPO_AUDIT_DEFAULTS.MAX_FINDINGS_PER_FEATURE (=10) via result.findings.slice(0, cap) — defense in depth against a chatty model that ignores the prompt's cap.",
+        "reviewFeatureWithAgent returns a ReviewFeatureResult containing feature, persona, capped findings, raw content, usage, truncated, and truncationReason — preserving the truncation flag from runAgenticReview."
+      ]
+    },
+    {
+      "id": "AC-29",
+      "title": "State persistence — atomic finding writes, O_EXCL locks with stale reclamation, run history",
+      "description": "src/repo-audit/state.ts owns `.kode-review/`. Findings are written via temp-write-rename so partial files are never observed. Feature locks use O_EXCL create with a TOCTOU-safe rename-over-stale reclamation path. Run history is appended one JSON line at a time.",
+      "impacted_modules": ["src/repo-audit/state.ts", "src/repo-audit/types.ts"],
+      "acceptance_criteria": [
+        "stateDir(repoRoot), findingsDir(repoRoot), and locksDir(repoRoot) resolve to `<repoRoot>/.kode-review`, `<repoRoot>/.kode-review/findings`, and `<repoRoot>/.kode-review/locks` respectively (STATE_DIR_NAME='.kode-review', FINDINGS_DIR='findings', LOCKS_DIR='locks').",
+        "ensureStateDirs(repoRoot) creates both findings/ and locks/ with `{ recursive: true }` and is idempotent.",
+        "resetState(repoRoot) removes the entire `.kode-review/` tree with `{ recursive: true, force: true }`.",
+        "computeFindingId(featureId, file, lineStart, title) returns the first 24 hex chars of sha1(`${featureId}\\0${file}\\0${lineStart}\\0${title}`) — stable across runs and not dependent on time or random input.",
+        "writeFinding(repoRoot, record) writes JSON.stringify(payload, null, 2) + '\\n' to a temp file named `<path>.tmp.<pid>.<8-hex>` and renames it over `<findingId>.json` so partial files are never visible to readers.",
+        "readFinding(repoRoot, findingId) returns null when the file does not exist (ENOENT) and parses with RepoFindingRecordSchema otherwise.",
+        "listFindings(repoRoot) returns [] when findings/ does not exist (ENOENT), skips non-`.json` entries, and logs a warn for files that fail to parse without throwing.",
+        "acquireFeatureLock(repoRoot, featureId, runId) first attempts writeFile with `flag: 'wx'` (O_EXCL create) and returns LockInfo on success.",
+        "acquireFeatureLock returns null when the lock file exists and its mtime is newer than KODE_REVIEW_LOCK_STALE_MS (defaults to 30 minutes = 30*60*1000 ms).",
+        "acquireFeatureLock atomically reclaims a stale lock by writing to `<path>.steal.<pid>.<8-hex>` and renaming it over the lock path — two concurrent reclamation attempts cannot both succeed because POSIX rename is atomic.",
+        "acquireFeatureLock honors the KODE_REVIEW_LOCK_STALE_MS environment variable when it parses to a positive integer; non-numeric or non-positive values fall back to the 30-minute default.",
+        "releaseFeatureLock(repoRoot, featureId) unlinks the lock file and swallows any error (best-effort cleanup).",
+        "Feature ids that contain filesystem-unsafe characters are encoded for the lock filename via encodeFeatureIdForFs: replace each non-[A-Za-z0-9._-] character with '_', truncate to 200 chars, then append a `.` and the first 8 hex chars of sha1(featureId) — so two distinct long ids cannot collide on the truncated prefix.",
+        "appendRunHistory(repoRoot, entry) appends `JSON.stringify(entry) + '\\n'` to `<stateDir>/run-history.jsonl` using `flag: 'a'`; the orchestrator records one entry per run with runId, startedAt, endedAt, engine, featuresReviewed, findingsEmitted, and (when present) model + since.",
+        "newRunId() returns a string starting with the literal prefix 'run-' followed by Date.now() and an 8-hex slice of randomUUID()."
+      ]
+    },
+    {
+      "id": "AC-30",
+      "title": "Structured suppression filter for Finding[] arrays",
+      "description": "filterSuppressedStructured drops findings whose source location is annotated with `kode-review: ignore` or `kode-review: ignore-file`. It shares readFileSafe and shouldSuppressAtLine with the diff-scope filter so the two implementations cannot drift, and caches per-file reads within a single call.",
+      "impacted_modules": ["src/repo-audit/suppressions-structured.ts", "src/review/suppressions.ts"],
+      "acceptance_criteria": [
+        "filterSuppressedStructured(findings, repoRoot) drops a finding when shouldSuppressAtLine(content, finding.lineStart) returns true for the finding's file.",
+        "filterSuppressedStructured caches readFileSafe results in a per-call Map keyed by finding.file — the same file is read at most once per invocation.",
+        "filterSuppressedStructured keeps a finding whose file cannot be read (readFileSafe returns null due to deletion, permission error, or path-traversal rejection) — never silently drop on file-access failure.",
+        "filterSuppressedStructured returns { kept, suppressedCount, byFile } where byFile is a Map<string, number> of per-file suppression counts for logging.",
+        "filterSuppressedStructured imports readFileSafe and shouldSuppressAtLine from '../review/suppressions.js' — the marker grammar and path-guarded read are shared with the diff-scope filter so behavior cannot drift.",
+        "The orchestrator runs filterSuppressedStructured only when cli.noSuppressions is false; with --no-suppressions, kept = result.findings verbatim and totalSuppressed = 0.",
+        "The orchestrator's per-feature suppression count is added to RunRepoAuditResult.findingsSuppressed and logged in yellow with the literal phrase 'kode-review: ignore markers' when suppressedThisRun > 0."
+      ]
+    },
+    {
+      "id": "AC-31",
+      "title": "--since <ref> feature filter via three-dot git diff",
+      "description": "filterFeaturesBySince reduces the feature set to those whose `ownedFiles[].path` intersects the files changed in `<ref>...HEAD`. Context files are deliberately not used for matching — context is a hint, not a re-review trigger.",
+      "impacted_modules": ["src/repo-audit/feature-filter.ts", "src/repo-audit/orchestrator.ts"],
+      "acceptance_criteria": [
+        "touchedFilesSince(repoRoot, ref) invokes `git diff --name-only <ref>...HEAD` with cwd=repoRoot via the project's runCommand wrapper (no shell).",
+        "touchedFilesSince throws an Error containing 'git diff --name-only <ref>...HEAD failed' and the captured stderr when git exits non-zero — callers must surface this, not silently fall back to 'all features'.",
+        "touchedFilesSince splits stdout on '\\n', trims each line, and filters out empty strings to produce the touched-file list.",
+        "filterFeaturesBySince returns { matched: [], touchedFiles: [] } when git reports zero touched files.",
+        "filterFeaturesBySince returns only features that have at least one ownedFile whose `path` is in the touched-file Set; features matched purely on contextFiles are excluded.",
+        "Features with zero ownedFiles never match — they have no surface to touch under the ownership rule.",
+        "The orchestrator applies the --since filter BEFORE the 'already reviewed' filter so users can combine `--since <ref>` with `--remap` to re-review touched features.",
+        "The orchestrator logs the literal pattern `--since <ref>: <N> file(s) changed, <M> feature(s) match` after running the filter."
+      ]
+    },
+    {
+      "id": "AC-32",
+      "title": "Repo-audit report renderer — text / markdown / json with Feature × Severity matrix",
+      "description": "renderRepoReport formats RepoFindingRecord[] in text, markdown, or json. text and markdown emit a Feature × Severity matrix sorted by CRITICAL count, then HIGH, then total — so reviewers can see at-a-glance which feature is in worst shape.",
+      "impacted_modules": ["src/repo-audit/report.ts"],
+      "acceptance_criteria": [
+        "renderRepoReport({ records, format: 'json' }) returns a JSON string whose root has `version: 1`, `generatedAt`, `total`, `byStatus`, `bySeverity`, and `findings[]` fields.",
+        "The JSON `bySeverity` rollup counts only records whose `status === 'open'`; closed findings are excluded from the severity tally.",
+        "Each `findings[]` entry in the JSON projection contains findingId, featureId, persona, status, severity, category, confidence, title, file, lineStart, lineEnd, evidence, problem, recommendation, createdByRunId, createdAt, updatedAt — and no other fields.",
+        "renderRepoReport({ format: 'text' }) emits the literal header line '  Repo Audit Report' between two box-drawing rule lines.",
+        "Text and markdown headers include 'Total findings', 'Open', and 'Closed' counters; when suppressionsDisabled is true, they also include 'Suppressions: DISABLED (--no-suppressions)' (text) or '`--no-suppressions`' (markdown).",
+        "When records.length === 0, text output ends with 'No findings on disk. Run without --report-only to produce a review.' and markdown ends with '_No findings on disk. Run without `--report-only` to produce a review._' — and neither emits a Feature × Severity matrix.",
+        "Text renderer emits an 'Open by severity:' rollup listing all four SEVERITIES (CRITICAL, HIGH, MEDIUM, LOW) with their counts, in that fixed order.",
+        "buildFeatureRows sorts features by CRITICAL count desc, then HIGH desc, then total desc — the worst-impacted features always appear first in the matrix.",
+        "formatFeatureSeverityTable renders the matrix with column widths sized to the longest featureId and a `feature | CRIT | HIGH | MED | LOW | TOTAL` header.",
+        "formatFeatureSeverityMarkdownTable renders the matrix as a markdown table with right-aligned numeric columns (`---------:` separator).",
+        "writeRepoReport({ outputFile, quiet }) writes the rendered content to outputFile (mkdir -p its directory first) and additionally prints to stdout iff quiet is not true."
+      ]
+    },
+    {
+      "id": "AC-33",
+      "title": "Repo-audit orchestrator pipeline — install gate → map → filter → review → persist",
+      "description": "runRepoAudit ties install detection, clawpatch mapping, feature reading, since-filtering, already-reviewed skipping, persona dispatch, kode-agent review, structured suppression, finding persistence, and run-history recording into one pipeline. --report-only short-circuits after install gate; --revalidate is rejected with a clear message until its sibling path lands.",
+      "impacted_modules": ["src/repo-audit/orchestrator.ts"],
+      "acceptance_criteria": [
+        "runRepoAudit throws an Error containing '--revalidate is not yet implemented in this build' when cli.revalidate is true — never silently runs a full audit in its place.",
+        "runRepoAudit returns { featuresReviewed: 0, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: <listFindings count> } and never calls runClawpatchMap when cli.reportOnly is true.",
+        "runRepoAudit passes { force: cli.remap } to runClawpatchMap — `--remap` is the only path that forces a re-map.",
+        "runRepoAudit short-circuits with featuresReviewed=0 and a 'clawpatch produced no features for this repo' warn when readFeatures returns an empty features array.",
+        "runRepoAudit emits a 'Skipped <N> malformed feature file(s).' warn when readFeatures.skipped is non-empty.",
+        "runRepoAudit builds the 'already reviewed' set with a single listFindings() call (not per-candidate hasFindingsForFeature) to keep startup O(N+M) rather than O(N*M).",
+        "runRepoAudit's already-reviewed filter is bypassed (set is empty) when cli.remap is true — a remap may have re-shaped features, so prior findings are treated as stale.",
+        "runRepoAudit reviews each pending feature once per persona returned by resolvePersonasWithOverride; for each finding it writes a RepoFindingRecord with schemaVersion=1, status='open', createdByRunId=<runId>, and createdAt/updatedAt set to the current ISO timestamp.",
+        "runRepoAudit writes each finding via writeFinding (atomic temp-write-rename through state.ts) — never bypasses the atomic write path.",
+        "runRepoAudit appends exactly one run-history entry per invocation via appendRunHistory with engine='kode-agent', the runId from newRunId(), startedAt set before the review loop, endedAt set after, plus featuresReviewed, findingsEmitted, model, and since.",
+        "runRepoAudit logs a yellow warn 'Suppressed <N> finding(s) via kode-review: ignore markers' once per persona pass when suppressedThisRun > 0.",
+        "runRepoAudit logs a warn including the persona name when reviewFeatureWithAgent returns truncated=true.",
+        "Module documentation and code enforce the state boundary: src/repo-audit/* writes only into `.kode-review/` and never into `.clawpatch/`; clawpatch owns `.clawpatch/` and is treated as read-only by features.ts."
+      ]
+    },
+    {
+      "id": "AC-34",
+      "title": "CLI surface for --scope repo — engine / remap / jobs / since / report-only / revalidate / clawpatch-compat",
+      "description": "src/cli/args.ts wires the repo-scope flags into CliOptions, validates them, and rejects incoherent combinations (--scope repo + --pr; --report-only + --revalidate).",
+      "impacted_modules": ["src/cli/args.ts"],
+      "acceptance_criteria": [
+        "ReviewScope includes the literal 'repo'; createProgram registers `-s, --scope <scope>` with valid values 'local', 'pr', 'both', 'auto', 'repo' and default 'auto'.",
+        "createProgram registers --engine, --remap, --jobs, --since, --report-only, --revalidate, and --clawpatch-compat under the 'Repo-scope audit' option group.",
+        "--engine defaults to 'kode-agent'; parseArgs throws an Error containing 'Invalid --engine' when the value is anything other than 'kode-agent' or 'clawpatch'.",
+        "--jobs defaults to '4'; parseArgs throws an Error containing 'Invalid --jobs' when the parsed integer is NaN, < 1, or > 32.",
+        "--remap, --report-only, --revalidate, and --clawpatch-compat each default to false in the returned CliOptions when the flag is not passed.",
+        "--since stores the raw ref string in CliOptions.since (no validation at parse time — git resolves it at run time in touchedFilesSince).",
+        "parseArgs throws an Error containing '--scope repo cannot be combined with --pr' when opts.scope === 'repo' and opts.pr is set (PR scope is diff-scoped and incompatible with whole-repo scope).",
+        "parseArgs throws an Error containing '--report-only and --revalidate cannot be combined' when both flags are true — their intents are contradictory (skip all model calls vs. make them).",
+        "The help footer mentions `kode-review -s repo`, `kode-review -s repo --since main`, and `kode-review -s repo --report-only` so users discover the repo-scope surface."
+      ]
     }
   ]
 }

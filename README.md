@@ -92,7 +92,7 @@ kode-review --scope pr --pr 123 --format json  # JSON output
 
 | Flag | Description |
 |------|-------------|
-| `-s, --scope <scope>` | Review scope: `local`, `pr`, `both`, `auto` (default: auto) |
+| `-s, --scope <scope>` | Review scope: `local`, `pr`, `both`, `auto`, `repo` (default: auto) |
 | `-p, --pr <number>` | Specific PR/MR number to review |
 | `-q, --quiet` | Minimal output (agent-friendly) |
 | `-f, --format <format>` | Output format: `text`, `json`, `markdown` (default: text) |
@@ -104,6 +104,99 @@ kode-review --scope pr --pr 123 --format json  # JSON output
 | `--no-agentic` | Diff-only review — disable tool access (faster, cheaper) |
 | `--max-iterations <n>` | Max tool call iterations for agent mode (default: 10) |
 | `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 600, max: 600) |
+
+---
+
+## Whole-Codebase Audit (`--scope repo`)
+
+Point kode-review at a repository and find bugs across the whole codebase — not just a diff. Inspired by [clawpatch](https://github.com/openclaw/clawpatch).
+
+**Architecture:** clawpatch-powered mapper, kode-review-powered reviewer. clawpatch decomposes the repo into semantic feature slices; kode-review's agentic engine reviews each slice with persona dispatch driven by the feature's trust boundaries.
+
+### Requirements
+
+- **Node.js ≥ 22** (clawpatch's minimum).
+- **`clawpatch` CLI on PATH.** kode-review prints install instructions tailored to your package manager on first run. No auto-install.
+- **pi configured** as usual (provider/model/auth).
+
+```bash
+# kode-review will print the install command if it's missing.
+# Recommended: install with your project's package manager.
+bun add -g clawpatch        # bun
+pnpm add -g clawpatch       # pnpm
+npm install -g clawpatch    # npm
+
+# Verify
+kode-review --doctor
+```
+
+### Quick start
+
+```bash
+# First run: clawpatch maps the repo, kode-review reviews every pending feature.
+kode-review --scope repo
+
+# Re-run is fast: only un-reviewed features are touched.
+kode-review --scope repo
+
+# Force a re-map (e.g. after a major refactor) and re-review.
+kode-review --scope repo --remap
+
+# Review only features whose owned files changed since a git ref.
+kode-review --scope repo --since main
+
+# Render the existing findings — no model calls.
+kode-review --scope repo --report-only --format markdown -o audit.md
+```
+
+### How it works
+
+1. **Map.** kode-review spawns `clawpatch map`, which decomposes the repo into `.clawpatch/features/<id>.json` records (JS/TS/Python/Go/Rust/Java/Kotlin/Next.js/etc.). clawpatch auto-initializes its state on first use.
+2. **Filter.** Features already reviewed (with findings on disk) are skipped unless `--remap` is set. `--since <ref>` further narrows to features whose owned files changed.
+3. **Persona dispatch.** Each feature's `trustBoundaries` and `kind` pick which reviewers run:
+   - `general` always runs.
+   - `architect` runs for `library` / `service` kinds.
+   - `security` runs for features crossing `user-input`, `network`, `auth`, `permissions`, `secrets`, `serialization`, or `external-api` boundaries.
+   - `test-auditor` runs for `test-suite` kinds and any feature with tests attached.
+   - `doc-reviewer` never auto-runs (use `--reviewer doc-reviewer` explicitly).
+4. **Review.** Each persona runs through the same agentic engine as diff scope (`runAgenticReview`) with feature-shaped prompts and access to read_file / search_code / find_definitions / find_usages / get_call_graph / get_impact.
+5. **Persist.** Findings are written atomically to `.kode-review/findings/<findingId>.json`. Re-runs deduplicate via stable IDs.
+6. **Report.** The orchestrator prints a Feature × Severity matrix plus per-finding detail in text / markdown / json.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--engine <name>` | Repo-audit engine: `kode-agent` (default). |
+| `--remap` | Force `clawpatch map --force` and re-review every feature. |
+| `--jobs <n>` | (reserved) Worker concurrency. v1 is sequential; CLI accepts the flag. |
+| `--since <ref>` | Only review features whose owned files changed since `<ref>`. |
+| `--report-only` | Skip review; render findings already on disk. |
+| `--reviewer <name>` | Override auto-dispatch (e.g. `--reviewer security`, `--reviewer all`). |
+| `--no-suppressions` | Disable `kode-review: ignore` markers in source. |
+| `-f, --format <format>` | `text` / `markdown` / `json`. |
+| `-o, --output-file <path>` | Write report to file. |
+| `--ci --fail-on critical` | Exit non-zero on open CRITICAL findings. |
+
+### State
+
+| Path | Owner | Purpose |
+|------|-------|---------|
+| `.clawpatch/features/` | clawpatch | Feature decomposition (mapping output). Read-only consumer. |
+| `.clawpatch/config.json`, `project.json` | clawpatch | Project metadata. |
+| `.kode-review/findings/<id>.json` | kode-review | Persisted findings (open / fixed / false-positive). |
+| `.kode-review/locks/` | kode-review | Per-feature review locks. |
+| `.kode-review/run-history.jsonl` | kode-review | Append-only run log. |
+
+Add both to `.gitignore`. The `.kode-review/` directory is per-repo and machine-local.
+
+### Limitations (v1)
+
+- Sequential per-feature review (the `--jobs` flag is accepted but not yet honored).
+- `--engine clawpatch` (use clawpatch's own reviewer for comparison) is planned, not shipped.
+- `--clawpatch-compat` (mirror findings into `.clawpatch/findings/`) is planned, not shipped.
+- `--revalidate` (re-check open findings against current code) is planned, not shipped.
+- Periodic `--watch --scope repo` is planned, not shipped.
 
 ---
 

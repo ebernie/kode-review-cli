@@ -38,7 +38,15 @@ export interface FilterResult {
   summary: ReviewSummary
 }
 
-async function readFileSafe(repoRoot: string, relPath: string): Promise<string | null> {
+/**
+ * Read a file at `repoRoot/relPath`, returning null on any error (missing
+ * file, traversal attempt, permission denied). Path is sanitized through the
+ * repo's path-guard so symlink-out-of-repo cannot leak file presence.
+ *
+ * Exported so the structured suppression filter in src/repo-audit/ can share
+ * the same safe-read semantics without re-implementing the guard.
+ */
+export async function readFileSafe(repoRoot: string, relPath: string): Promise<string | null> {
   try {
     // assertWithinRepo returns a path relative to repoRoot when the input is
     // safe (or throws on traversal). Use node:path.join so trailing slashes
@@ -50,7 +58,12 @@ async function readFileSafe(repoRoot: string, relPath: string): Promise<string |
   }
 }
 
-function shouldSuppress(content: string, line: number): boolean {
+/**
+ * True if a finding referencing the given (content, 1-based line) should be
+ * suppressed by `kode-review: ignore` markers. Exported for reuse by the
+ * structured filter in src/repo-audit/.
+ */
+export function shouldSuppressAtLine(content: string, line: number): boolean {
   if (hasIgnoreFileMarker(content)) return true
   const lines = content.split('\n')
   // 1-based line indexing. Marker on `line` suppresses `line`; marker on
@@ -100,7 +113,7 @@ export async function filterSuppressedFindings(
       fileCache.set(path, fileContent)
     }
 
-    if (fileContent && shouldSuppress(fileContent, line)) {
+    if (fileContent && shouldSuppressAtLine(fileContent, line)) {
       dropped.push(block)
       decrementSeverity(severity, counts)
       suppressedCount += 1

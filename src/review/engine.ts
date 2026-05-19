@@ -2,9 +2,13 @@
  * Review engine — runs a code review through a pi `AgentSession`.
  *
  * Two public entry points:
- * - `runReview`: text-only review (no tools, no system prompt override).
- * - `runAgenticReview`: registers kode-review's read-only tools and uses
- *   the agentic system prompt so the model can explore the codebase.
+ * - `runReview`: text-only review (no tools). Honors `options.systemPrompt`
+ *   and `options.userPromptOverride` for callers that want to substitute
+ *   the role/body (persona dispatch).
+ * - `runAgenticReview`: registers kode-review's read-only tools and runs
+ *   the agentic loop. Defaults to the agentic system prompt + diff prompt
+ *   builder, but also honors `options.systemPrompt` and
+ *   `options.userPromptOverride` (used by --scope repo persona review).
  *
  * Both share the same underlying lifecycle (auth gate, session creation,
  * event collection, response extraction, dispose).
@@ -281,18 +285,14 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
 
 /**
  * Run an agentic code review with kode-review tools registered.
+ *
+ * `systemPrompt` and `userPromptOverride` on the options are honored when
+ * provided: callers (personas, repo-scope feature review) can substitute a
+ * different role + body while keeping the tool-enabled agent loop.
  */
 export async function runAgenticReview(
   options: AgenticReviewOptions,
 ): Promise<AgenticReviewResult> {
-  const promptOptions: AgenticPromptOptions = {
-    diffContent: options.diffContent,
-    context: options.context,
-    prMrInfo: options.prMrInfo,
-    prDescriptionSummary: options.prDescriptionSummary,
-    projectStructureContext: options.projectStructureContext,
-  }
-
   const maxIterations = options.maxIterations ?? DEFAULT_AGENTIC_MAX_ITERATIONS
   const timeoutSec = options.timeout ?? DEFAULT_AGENTIC_TIMEOUT_SEC
 
@@ -300,11 +300,25 @@ export async function runAgenticReview(
     logger.warn('Indexer URL not provided — only `read_file` will be available to the agent.')
   }
 
+  let userPrompt: string
+  if (options.userPromptOverride !== undefined) {
+    userPrompt = options.userPromptOverride
+  } else {
+    const promptOptions: AgenticPromptOptions = {
+      diffContent: options.diffContent,
+      context: options.context,
+      prMrInfo: options.prMrInfo,
+      prDescriptionSummary: options.prDescriptionSummary,
+      projectStructureContext: options.projectStructureContext,
+    }
+    userPrompt = buildAgenticPrompt(promptOptions)
+  }
+
   const outcome = await runWithPi({
-    userPrompt: buildAgenticPrompt(promptOptions),
+    userPrompt,
     modelPattern: options.model,
     cwd: options.repoRoot,
-    systemPromptOverride: AGENTIC_SYSTEM_PROMPT,
+    systemPromptOverride: options.systemPrompt ?? AGENTIC_SYSTEM_PROMPT,
     toolContext: {
       repoRoot: options.repoRoot,
       repoUrl: options.repoUrl,

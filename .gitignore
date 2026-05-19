@@ -38,3 +38,5 @@ build/
 
 # OpenCode SDK
 config.json
+
+.clawpatch/
