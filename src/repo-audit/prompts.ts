@@ -224,26 +224,27 @@ export async function buildFeatureReviewPrompt(
   parts.push('## Feature Under Review')
   parts.push('')
   parts.push('<feature_metadata>')
-  parts.push(`featureId: ${feature.featureId}`)
-  parts.push(`title: ${feature.title}`)
-  parts.push(`kind: ${feature.kind}`)
-  parts.push(`confidence: ${feature.confidence}`)
-  parts.push(`summary: ${feature.summary}`)
+  parts.push(`featureId: ${escXmlAttr(feature.featureId)}`)
+  parts.push(`title: ${escXmlAttr(feature.title)}`)
+  parts.push(`kind: ${escXmlAttr(feature.kind)}`)
+  parts.push(`confidence: ${escXmlAttr(feature.confidence)}`)
+  parts.push(`summary: ${escXmlAttr(feature.summary)}`)
   if (feature.entrypoints.length > 0) {
     parts.push('entrypoints:')
     for (const e of feature.entrypoints) {
-      const bits = [e.path]
-      if (e.symbol) bits.push(`symbol=${e.symbol}`)
-      if (e.route) bits.push(`route=${e.route}`)
-      if (e.command) bits.push(`command=${e.command}`)
+      const bits = [escXmlAttr(e.path)]
+      if (e.symbol) bits.push(`symbol=${escXmlAttr(e.symbol)}`)
+      if (e.route) bits.push(`route=${escXmlAttr(e.route)}`)
+      if (e.command) bits.push(`command=${escXmlAttr(e.command)}`)
       parts.push(`  - ${bits.join('  ')}`)
     }
   }
   if (feature.trustBoundaries.length > 0) {
+    // trustBoundaries is z.enum-validated against TRUST_BOUNDARIES — safe raw.
     parts.push(`trust_boundaries: ${feature.trustBoundaries.join(', ')}`)
   }
   if (feature.tags.length > 0) {
-    parts.push(`tags: ${feature.tags.join(', ')}`)
+    parts.push(`tags: ${feature.tags.map(escXmlAttr).join(', ')}`)
   }
   parts.push('</feature_metadata>')
   parts.push('')
