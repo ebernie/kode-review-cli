@@ -14,9 +14,71 @@
  * Files that exceed the cap are listed by path with a "use read_file to view"
  * hint — the agent can still reach them, but they don't bloat the seed.
  */
+import { realpath } from 'node:fs/promises'
+import { resolve, sep } from 'node:path'
 import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/index.js'
 import { readFileSafe } from '../review/suppressions.js'
+import { assertWithinRepo } from '../review/tools/path-guard.js'
 import { REPO_AUDIT_DEFAULTS, type FeatureRecord } from './types.js'
+
+/**
+ * XML attribute escaper — guards against feature paths / reasons containing
+ * `"`, `<`, `>`, `&`, `'` from corrupting the `<file path="..." reason="...">`
+ * wrappers we use to delimit inlined file content in the prompt.
+ */
+function escXmlAttr(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+}
+
+/**
+ * Pick a fence delimiter that does not appear as a complete sequence in the
+ * file body. Starts at 3 backticks and grows to longest-run-plus-one whenever
+ * the body contains a longer run. Stops file content (e.g. a markdown README
+ * containing ```code```) from prematurely closing the fence and letting
+ * downstream text become instructions to the model.
+ */
+function pickFence(body: string): string {
+  const runs = body.match(/`{3,}/g)
+  if (!runs) return '```'
+  let longest = 0
+  for (const r of runs) longest = Math.max(longest, r.length)
+  return '`'.repeat(longest + 1)
+}
+
+/**
+ * Read a file for inclusion in the model-bound prompt with strict realpath
+ * verification: a symlink that resolves outside the repository is rejected,
+ * even if the original path was within. This is stricter than `readFileSafe`,
+ * which is appropriate for suppression-marker checking (content is never sent
+ * to the model) but inappropriate here — we must never inline `/etc/passwd`
+ * or similar via a malicious in-repo symlink.
+ */
+async function readFileForPrompt(repoRoot: string, relPath: string): Promise<string | null> {
+  let safe: string
+  try {
+    safe = assertWithinRepo(repoRoot, relPath)
+  } catch {
+    return null
+  }
+  const candidate = resolve(repoRoot, safe)
+  let realFile: string
+  let realRoot: string
+  try {
+    realFile = await realpath(candidate)
+    realRoot = await realpath(repoRoot)
+  } catch {
+    return null
+  }
+  if (realFile !== realRoot && !realFile.startsWith(realRoot + sep)) {
+    return null
+  }
+  return readFileSafe(repoRoot, relPath)
+}
 
 /**
  * Suffix appended to a reviewer's system prompt when invoked in feature mode.
@@ -133,18 +195,21 @@ export async function buildFeatureReviewPrompt(
   parts.push('## Owned Files')
   parts.push('')
   for (const ref of ownedHead) {
-    const body = await readFileSafe(repoRoot, ref.path)
+    const body = await readFileForPrompt(repoRoot, ref.path)
+    const pathAttr = escXmlAttr(ref.path)
+    const reasonAttr = escXmlAttr(ref.reason)
     if (body === null) {
       deferredFiles.push(ref.path)
-      parts.push(`<file path="${ref.path}" reason="${ref.reason}" deferred="true" />`)
+      parts.push(`<file path="${pathAttr}" reason="${reasonAttr}" deferred="true" />`)
       parts.push('')
       continue
     }
     inlinedFiles.push(ref.path)
-    parts.push(`<file path="${ref.path}" reason="${ref.reason}">`)
-    parts.push('```' + langHintFromPath(ref.path))
+    const fence = pickFence(body)
+    parts.push(`<file path="${pathAttr}" reason="${reasonAttr}">`)
+    parts.push(fence + langHintFromPath(ref.path))
     parts.push(body)
-    parts.push('```')
+    parts.push(fence)
     parts.push('</file>')
     parts.push('')
   }
@@ -162,18 +227,21 @@ export async function buildFeatureReviewPrompt(
     parts.push('## Context Files (tests, related code, docs)')
     parts.push('')
     for (const ref of contextHead) {
-      const body = await readFileSafe(repoRoot, ref.path)
+      const body = await readFileForPrompt(repoRoot, ref.path)
+      const pathAttr = escXmlAttr(ref.path)
+      const reasonAttr = escXmlAttr(ref.reason)
       if (body === null) {
         deferredFiles.push(ref.path)
-        parts.push(`<file path="${ref.path}" reason="${ref.reason}" deferred="true" />`)
+        parts.push(`<file path="${pathAttr}" reason="${reasonAttr}" deferred="true" />`)
         parts.push('')
         continue
       }
       inlinedFiles.push(ref.path)
-      parts.push(`<file path="${ref.path}" reason="${ref.reason}">`)
-      parts.push('```' + langHintFromPath(ref.path))
+      const fence = pickFence(body)
+      parts.push(`<file path="${pathAttr}" reason="${reasonAttr}">`)
+      parts.push(fence + langHintFromPath(ref.path))
       parts.push(body)
-      parts.push('```')
+      parts.push(fence)
       parts.push('</file>')
       parts.push('')
     }

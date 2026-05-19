@@ -254,4 +254,61 @@ describe('buildFeatureReviewPrompt — output instructions', () => {
     expect(built.userPrompt).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
     expect(built.userPrompt).toMatch(/REQUIRED.*kode-findings/i)
   })
+
+  it('rejects a symlinked owned file that resolves outside the repo root', async () => {
+    // Set up a "secret" outside the repo and a symlink inside owned files
+    // pointing at it. The hardened reader should refuse to inline its body.
+    const { symlink, mkdtemp: mkdt } = await import('node:fs/promises')
+    const outsideDir = await mkdt(join(tmpdir(), 'kode-review-secrets-'))
+    const outsideFile = join(outsideDir, 'secret.txt')
+    await writeFile(outsideFile, 'SECRET_API_KEY=hunter2')
+    try {
+      await mkdir(join(tmp, 'src'), { recursive: true })
+      await symlink(outsideFile, join(tmp, 'src/leaky.ts'))
+
+      const built = await buildFeatureReviewPrompt({
+        feature: makeFeature({
+          ownedFiles: [{ path: 'src/leaky.ts', reason: 'owned' }],
+        }),
+        repoRoot: tmp,
+      })
+
+      expect(built.inlinedFiles).not.toContain('src/leaky.ts')
+      expect(built.deferredFiles).toContain('src/leaky.ts')
+      expect(built.userPrompt).not.toContain('SECRET_API_KEY')
+      expect(built.userPrompt).not.toContain('hunter2')
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true })
+    }
+  })
+
+  it('escapes XML attribute characters in feature path / reason', async () => {
+    await writeFileAt('src/inner.ts', 'export const x = 1\n')
+    const built = await buildFeatureReviewPrompt({
+      feature: makeFeature({
+        ownedFiles: [
+          { path: 'src/inner.ts', reason: 'malicious "><script>alert(1)</script>' },
+        ],
+      }),
+      repoRoot: tmp,
+    })
+    expect(built.userPrompt).not.toContain('"><script>')
+    expect(built.userPrompt).toContain('&quot;&gt;&lt;script&gt;')
+  })
+
+  it('picks a longer fence when file body contains triple backticks', async () => {
+    const bodyWithFences =
+      'README\n\n```typescript\nconst x = 1\n```\n\nMore prose.\n'
+    await writeFileAt('docs/README.md', bodyWithFences)
+    const built = await buildFeatureReviewPrompt({
+      feature: makeFeature({
+        ownedFiles: [{ path: 'docs/README.md', reason: 'owned' }],
+      }),
+      repoRoot: tmp,
+    })
+    // Body contained a 3-backtick run, so the wrapper must use 4+.
+    expect(built.userPrompt).toContain('````')
+    // Body itself is still present verbatim.
+    expect(built.userPrompt).toContain('const x = 1')
+  })
 })
