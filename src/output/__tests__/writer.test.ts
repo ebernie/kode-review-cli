@@ -227,6 +227,26 @@ describe('writeReviewOutput — terminal-control stripping (stdout)', () => {
     // eslint-disable-next-line no-control-regex
     expect(written).not.toMatch(/\x1b\]/)
     expect(written).not.toContain('PWNED')
+    // Positive: the surrounding text survives — guards against an
+    // over-eager regex that would strip more than the OSC sequence.
+    expect(written).toContain('A')
+    expect(written).toContain('B')
+  })
+
+  it('strips DCS / APC / PM sequences (body included, not just initiator)', async () => {
+    const review: ReviewOutput = {
+      // ESC P ... ESC \  (DCS body); ESC _ ... BEL  (APC body)
+      raw: 'X\x1bPexploit-dcs-body\x1b\\Y\x1b_apc-payload\x07Z',
+      structured: { ...mockStructuredReview, summary: 'X\x1bPexploit-dcs-body\x1b\\Y\x1b_apc-payload\x07Z' },
+    }
+    await writeReviewOutput(review, { format: 'text' })
+    const written = logSpy.mock.calls[0]?.[0] as string
+    expect(written).not.toContain('exploit-dcs-body')
+    expect(written).not.toContain('apc-payload')
+    // Surrounding text survives.
+    expect(written).toContain('X')
+    expect(written).toContain('Y')
+    expect(written).toContain('Z')
   })
 
   it('strips bare BEL (0x07) but preserves \\t \\n \\r', async () => {
@@ -239,6 +259,7 @@ describe('writeReviewOutput — terminal-control stripping (stdout)', () => {
     expect(written).not.toContain('\x07')
     expect(written).toContain('\t')
     expect(written).toContain('\n')
+    expect(written).toContain('\r')
   })
 
   it('preserves raw control chars in file output (no stripping)', async () => {
