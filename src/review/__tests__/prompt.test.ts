@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildReviewPrompt } from '../prompt.js'
+import { buildReviewPrompt, FINDINGS_BLOCK_INSTRUCTIONS } from '../prompt.js'
 import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
 import { CATEGORIES } from '../finding-schema.js'
 
@@ -13,6 +13,11 @@ describe('buildReviewPrompt — schema-strict output', () => {
     const p = buildReviewPrompt(baseOptions)
     expect(p).toContain('```' + FINDINGS_FENCE_TAG)
     expect(p).toMatch(/REQUIRED.*kode-findings/i)
+  })
+
+  it('uses the shared FINDINGS_BLOCK_INSTRUCTIONS constant', () => {
+    const p = buildReviewPrompt(baseOptions)
+    expect(p).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
   })
 
   it('lists the canonical category enum verbatim', () => {

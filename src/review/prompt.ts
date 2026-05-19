@@ -166,6 +166,42 @@ If you spot a problem in retrieved context that is not in the diff, note it in t
 `
 
 /**
+ * The structured-output instruction block that downstream parsers depend on.
+ * Exported so non-diff prompt paths (agentic, repo-scope feature review) can
+ * reuse the exact same schema instructions instead of duplicating them.
+ */
+export const FINDINGS_BLOCK_INSTRUCTIONS = `### Part 2 — Structured findings (REQUIRED)
+
+After the markdown section, you are REQUIRED to emit a fenced code block tagged \`kode-findings\` containing a JSON object that mirrors the issues above. Downstream tooling parses this block; without it the review is incomplete.
+
+\`\`\`kode-findings
+{
+  "findings": [
+    {
+      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      "category": "security" | "correctness" | "performance" | "maintainability" | "concurrency" | "api-contract" | "error-handling" | "testing" | "documentation" | "other",
+      "confidence": "HIGH" | "MEDIUM" | "LOW",
+      "title": "Short one-line title",
+      "file": "path/relative/to/repo.ts",
+      "lineStart": 42,
+      "lineEnd": 48,
+      "evidence": "The exact code or quoted text that demonstrates the issue. REQUIRED. Empty strings are rejected.",
+      "problem": "Why this is wrong.",
+      "recommendation": "What to do instead."
+    }
+  ]
+}
+\`\`\`
+
+Rules for the structured block:
+- Every finding must include \`evidence\` quoting the actual code that proves the issue. No evidence = no finding.
+- \`category\` must be one of the listed values — do not invent new categories ("style", "nit", "readability" → use \`maintainability\`).
+- \`severity\` and \`confidence\` must each be one of the listed values, treated as independent axes.
+- If there are no issues, emit \`{ "findings": [] }\`.
+- Emit exactly ONE \`kode-findings\` block, after the markdown.
+`
+
+/**
  * Review scope section
  */
 const REVIEW_SCOPE = `
@@ -219,36 +255,7 @@ Confidence: HIGH|MEDIUM|LOW
 - **MEDIUM**: Likely an issue, but depends on context you can't fully see
 - **LOW**: Possible issue, but could be intentional or handled elsewhere
 
-### Part 2 — Structured findings (REQUIRED)
-
-After the markdown section, you are REQUIRED to emit a fenced code block tagged \`kode-findings\` containing a JSON object that mirrors the issues above. Downstream tooling parses this block; without it the review is incomplete.
-
-\`\`\`kode-findings
-{
-  "findings": [
-    {
-      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-      "category": "security" | "correctness" | "performance" | "maintainability" | "concurrency" | "api-contract" | "error-handling" | "testing" | "documentation" | "other",
-      "confidence": "HIGH" | "MEDIUM" | "LOW",
-      "title": "Short one-line title",
-      "file": "path/relative/to/repo.ts",
-      "lineStart": 42,
-      "lineEnd": 48,
-      "evidence": "The exact code or quoted text that demonstrates the issue. REQUIRED. Empty strings are rejected.",
-      "problem": "Why this is wrong.",
-      "recommendation": "What to do instead."
-    }
-  ]
-}
-\`\`\`
-
-Rules for the structured block:
-- Every finding must include \`evidence\` quoting the actual code that proves the issue. No evidence = no finding.
-- \`category\` must be one of the listed values — do not invent new categories ("style", "nit", "readability" → use \`maintainability\`).
-- \`severity\` and \`confidence\` must each be one of the listed values, treated as independent axes.
-- If there are no issues, emit \`{ "findings": [] }\`.
-- Emit exactly ONE \`kode-findings\` block, after the markdown.
-`
+${FINDINGS_BLOCK_INSTRUCTIONS}`
 
 /**
  * Enhanced confidence guidelines when semantic context is available
