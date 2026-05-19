@@ -1617,11 +1617,12 @@ async function main(): Promise<void> {
   setDebugMode(process.env.DEBUG === '1')
 
   try {
-    // v1.0 clean-break migration gate. Doctor and version-style commands
-    // (handled by Commander before parseArgs returns) must remain reachable
-    // even on a legacy install — those don't trigger this branch because
-    // they exit during arg parsing.
-    if (needsMigration() && !options.doctor) {
+    // v1.0 clean-break migration gate. --doctor must remain reachable even on
+    // a corrupt or legacy install so it can surface config problems as a
+    // structured diagnostic row. needsMigration() reads the config file and
+    // will throw a SyntaxError on corruption, so we gate the entire call on
+    // !options.doctor rather than only gating the runMigration() branch.
+    if (!options.doctor && needsMigration()) {
       const result = await runMigration({ skipConfirm: options.migrateYes })
       // Always exit after migration (or abort): re-running puts the user in
       // the post-migration state, which is what setup expects.

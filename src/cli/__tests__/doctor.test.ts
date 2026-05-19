@@ -506,6 +506,32 @@ describe('runDiagnostics', () => {
     expect(result.checks.some((c) => c.name === 'Configuration')).toBe(true)
   })
 
+  it('reports a failed Configuration check instead of throwing when getConfig fails at top level', async () => {
+    // This test exercises the top-level getConfig() call in runDiagnostics(), which
+    // is called OUTSIDE the checkConfig() try/catch. A corrupt config JSON makes
+    // getConfig() throw synchronously before any check rows are generated.
+    mockGetConfig.mockImplementation(() => {
+      throw new Error('Invalid config JSON at line 4: unexpected token')
+    })
+
+    // runDiagnostics() must resolve with a result (not reject) even when getConfig throws
+    const result = await runDiagnostics()
+
+    // Configuration row must be present and marked as failed with error details surfaced
+    const configCheck = result.checks.find((c) => c.name === 'Configuration')
+    expect(configCheck).toBeDefined()
+    expect(configCheck!.status).toBe('fail')
+    expect(configCheck!.details).toContain('Invalid config JSON')
+
+    // Other independent checks (Node, Git, etc.) must still run — the full
+    // doctor table should be populated, not just a single error row.
+    expect(result.checks.some((c) => c.name === 'Node.js')).toBe(true)
+    expect(result.checks.some((c) => c.name === 'Git')).toBe(true)
+
+    // failCount must reflect at least the Configuration failure
+    expect(result.failCount).toBeGreaterThanOrEqual(1)
+  })
+
   it('reports ripgrep as pass with version when rg is on PATH', async () => {
     mockExec.mockImplementation(async (cmd: string, args?: string[]) => {
       if (cmd === 'node') return { stdout: 'v20.10.0', exitCode: 0 }

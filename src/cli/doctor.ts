@@ -45,11 +45,21 @@ export interface DiagnosticsResult {
  * Run all diagnostic checks
  */
 export async function runDiagnostics(): Promise<DiagnosticsResult> {
-  const config = getConfig()
+  // Attempt to load config but never let a parse/validation failure crash
+  // the whole doctor run. If getConfig() throws (e.g. corrupt JSON, schema
+  // mismatch), we capture the error message and pass it to checkConfig so
+  // it can surface a structured "fail" row instead of an uncaught exception.
+  let config: ReturnType<typeof getConfig> | null = null
+  let configLoadError: string | null = null
+  try {
+    config = getConfig()
+  } catch (err) {
+    configLoadError = err instanceof Error ? err.message : String(err)
+  }
 
   // Run independent checks in parallel
   const [configCheck, legacyCheck, nodeCheck, gitCheck, piCheck, ghCheck, glabCheck, rgCheck] = await Promise.all([
-    checkConfig(),
+    checkConfig(configLoadError),
     checkLegacyConfig(),
     checkNodeVersion(),
     checkGit(),
@@ -65,12 +75,12 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
   if (legacyCheck) checks.push(legacyCheck)
   checks.push(nodeCheck, gitCheck, piCheck, ghCheck, glabCheck, rgCheck)
 
-  // Conditional checks (depend on config/runtime state)
-  if (config.indexer.enabled || await isDockerAvailable()) {
+  // Conditional checks depend on config values; skip safely when config failed to load.
+  if ((config?.indexer.enabled ?? false) || await isDockerAvailable()) {
     checks.push(await checkDocker())
   }
 
-  if (config.indexer.enabled) {
+  if (config?.indexer.enabled ?? false) {
     checks.push(await checkIndexerContainers())
   }
 
@@ -138,7 +148,18 @@ export function printDiagnostics(result: DiagnosticsResult): void {
 
 // Individual check implementations
 
-async function checkConfig(): Promise<DiagnosticCheck> {
+async function checkConfig(loadError: string | null = null): Promise<DiagnosticCheck> {
+  // A load error means getConfig() threw at the runDiagnostics() call site —
+  // surface it immediately so users see a structured row instead of a crash.
+  if (loadError !== null) {
+    return {
+      name: 'Configuration',
+      status: 'fail',
+      message: 'Failed to load configuration',
+      details: loadError,
+    }
+  }
+
   try {
     const configPath = getConfigPath()
     const complete = isOnboardingComplete()
