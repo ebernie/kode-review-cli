@@ -319,8 +319,8 @@ export async function buildFeatureReviewPrompt(
     parts.push('')
     parts.push('<tests>')
     for (const t of feature.tests) {
-      const bits = [t.path]
-      if (t.command) bits.push(`run via: ${t.command}`)
+      const bits = [escXmlAttr(t.path)]
+      if (t.command) bits.push(`run via: ${escXmlAttr(t.command)}`)
       parts.push(`- ${bits.join('  ')}`)
     }
     parts.push('</tests>')
