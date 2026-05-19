@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
 
-import { formatChanges, getChangesSummary, hasChanges, type LocalChanges } from '../diff.js'
+import { formatChanges, getChangesSummary, getLocalChanges, hasChanges, type LocalChanges } from '../diff.js'
+
+// process.chdir is a process-wide side effect. This file is safe because
+// vitest runs each test file in its own worker (default pool: 'forks' or
+// 'threads'), and within this file tests run serially. If the project ever
+// switches to a shared-process pool, these tests must be revisited.
 
 // ── Pure formatters ───────────────────────────────────────────────────────
 
@@ -42,7 +47,10 @@ describe('formatChanges', () => {
     const out = formatChanges({ ...EMPTY, staged: '+a\n-b' })
     expect(out).toContain('=== STAGED CHANGES ===')
     expect(out).toContain('+a\n-b')
-    expect(out).not.toContain('UNSTAGED')
+    // Tighten to the full section header (matching the symmetric assertion
+    // on the next test) so a diff payload that happens to contain the word
+    // "UNSTAGED" can't false-fail.
+    expect(out).not.toContain('=== UNSTAGED CHANGES ===')
   })
 
   it('renders an UNSTAGED CHANGES section when unstaged is set', () => {
@@ -121,7 +129,6 @@ describe('getLocalChanges (integration)', () => {
   })
 
   it('returns all-empty LocalChanges when the working tree is clean', async () => {
-    const { getLocalChanges } = await import('../diff.js')
     const c = await getLocalChanges()
     expect(c.staged).toBe('')
     expect(c.unstaged).toBe('')
@@ -131,7 +138,6 @@ describe('getLocalChanges (integration)', () => {
 
   it('captures an unstaged modification in unstaged + unstagedFiles, leaves staged empty', async () => {
     await writeFile(join(repoRoot, 'base.ts'), 'export const v = 1\n')
-    const { getLocalChanges } = await import('../diff.js')
     const c = await getLocalChanges()
     expect(c.staged).toBe('')
     expect(c.unstaged).toContain('-export const v = 0')
@@ -143,7 +149,6 @@ describe('getLocalChanges (integration)', () => {
   it('captures a staged modification in staged + stagedFiles, leaves unstaged empty', async () => {
     await writeFile(join(repoRoot, 'base.ts'), 'export const v = 2\n')
     await execa('git', ['add', 'base.ts'], { cwd: repoRoot })
-    const { getLocalChanges } = await import('../diff.js')
     const c = await getLocalChanges()
     expect(c.staged).toContain('+export const v = 2')
     expect(c.unstaged).toBe('')
@@ -157,10 +162,14 @@ describe('getLocalChanges (integration)', () => {
     // Modify after staging — `git diff` (unstaged) now shows the delta from
     // the staged version (v=9) to the working tree (v=10).
     await writeFile(join(repoRoot, 'base.ts'), 'export const v = 10\n')
-    const { getLocalChanges } = await import('../diff.js')
     const c = await getLocalChanges()
     expect(c.staged).toContain('+export const v = 9')
     expect(c.unstaged).toContain('+export const v = 10')
+    // Cross-contamination guard: a regression that merged both diff streams
+    // into a single field would still pass the toContain checks above. These
+    // negative assertions prove the two streams are kept separate.
+    expect(c.staged).not.toContain('+export const v = 10')
+    expect(c.unstaged).not.toContain('+export const v = 9')
     expect(c.stagedFiles).toEqual(['M\tbase.ts'])
     expect(c.unstagedFiles).toEqual(['M\tbase.ts'])
   })
