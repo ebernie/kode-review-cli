@@ -43,7 +43,7 @@ import { summarizeBoundariesForFiles } from './trust-boundaries.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
-const DEFAULT_AGENTIC_MAX_ITERATIONS = 10
+const DEFAULT_AGENTIC_MAX_ITERATIONS = 20
 
 export interface ReviewOptions {
   diffContent: string
