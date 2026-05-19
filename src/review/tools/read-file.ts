@@ -125,7 +125,7 @@ function isSensitivePath(relativePath: string): boolean {
     }
 
     // Exact-basename match for SSH private keys (no extension).
-    if (SSH_PRIVATE_KEY_BASENAMES.includes(part)) {
+    if (SSH_PRIVATE_KEY_BASENAMES.includes(lowerPart)) {
       return true
     }
 

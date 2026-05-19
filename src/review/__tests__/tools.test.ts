@@ -320,7 +320,9 @@ describe('MCP Tools', () => {
         await symlink(envFile, linkPath)
 
         const input: ReadFileInput = { path: 'notes.md' }
-        await expect(readFileHandler(input, testDir)).rejects.toThrow(/sensitive|access denied/i)
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(
+          /is a symlink to a sensitive file/i,
+        )
       })
 
       it('should block access to prod.pem (private key by extension)', async () => {
@@ -336,6 +338,17 @@ describe('MCP Tools', () => {
         await writeFile(sshKey, '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----')
 
         const input: ReadFileInput = { path: 'id_rsa' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should block uppercase SSH key basenames (case-insensitive filesystems)', async () => {
+        // Regression guard: on macOS APFS / Windows, an SSH key created as
+        // ID_RSA is the same file as id_rsa. The basename check must compare
+        // lowercase so requests for ID_RSA / Id_Rsa are still blocked.
+        const sshKey = join(testDir, 'ID_RSA')
+        await writeFile(sshKey, '-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----')
+
+        const input: ReadFileInput = { path: 'ID_RSA' }
         await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
       })
 
