@@ -5,6 +5,13 @@ declare const PKG_VERSION: string
 
 export type ReviewScope = 'local' | 'pr' | 'both' | 'auto' | 'repo'
 
+/**
+ * Runtime list of accepted `--scope` values. `as const satisfies readonly
+ * ReviewScope[]` keeps this aligned with the `ReviewScope` union: if either
+ * side drifts, TypeScript flags the mismatch at compile time.
+ */
+const ALLOWED_SCOPES = ['local', 'pr', 'both', 'auto', 'repo'] as const satisfies readonly ReviewScope[]
+
 export type RepoEngine = 'kode-agent' | 'clawpatch'
 
 /**
@@ -280,6 +287,18 @@ export function parseArgs(argv: string[]): CliOptions {
 
   // Commander auto-inverts --no-suppressions into opts.suppressions=false.
   const noSuppressions = opts.suppressions === false
+
+  // Validate --scope against the documented union. Without this guard, typos
+  // like `--scope pull` parse silently and fall through every downstream
+  // comparison against the documented values, running default behavior
+  // instead of the user's intent. Run BEFORE engine/jobs/cross-flag checks
+  // so a user passing both a bad scope and a bad engine sees the scope error
+  // first (deterministic ordering).
+  if (opts.scope !== undefined && !ALLOWED_SCOPES.includes(opts.scope as ReviewScope)) {
+    throw new Error(
+      `Invalid --scope: "${opts.scope}". Must be one of: ${ALLOWED_SCOPES.join(', ')}.`,
+    )
+  }
 
   // Repo-scope options (only meaningful when --scope repo).
   const engineRaw = String(opts.engine ?? 'kode-agent')

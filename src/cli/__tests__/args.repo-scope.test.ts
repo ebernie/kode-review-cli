@@ -87,3 +87,26 @@ describe('parseArgs: --scope repo', () => {
     )
   })
 })
+
+describe('parseArgs: --scope validation', () => {
+  it.each(['local', 'pr', 'both', 'auto', 'repo'])(
+    'accepts the documented scope value: %s',
+    (scope) => {
+      expect(() => parseArgs(args('--scope', scope))).not.toThrow()
+    },
+  )
+
+  it('rejects an unknown scope value with a clear error', () => {
+    expect(() => parseArgs(args('--scope', 'pull'))).toThrow(/Invalid --scope/)
+  })
+
+  it('rejects an empty-string scope value', () => {
+    expect(() => parseArgs(args('--scope', ''))).toThrow(/Invalid --scope/)
+  })
+
+  it('lists the allowed values in the error message', () => {
+    expect(() => parseArgs(args('--scope', 'nonsense'))).toThrow(
+      /local.*pr.*both.*auto.*repo/,
+    )
+  })
+})
