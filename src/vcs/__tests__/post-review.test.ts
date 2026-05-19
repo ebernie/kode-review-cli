@@ -14,6 +14,7 @@ vi.mock('../gitlab.js', () => ({
   postGitLabMRLineComment: vi.fn(),
   getGitLabMRContext: vi.fn(),
   setGitLabMRApproval: vi.fn(),
+  unapproveGitLabMR: vi.fn(),
 }))
 
 // Mock logger to suppress output during tests
@@ -40,6 +41,7 @@ import {
   postGitLabMRLineComment,
   getGitLabMRContext,
   setGitLabMRApproval,
+  unapproveGitLabMR,
 } from '../gitlab.js'
 
 // Get mock references
@@ -51,6 +53,7 @@ const mockPostGitLabMRComment = postGitLabMRComment as unknown as ReturnType<typ
 const mockPostGitLabMRLineComment = postGitLabMRLineComment as unknown as ReturnType<typeof vi.fn>
 const mockGetGitLabMRContext = getGitLabMRContext as unknown as ReturnType<typeof vi.fn>
 const mockSetGitLabMRApproval = setGitLabMRApproval as unknown as ReturnType<typeof vi.fn>
+const mockUnapproveGitLabMR = unapproveGitLabMR as unknown as ReturnType<typeof vi.fn>
 
 const mockReview: StructuredReview = {
   summary: 'Test review summary.',
@@ -113,6 +116,7 @@ describe('postReviewToPR', () => {
     mockPostGitLabMRLineComment.mockResolvedValue({ success: true })
     mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
     mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
   })
 
   afterEach(() => {
@@ -300,19 +304,22 @@ describe('postReviewToPR', () => {
       expect(mockSetGitLabMRApproval).toHaveBeenCalledWith(123, true)
     })
 
-    it('does not call setApproval for REQUEST_CHANGES (GitLab has no equivalent)', async () => {
+    it('calls unapproveGitLabMR for REQUEST_CHANGES to revoke any prior bot approval', async () => {
       mockPostGitLabMRComment.mockResolvedValue({ success: true })
-      mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+      mockUnapproveGitLabMR.mockResolvedValue({ success: true })
 
-      await postReviewToPR(mockReview, {
+      const result = await postReviewToPR(mockReview, {
         mrIid: 123,
         platform: 'gitlab',
         setApprovalStatus: true,
         postInlineComments: false,
       })
 
-      // Should not call setGitLabMRApproval for REQUEST_CHANGES
+      // Must revoke any prior approval — not silently ignore REQUEST_CHANGES
+      expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(123)
+      // Must not approve while doing so
       expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+      expect(result.approvalStatusSet).toBe(true)
     })
 
     it('returns error when MR IID is missing', async () => {
@@ -485,5 +492,88 @@ describe('postSimpleComment', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toBe('Invalid platform or missing identifier')
+  })
+})
+
+describe('postReviewToPR — GitLab REQUEST_CHANGES revokes prior approval', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
+    mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+    mockPostGitLabMRComment.mockResolvedValue({ success: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('calls unapproveGitLabMR when verdict is REQUEST_CHANGES on GitLab', async () => {
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'REQUEST_CHANGES', reasoning: '', confidence: 'HIGH', mergeDecision: 'DO_NOT_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    // Must actively revoke any prior approval when flagging REQUEST_CHANGES
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(42)
+    // Must NOT simultaneously approve
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+    expect(result.approvalStatusSet).toBe(true)
+  })
+
+  it('calls setGitLabMRApproval(42, true) when verdict is APPROVE on GitLab', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    expect(mockSetGitLabMRApproval).toHaveBeenCalledWith(42, true)
+    // Must not call unapprove when approving
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+  })
+
+  it('does nothing on NEEDS_DISCUSSION (no approve, no unapprove)', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'NEEDS_DISCUSSION', reasoning: '', confidence: 'HIGH', mergeDecision: 'CONDITIONAL_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    // NEEDS_DISCUSSION must not touch approval state in either direction
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+  })
+
+  it('does not call unapproveGitLabMR when setApprovalStatus is false', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'REQUEST_CHANGES', reasoning: '', confidence: 'HIGH', mergeDecision: 'DO_NOT_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: false },
+    )
+
+    // If caller opts out of approval management, neither function is called
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
   })
 })

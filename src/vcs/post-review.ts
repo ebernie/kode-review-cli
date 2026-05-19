@@ -17,6 +17,7 @@ import {
   postGitLabMRLineComment,
   getGitLabMRContext,
   setGitLabMRApproval,
+  unapproveGitLabMR,
   type GitLabMRContext,
 } from './gitlab.js'
 
@@ -223,15 +224,15 @@ async function setApprovalStatusForReview(
 
     return submitGitHubPRReview(identifier, '', event)
   } else {
-    // GitLab: approve or don't approve based on verdict
     if (verdict === 'APPROVE') {
       return setGitLabMRApproval(identifier, true)
     } else if (verdict === 'REQUEST_CHANGES') {
-      // GitLab doesn't have "request changes" - we just don't approve
-      // The comment with issues serves as the feedback
-      return { success: true }
+      // GitLab has no native "request changes" verb. Explicitly revoke any
+      // prior bot approval so the MR doesn't sit in "approved" state while
+      // the review comment flags a regression.
+      return unapproveGitLabMR(identifier)
     } else {
-      // NEEDS_DISCUSSION - no approval action needed
+      // NEEDS_DISCUSSION — no approval action needed.
       return { success: true }
     }
   }

@@ -256,3 +256,28 @@ export async function setGitLabMRApproval(
     return revokeGitLabMRApproval(mrIid)
   }
 }
+
+/**
+ * Revoke an existing bot approval on a GitLab MR. Idempotent — succeeds
+ * even if there was no prior approval. Used when the review verdict
+ * transitions from APPROVE to REQUEST_CHANGES, since GitLab has no native
+ * "request changes" verb and a stale bot approval would mislead maintainers.
+ */
+export async function unapproveGitLabMR(
+  mrIid: number
+): Promise<{ success: boolean; error?: string }> {
+  const result = await exec('glab', ['mr', 'revoke', String(mrIid)])
+
+  if (result.exitCode !== 0) {
+    const error = result.stderr || 'Unknown error revoking MR approval'
+    // glab returns non-zero when the MR had no prior approval — treat as
+    // success because the desired postcondition (not approved) is already met.
+    if (/not approved|no approval|already revoked/i.test(error)) {
+      return { success: true }
+    }
+    logger.debug(`Failed to unapprove MR !${mrIid}: ${error}`)
+    return { success: false, error }
+  }
+
+  return { success: true }
+}
