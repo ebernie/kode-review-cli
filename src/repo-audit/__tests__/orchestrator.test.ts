@@ -495,4 +495,139 @@ describe('runRepoAudit — edge cases', () => {
     // Override is verbatim — no auto-dispatch — so only security ran.
     expect(personas).toEqual(['security'])
   })
+
+  it('continues to the next persona when one persona throws a non-rate-limit error', async () => {
+    // kind=service + user-input boundary → general + architect + security (3 personas).
+    await writeFeatureFile('feat-a', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+
+    let callCount = 0
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ persona }) => {
+      callCount += 1
+      if (persona.name === 'security') {
+        throw new Error('Some weird transient blip')
+      }
+      return {
+        feature: undefined,
+        persona,
+        findings: [
+          {
+            severity: 'LOW',
+            category: 'maintainability',
+            confidence: 'HIGH',
+            title: `tidy from ${persona.name}`,
+            file: 'src/foo.ts',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'foo',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        ],
+        content: '',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+        truncated: false,
+      }
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    // All 3 personas were dispatched; security threw, general + architect
+    // each emitted one finding.
+    expect(callCount).toBe(3)
+    expect(result.featuresReviewed).toBe(1)
+    expect(result.findingsEmitted).toBe(2)
+    expect(result.aborted).toBeFalsy()
+  })
+
+  it('breaks the loop on a rate-limit error and reports aborted=true', async () => {
+    // Two features, each dispatching 3 personas (general/architect/security).
+    await writeFeatureFile('feat-x', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+    await writeFeatureFile('feat-y', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+
+    let call = 0
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ persona }) => {
+      call += 1
+      if (call === 1) {
+        return {
+          feature: undefined,
+          persona,
+          findings: [],
+          content: '',
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+          truncated: false,
+        }
+      }
+      throw new Error(
+        'Model returned an error: You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.',
+      )
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    // Loop broke after the rate-limit fired on the second persona of feat-x —
+    // exactly 2 calls (success + rate-limit) and exactly 1 feature touched.
+    // Tight equality catches any regression that delays the break.
+    expect(call).toBe(2)
+    expect(result.aborted).toBe(true)
+    expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
+    expect(result.featuresReviewed).toBe(1)
+  })
+
+  it('skips a feature when another runner already holds its lock', async () => {
+    const { acquireFeatureLock } = await import('../state.js')
+    mocks.isNodeVersionCompatible.mockReturnValue(true)
+    mocks.detectClawpatch.mockResolvedValue({ installed: true, version: '0.3.0' })
+    mocks.runClawpatchMap.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    await writeFeatureFile('feat_locked', { trustBoundaries: ['user-input'], kind: 'service' })
+
+    // Pre-acquire the lock on behalf of a phantom "other runner" so the
+    // orchestrator's own acquireFeatureLock call returns null.
+    const held = await acquireFeatureLock(tmp, 'feat_locked', 'phantom-run-id')
+    expect(held).not.toBeNull()
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    expect(mocks.reviewFeatureWithAgent).not.toHaveBeenCalled()
+    expect(result.featuresReviewed).toBe(0)
+  })
+
+  it('--report-only short-circuits before Node/clawpatch gates fire', async () => {
+    // Even on a broken environment (incompatible Node, no clawpatch), report-only
+    // must list the findings already on disk — that's the whole point of the flag.
+    mocks.isNodeVersionCompatible.mockReturnValue(false)
+    mocks.detectClawpatch.mockResolvedValue({ installed: false, version: null })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli, reportOnly: true },
+    })
+
+    expect(result.featuresReviewed).toBe(0)
+    expect(result.findingsOnDisk).toBe(0)
+    expect(mocks.isNodeVersionCompatible).not.toHaveBeenCalled()
+    expect(mocks.detectClawpatch).not.toHaveBeenCalled()
+    expect(mocks.runClawpatchMap).not.toHaveBeenCalled()
+  })
 })

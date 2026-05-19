@@ -101,7 +101,7 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   // List reviewers (no side effects, works without onboarding)
   if (options.listReviewers) {
-    printReviewerList()
+    printReviewerList(options.format)
     return true
   }
 
@@ -567,26 +567,26 @@ async function runRepoScopeAudit(
   // Optional indexer URL (used by agentic tools for richer search).
   const indexerUrl = await resolveIndexerUrlIfRunning()
 
-  const result = await runRepoAudit({
-    repoRoot,
-    repoUrl,
-    branch,
-    indexerUrl,
-    cli: options,
-  })
+  let result: Awaited<ReturnType<typeof runRepoAudit>> | null = null
+  let runError: unknown = null
+  try {
+    result = await runRepoAudit({
+      repoRoot,
+      repoUrl,
+      branch,
+      indexerUrl,
+      cli: options,
+    })
+  } catch (err) {
+    runError = err
+    logger.error(
+      `Repo audit terminated early: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Rendering whatever findings landed on disk before the failure.`,
+    )
+  }
 
-  // Concise summary line for CI / scripting consumers.
-  logger.success(
-    cyan(
-      `Repo audit complete: reviewed=${result.featuresReviewed} ` +
-        `skipped=${result.featuresSkipped} ` +
-        `findings=${result.findingsEmitted} ` +
-        `suppressed=${result.findingsSuppressed} ` +
-        `on-disk=${result.findingsOnDisk}`,
-    ),
-  )
-
-  // Read findings once and reuse for both rendering and the CI gate.
+  // Always render whatever's on disk — even on hard abort the previously
+  // persisted findings are still useful to the user.
   const allFindings = await listRepoAuditFindings(repoRoot)
   await writeRepoReport({
     records: allFindings,
@@ -595,6 +595,22 @@ async function runRepoScopeAudit(
     outputFile: options.outputFile,
     quiet: options.quiet,
   })
+
+  if (result) {
+    const abortedSuffix = result.aborted ? ' (aborted)' : ''
+    logger.success(
+      cyan(
+        `Repo audit complete${abortedSuffix}: reviewed=${result.featuresReviewed} ` +
+          `skipped=${result.featuresSkipped} ` +
+          `findings=${result.findingsEmitted} ` +
+          `suppressed=${result.findingsSuppressed} ` +
+          `on-disk=${result.findingsOnDisk}`,
+      ),
+    )
+    if (result.aborted) {
+      logger.warn(`Abort reason: ${result.abortReason ?? '(unspecified)'}`)
+    }
+  }
 
   // CI mode: fail on CRITICAL (or HIGH if --fail-on=high).
   if (options.ci) {
@@ -606,6 +622,12 @@ async function runRepoScopeAudit(
       logger.error(`CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s); failing.`)
       process.exit(1)
     }
+  }
+
+  // Re-throw any hard error AFTER rendering, so the user still gets their
+  // findings file but the shell still sees a non-zero exit.
+  if (runError) {
+    throw runError
   }
 }
 
@@ -1301,11 +1323,15 @@ async function processReviewOutput(
 /**
  * Print the list of available reviewers (built-in + user-defined).
  *
- * Reads `--format json` to decide between human-readable text and a JSON
- * array suitable for scripting.
+ * When `format === 'json'`, emits a JSON array suitable for scripting and
+ * skips the human-readable help text.
  */
-function printReviewerList(): void {
+function printReviewerList(format: 'text' | 'json' | 'markdown'): void {
   const reviewers = listAvailableReviewers()
+  if (format === 'json') {
+    console.log(JSON.stringify(reviewers, null, 2))
+    return
+  }
   console.log('')
   console.log('Available reviewers:')
   console.log('')
@@ -1531,16 +1557,10 @@ async function main(): Promise<void> {
     // Non-blocking daily update check (fire-and-forget)
     checkForUpdateNotification().catch(() => {})
 
-    // Check if watch mode requested
+    // Check if watch mode requested. --watch + --scope repo is rejected at
+    // parse time (see src/cli/args.ts); reaching here with --watch means
+    // diff-scope watch mode.
     if (options.watch) {
-      // --watch + --scope repo is reserved for a future PR. Fail loudly
-      // rather than silently entering diff-scope watch.
-      if (options.scope === 'repo') {
-        throw new Error(
-          '--watch with --scope repo is not yet supported. Run `--scope repo` ' +
-            'manually on a schedule (e.g., via cron) for now.',
-        )
-      }
       await runWatchMode(options, ctx)
       return
     }

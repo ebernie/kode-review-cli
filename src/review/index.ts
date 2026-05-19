@@ -22,6 +22,7 @@ export {
 export {
   buildReviewPrompt,
   REVIEW_PROMPT_TEMPLATE,
+  FINDINGS_BLOCK_INSTRUCTIONS,
   type ReviewPromptOptions,
 } from './prompt.js'
 

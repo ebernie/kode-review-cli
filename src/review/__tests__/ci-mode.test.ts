@@ -67,15 +67,20 @@ describe('resolveCiExitCode', () => {
     issuesByCount: { critical, high, medium: 0, low: 0 },
   })
 
-  it('returns 0 on APPROVE regardless of fail-on', () => {
+  it('returns 0 on APPROVE when counts agree (no critical / high above threshold)', () => {
+    // fail-on=critical with APPROVE + 5 HIGH: counts axis tolerates HIGH at
+    // this threshold, so the verdict can ride through.
     expect(resolveCiExitCode(review('APPROVE', 0, 5), 'critical')).toBe(0)
-    expect(resolveCiExitCode(review('APPROVE', 3, 2), 'high')).toBe(0)
   })
-  it('APPROVE with 5 CRITICAL + fail-on=critical still exits 0 (verdict trumps counts)', () => {
-    // Pins the short-circuit ordering: verdict=APPROVE wins over the count
-    // check. Guards against a refactor that moves the failOn check above the
-    // verdict check.
-    expect(resolveCiExitCode(review('APPROVE', 5, 0), 'critical')).toBe(0)
+  it('fails CI on APPROVE + critical when fail-on=critical (count axis is ground truth)', () => {
+    // An LLM that emits APPROVE alongside critical findings is inconsistent
+    // (model error, persona drift, or prompt injection). The counts win:
+    // a critical finding fails CI even if the verdict says APPROVE.
+    expect(resolveCiExitCode(review('APPROVE', 5, 0), 'critical')).toBe(1)
+  })
+  it('fails CI on APPROVE + high when fail-on=high', () => {
+    expect(resolveCiExitCode(review('APPROVE', 0, 2), 'high')).toBe(1)
+    expect(resolveCiExitCode(review('APPROVE', 3, 0), 'high')).toBe(1)
   })
   it('returns 1 when fail-on=critical and there is a CRITICAL', () => {
     expect(resolveCiExitCode(review('REQUEST_CHANGES', 1, 0), 'critical')).toBe(1)
