@@ -193,3 +193,73 @@ describe('writeReviewOutput', () => {
     expect(() => JSON.parse(written)).not.toThrow()
   })
 })
+
+describe('writeReviewOutput — terminal-control stripping (stdout)', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>
+
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    logSpy.mockRestore()
+  })
+
+  it('strips CSI escape sequences (e.g., screen-clear) from stdout', async () => {
+    const review: ReviewOutput = {
+      raw: 'Before \x1b[2J\x1b[H After',
+      structured: { ...mockStructuredReview, summary: 'Before \x1b[2J\x1b[H After' },
+    }
+    await writeReviewOutput(review, { format: 'text' })
+    const written = logSpy.mock.calls[0]?.[0] as string
+    // eslint-disable-next-line no-control-regex
+    expect(written).not.toMatch(/\x1b\[/)
+    expect(written).toContain('Before  After')
+  })
+
+  it('strips OSC escape sequences (e.g., set terminal title)', async () => {
+    const review: ReviewOutput = {
+      raw: 'A\x1b]0;PWNED\x07B',
+      structured: { ...mockStructuredReview, summary: 'A\x1b]0;PWNED\x07B' },
+    }
+    await writeReviewOutput(review, { format: 'text' })
+    const written = logSpy.mock.calls[0]?.[0] as string
+    // eslint-disable-next-line no-control-regex
+    expect(written).not.toMatch(/\x1b\]/)
+    expect(written).not.toContain('PWNED')
+  })
+
+  it('strips bare BEL (0x07) but preserves \\t \\n \\r', async () => {
+    const review: ReviewOutput = {
+      raw: 'tab:\there\nnext\r\nline\x07bell',
+      structured: { ...mockStructuredReview, summary: 'tab:\there\nnext\r\nline\x07bell' },
+    }
+    await writeReviewOutput(review, { format: 'text' })
+    const written = logSpy.mock.calls[0]?.[0] as string
+    expect(written).not.toContain('\x07')
+    expect(written).toContain('\t')
+    expect(written).toContain('\n')
+  })
+
+  it('preserves raw control chars in file output (no stripping)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'writer-raw-'))
+    const outFile = join(dir, 'review.txt')
+    try {
+      const raw = 'preserve \x1b[2J these \x07 bytes'
+      const review: ReviewOutput = {
+        raw,
+        structured: { ...mockStructuredReview, summary: raw },
+      }
+      await writeReviewOutput(review, {
+        format: 'text',
+        outputFile: outFile,
+        quiet: true,
+      })
+      const onDisk = readFileSync(outFile, 'utf-8')
+      expect(onDisk).toContain('\x1b[2J')
+      expect(onDisk).toContain('\x07')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
