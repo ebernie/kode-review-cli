@@ -460,3 +460,211 @@ describe('runWithPi failure paths', () => {
     expect(captured.session!.dispose).toHaveBeenCalledTimes(1)
   })
 })
+
+// -----------------------------------------------------------------------------
+// Engine override contracts (Task 3, addresses HIGH test-auditor finding
+// 7c8d17fa…). Persona dispatch and repo-scope feature review pass
+// `systemPrompt` and `userPromptOverride` into runReview / runAgenticReview;
+// if either contract regresses we'd silently fall back to the default
+// reviewer prompts. These tests pin the contract down.
+// -----------------------------------------------------------------------------
+
+/**
+ * Install a one-shot createAgentSession implementation that captures every
+ * argument passed to `session.prompt(...)` into the supplied `captures` array.
+ *
+ * We use mockImplementationOnce so each test installs its own capturing
+ * session without disturbing the shared module-level mock used by the other
+ * tests in this file. The signature mirrors the default mock so that the
+ * resolvePrompt / subscriber wiring continues to work.
+ */
+async function installPromptCapturingSession(captures: unknown[]): Promise<void> {
+  const { createAgentSession } = await import('@mariozechner/pi-coding-agent')
+  const cas = createAgentSession as unknown as ReturnType<typeof vi.fn>
+  cas.mockImplementationOnce(async (opts: any) => {
+    captured.options = opts
+    const session: CapturedSession & {
+      subscribe: (listener: (event: any) => void) => () => void
+      prompt: ReturnType<typeof vi.fn>
+    } = {
+      state: sessionState,
+      subscribe(listener: (event: any) => void) {
+        captured.subscriber = listener
+        return () => { captured.subscriber = null }
+      },
+      prompt: vi.fn(async (input: unknown) => {
+        captures.push(input)
+        await new Promise<void>((resolve, reject) => {
+          captured.resolvePrompt = () => {
+            if (captured.subscriber) captured.subscriber({ type: 'agent_end', messages: sessionState.messages })
+            resolve()
+          }
+          captured.rejectPrompt = reject
+        })
+      }),
+      abort: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    }
+    captured.session = session
+    return { session }
+  })
+}
+
+/**
+ * The real pi session.prompt is called with either a string or a structured
+ * UserMessage-like object. Both forms must surface the override verbatim;
+ * this helper hides the shape so the test asserts the contract not the wire.
+ */
+function captureContains(captures: unknown[], needle: string): boolean {
+  return captures.some((c) => {
+    if (typeof c === 'string') return c === needle
+    if (c && typeof c === 'object' && 'content' in c) {
+      const content = (c as { content: unknown }).content
+      return typeof content === 'string' && content === needle
+    }
+    return false
+  })
+}
+
+function captureJoined(captures: unknown[]): string {
+  return captures.map((c) => typeof c === 'string' ? c : JSON.stringify(c)).join('\n')
+}
+
+describe('engine option overrides', () => {
+  const SYSTEM_OVERRIDE_BASIC = 'CUSTOM_SYSTEM_PROMPT_FOR_PERSONA_BASIC'
+  const SYSTEM_OVERRIDE_AGENTIC = 'AGENTIC_OVERRIDE_FOR_FEATURE_REVIEW'
+  const USER_OVERRIDE_BASIC = 'EXPLICIT_USER_PROMPT_OVERRIDE_FOR_TASK_3'
+  const USER_OVERRIDE_AGENTIC = 'AGENTIC_USER_OVERRIDE_PAYLOAD'
+
+  it('runReview: userPromptOverride is forwarded to session.prompt verbatim, bypassing buildReviewPrompt', async () => {
+    const captures: unknown[] = []
+    await installPromptCapturingSession(captures)
+
+    const promise = runReview({
+      diffContent: 'diff --git a/x b/x\n+y',
+      context: 'c',
+      userPromptOverride: USER_OVERRIDE_BASIC,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captureContains(captures, USER_OVERRIDE_BASIC)).toBe(true)
+
+    // The default builder's distinctive opening must NOT appear — proves
+    // buildReviewPrompt was truly bypassed.
+    const joined = captureJoined(captures)
+    expect(joined).not.toContain('You are an expert code reviewer')
+  })
+
+  it('runReview: systemPrompt override is forwarded as systemPromptOverride to createAgentSession', async () => {
+    const promise = runReview({
+      diffContent: 'd',
+      context: 'c',
+      systemPrompt: SYSTEM_OVERRIDE_BASIC,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    // The engine threads systemPromptOverride through DefaultResourceLoader.
+    // Our FakeDefaultResourceLoader captures its constructor opts, exposed
+    // indirectly via captured.options.resourceLoader.
+    const loader = captured.options.resourceLoader as {
+      options: { systemPromptOverride?: () => string }
+    }
+    expect(loader.options.systemPromptOverride).toBeDefined()
+    expect(loader.options.systemPromptOverride!()).toBe(SYSTEM_OVERRIDE_BASIC)
+  })
+
+  it('runAgenticReview: systemPrompt override REPLACES the default AGENTIC_SYSTEM_PROMPT', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      systemPrompt: SYSTEM_OVERRIDE_AGENTIC,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const loader = captured.options.resourceLoader as {
+      options: { systemPromptOverride?: () => string }
+    }
+    expect(loader.options.systemPromptOverride).toBeDefined()
+    expect(loader.options.systemPromptOverride!()).toBe(SYSTEM_OVERRIDE_AGENTIC)
+  })
+
+  it('runAgenticReview: when systemPrompt is undefined, the default AGENTIC_SYSTEM_PROMPT is used', async () => {
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const loader = captured.options.resourceLoader as {
+      options: { systemPromptOverride?: () => string }
+    }
+    expect(loader.options.systemPromptOverride).toBeDefined()
+    const defaultPrompt = loader.options.systemPromptOverride!()
+    expect(typeof defaultPrompt).toBe('string')
+    expect(defaultPrompt.length).toBeGreaterThan(0)
+    // Must NOT be the persona override sentinel from the previous test —
+    // proves a different (default) value flows through when override is absent.
+    expect(defaultPrompt).not.toBe(SYSTEM_OVERRIDE_AGENTIC)
+  })
+
+  it('runAgenticReview: userPromptOverride is forwarded to session.prompt verbatim, bypassing buildAgenticPrompt', async () => {
+    const captures: unknown[] = []
+    await installPromptCapturingSession(captures)
+
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      userPromptOverride: USER_OVERRIDE_AGENTIC,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captureContains(captures, USER_OVERRIDE_AGENTIC)).toBe(true)
+
+    // buildAgenticPrompt's distinctive section header must NOT appear.
+    const joined = captureJoined(captures)
+    expect(joined).not.toContain('## Review Criteria')
+  })
+
+  it('runReview (counter-test): without userPromptOverride, the default buildReviewPrompt output is sent', async () => {
+    // Sanity check so the bypass assertion above cannot pass vacuously:
+    // when no override is supplied, the default builder's distinctive
+    // opening MUST appear on the wire.
+    const captures: unknown[] = []
+    await installPromptCapturingSession(captures)
+
+    const promise = runReview({
+      diffContent: 'diff --git a/x b/x\n+y',
+      context: 'c',
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const joined = captureJoined(captures)
+    expect(joined.length).toBeGreaterThan(0)
+    // Stable marker from REVIEW_PROMPT_BASE in src/review/prompt.ts.
+    expect(joined).toContain('You are an expert code reviewer')
+  })
+})
