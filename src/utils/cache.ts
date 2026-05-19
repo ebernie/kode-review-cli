@@ -86,14 +86,14 @@ export class LRUCache<K, V> {
       this.prune()
     }
 
-    // Evict oldest entries if still at capacity
+    // Evict oldest entries if still at capacity. Use the iterator's `done`
+    // flag — NOT a truthiness check on the key — because `undefined` is a
+    // legal Map key and would otherwise cause us to break early and leave
+    // the cache one entry over maxSize.
     while (this.cache.size >= this.maxSize) {
-      const oldestKey = this.cache.keys().next().value
-      if (oldestKey !== undefined) {
-        this.cache.delete(oldestKey)
-      } else {
-        break
-      }
+      const next = this.cache.keys().next()
+      if (next.done) break
+      this.cache.delete(next.value)
     }
 
     // Add new entry

@@ -54,6 +54,31 @@ describe('LRUCache', () => {
     })
   })
 
+  describe('LRU eviction with undefined keys', () => {
+    it('evicts the oldest entry even when that key is undefined', () => {
+      const cache = new LRUCache<string | undefined, number>({ maxSize: 2, ttlMs: 60_000 })
+      cache.set(undefined, 1)
+      cache.set('a', 2)
+      cache.set('b', 3) // must evict undefined, not silently grow
+
+      expect(cache.size).toBe(2)
+      expect(cache.has(undefined)).toBe(false)
+      expect(cache.has('a')).toBe(true)
+      expect(cache.has('b')).toBe(true)
+    })
+
+    it('evicts the oldest entry when it is a legitimate string key', () => {
+      const cache = new LRUCache<string, number>({ maxSize: 2, ttlMs: 60_000 })
+      cache.set('first', 1)
+      cache.set('second', 2)
+      cache.set('third', 3)
+      expect(cache.size).toBe(2)
+      expect(cache.has('first')).toBe(false)
+      expect(cache.has('second')).toBe(true)
+      expect(cache.has('third')).toBe(true)
+    })
+  })
+
   describe('LRU eviction', () => {
     it('evicts least recently used entry when full', () => {
       const cache = new LRUCache<string, number>({ maxSize: 3, ttlMs: 10000 })
