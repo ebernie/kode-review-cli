@@ -35,20 +35,31 @@ export const STRUCTURAL_TAGS = [
 
 /**
  * Escape any structural tag occurrence in `content` so it cannot break out
- * of its enclosing prompt section. Both opening and closing tag forms are
- * escaped, case-insensitively.
+ * of its enclosing prompt section. Matches:
+ *   - Plain forms:           `<tag>`, `</tag>`
+ *   - Whitespace variants:   `</tag >`, `<tag  >`
+ *   - Attribute variants:    `<tag attr="x">`, `<tag a="x" b='y'>`, `<tag />`
+ * Case-insensitive. Idempotent (already-escaped `<\tag>` forms are left
+ * unchanged because the inserted backslash prevents a re-match).
+ *
+ * The `_tagName` parameter is unused but retained for callers that pass it
+ * for documentation / locality of reasoning.
  */
-export function sanitizeXmlContent(content: string, _tagName: string): string {
+export function sanitizeXmlContent(content: string, _tagName?: string): string {
   let sanitized = content
 
   for (const tag of STRUCTURAL_TAGS) {
+    // Closing tag: </tag> or </tag\s*>
     sanitized = sanitized.replace(
-      new RegExp(`</${tag}>`, 'gi'),
-      `<\\/${tag}>`,
+      new RegExp(`</(${tag})(\\s*)>`, 'gi'),
+      '<\\/$1$2>',
     )
+    // Opening tag: <tag>, <tag\s+attrs>, <tag />, <tag attr/>
+    // The capture covers everything between `<tag` and the closing `>`, so
+    // attribute syntax inside the match is preserved literally.
     sanitized = sanitized.replace(
-      new RegExp(`<${tag}>`, 'gi'),
-      `<\\${tag}>`,
+      new RegExp(`<(${tag})((?:\\s[^>]*)?\\s*/?)>`, 'gi'),
+      '<\\$1$2>',
     )
   }
 
