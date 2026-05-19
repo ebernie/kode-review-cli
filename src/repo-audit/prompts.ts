@@ -14,6 +14,7 @@
  * Files that exceed the cap are listed by path with a "use read_file to view"
  * hint — the agent can still reach them, but they don't bloat the seed.
  */
+import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/index.js'
 import { readFileSafe } from '../review/suppressions.js'
 import { REPO_AUDIT_DEFAULTS, type FeatureRecord } from './types.js'
 
@@ -207,6 +208,9 @@ export async function buildFeatureReviewPrompt(
       'from files visible above OR files you read via tools in this session. Cap your output ' +
       `at ${REPO_AUDIT_DEFAULTS.MAX_FINDINGS_PER_FEATURE} findings — pick the most impactful.`,
   )
+  parts.push('')
+  // Structured-output contract: downstream parsers REQUIRE this block.
+  parts.push(FINDINGS_BLOCK_INSTRUCTIONS)
 
   return {
     systemSuffix: FEATURE_REVIEW_MODE_SUFFIX,

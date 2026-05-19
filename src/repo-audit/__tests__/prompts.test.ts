@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { FINDINGS_BLOCK_INSTRUCTIONS, FINDINGS_FENCE_TAG } from '../../review/index.js'
 import { buildFeatureReviewPrompt, FEATURE_REVIEW_MODE_SUFFIX } from '../prompts.js'
 import type { FeatureRecord, TrustBoundary } from '../types.js'
 
@@ -242,5 +243,15 @@ describe('buildFeatureReviewPrompt — output instructions', () => {
     })
     expect(result.systemSuffix.length).toBeGreaterThan(50)
     expect(result.systemSuffix).toBe(FEATURE_REVIEW_MODE_SUFFIX)
+  })
+
+  it('includes the kode-findings schema instructions in the user prompt', async () => {
+    const built = await buildFeatureReviewPrompt({
+      feature: makeFeature(),
+      repoRoot: tmp,
+    })
+    expect(built.userPrompt).toContain(FINDINGS_FENCE_TAG)
+    expect(built.userPrompt).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
+    expect(built.userPrompt).toMatch(/REQUIRED.*kode-findings/i)
   })
 })
