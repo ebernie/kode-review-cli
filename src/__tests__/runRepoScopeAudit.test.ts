@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest'
 import { mkdtemp, rm, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -122,7 +122,7 @@ async function seedFinding(
 
 describe('runRepoScopeAudit', () => {
   let repoRoot: string
-  let exitSpy: ReturnType<typeof vi.fn>
+  let exitSpy: MockInstance<(code?: number | string | null) => never>
 
   beforeEach(async () => {
     repoRoot = await makeRepo()
@@ -132,7 +132,7 @@ describe('runRepoScopeAudit', () => {
     vi.mocked(writeRepoReport).mockClear()
     exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`process.exit(${code})`)
-    }) as never) as unknown as ReturnType<typeof vi.fn>
+    }) as never)
   })
 
   afterEach(async () => {
@@ -189,7 +189,7 @@ describe('runRepoScopeAudit', () => {
   })
 
   it('proceeds without throwing when repoUrl is missing (warning path)', async () => {
-    vi.mocked(getRepoUrl).mockResolvedValueOnce(null as unknown as string)
+    vi.mocked(getRepoUrl).mockResolvedValueOnce(null)
     vi.mocked(runRepoAudit).mockResolvedValue({
       featuresReviewed: 0, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 0,
     })
