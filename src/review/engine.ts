@@ -20,6 +20,7 @@ import {
   ModelRegistry,
   DefaultResourceLoader,
   SessionManager,
+  SettingsManager,
   getAgentDir,
   type ExtensionAPI,
 } from '@mariozechner/pi-coding-agent'
@@ -103,18 +104,71 @@ export interface AgenticReviewResult {
   findings: Finding[]
 }
 
+function findModel(
+  available: ReadonlyArray<Model<Api>>,
+  pattern: string,
+): Model<Api> | undefined {
+  const slashIdx = pattern.indexOf('/')
+  if (slashIdx > 0) {
+    const provider = pattern.slice(0, slashIdx)
+    const id = pattern.slice(slashIdx + 1)
+    return available.find((m) => m.provider === provider && m.id === id) as
+      | Model<Api>
+      | undefined
+  }
+  return available.find((m) => m.id === pattern) as Model<Api> | undefined
+}
+
+/**
+ * Read pi's configured default model. Project settings (cwd/.pi/settings.json)
+ * take precedence over global (~/.pi/agent/settings.json), matching pi's own
+ * resolution order. Returns "provider/id" when both fields are set, just "id"
+ * when only the model is set, or undefined when no preference exists.
+ *
+ * `defaultProvider` and `defaultModel` are treated as a *pair* per scope —
+ * we never cross-mix a project model with a global provider (and vice versa),
+ * since the synthesized "globalProvider/projectModel" pattern would silently
+ * fail registry lookup and fall through to first-available.
+ *
+ * Never throws — pi settings missing/malformed means "no preference", not an
+ * error. The fallback to first-available handles it.
+ */
+function readPiDefaultPattern(cwd: string): string | undefined {
+  try {
+    const sm = SettingsManager.create(cwd, getAgentDir())
+    const project = sm.getProjectSettings()
+    const global = sm.getGlobalSettings()
+    return scopedPattern(project) ?? scopedPattern(global)
+  } catch {
+    return undefined
+  }
+}
+
+function scopedPattern(settings: {
+  defaultProvider?: string
+  defaultModel?: string
+}): string | undefined {
+  if (!settings.defaultModel) return undefined
+  if (settings.defaultProvider) return `${settings.defaultProvider}/${settings.defaultModel}`
+  return settings.defaultModel
+}
+
 /**
  * Resolve the model the user wants for this review.
  *
- * Priority:
- *  1. `--model provider/id` (or `--model id` matching a known provider)
- *  2. First available model from pi's registry (i.e. one with valid creds)
+ * Priority (highest → lowest):
+ *  1. `--model provider/id` (or `--model id`) — hard error if not in registry
+ *  2. `KODE_REVIEW_MODEL` env var — warn and fall through if not in registry
+ *  3. pi's `defaultProvider/defaultModel` (`~/.pi/agent/settings.json`,
+ *     project-scoped overrides take precedence) — warn and fall through
+ *  4. First available model from pi's registry
  *
  * Throws `NO_PI_AUTH` when no model has usable credentials.
  */
 async function resolveModel(
   modelRegistry: ModelRegistry,
   modelPattern: string | undefined,
+  cwd: string,
 ): Promise<Model<Api>> {
   const available = await modelRegistry.getAvailable()
   if (available.length === 0) {
@@ -128,16 +182,8 @@ async function resolveModel(
   }
 
   if (modelPattern) {
-    const slashIdx = modelPattern.indexOf('/')
-    if (slashIdx > 0) {
-      const provider = modelPattern.slice(0, slashIdx)
-      const id = modelPattern.slice(slashIdx + 1)
-      const exact = available.find((m) => m.provider === provider && m.id === id)
-      if (exact) return exact as Model<Api>
-    } else {
-      const byId = available.find((m) => m.id === modelPattern)
-      if (byId) return byId as Model<Api>
-    }
+    const m = findModel(available, modelPattern)
+    if (m) return m
     const examples = available
       .slice(0, 5)
       .map((m) => `${m.provider}/${m.id}`)
@@ -148,6 +194,24 @@ async function resolveModel(
         category: 'review',
         recoveryHint: `Available: ${examples}${available.length > 5 ? ', …' : ''}`,
       },
+    )
+  }
+
+  const envPattern = process.env.KODE_REVIEW_MODEL?.trim()
+  if (envPattern) {
+    const m = findModel(available, envPattern)
+    if (m) return m
+    logger.warn(
+      `KODE_REVIEW_MODEL="${envPattern}" not currently available in pi — falling back.`,
+    )
+  }
+
+  const piPattern = readPiDefaultPattern(cwd)
+  if (piPattern) {
+    const m = findModel(available, piPattern)
+    if (m) return m
+    logger.warn(
+      `Pi default model "${piPattern}" not currently available — falling back to first available model.`,
     )
   }
 
@@ -175,7 +239,7 @@ interface RunOutcome {
 async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
   const authStorage = AuthStorage.create()
   const modelRegistry = ModelRegistry.create(authStorage)
-  const model = await resolveModel(modelRegistry, opts.modelPattern)
+  const model = await resolveModel(modelRegistry, opts.modelPattern, opts.cwd)
   logger.info(`Using model ${model.provider}/${model.id}`)
 
   const extensionFactories: Array<(pi: ExtensionAPI) => void | Promise<void>> = []

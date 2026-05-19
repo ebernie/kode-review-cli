@@ -16,6 +16,8 @@ const captured: {
   rejectPrompt: (err: unknown) => void
   session: CapturedSession | null
   modelsOverride: any[] | null
+  piGlobalSettings: Record<string, unknown> | null
+  piProjectSettings: Record<string, unknown> | null
 } = {
   options: null,
   subscriber: null,
@@ -23,6 +25,8 @@ const captured: {
   rejectPrompt: () => {},
   session: null,
   modelsOverride: null,
+  piGlobalSettings: null,
+  piProjectSettings: null,
 }
 
 const sessionState = { messages: [] as any[] }
@@ -41,6 +45,12 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
           { provider: 'anthropic', id: 'claude-sonnet-4-6', api: 'anthropic-messages' },
           { provider: 'google', id: 'gemini-3-pro', api: 'google-gen-ai' },
         ]),
+      })),
+    },
+    SettingsManager: {
+      create: vi.fn(() => ({
+        getGlobalSettings: vi.fn(() => captured.piGlobalSettings ?? {}),
+        getProjectSettings: vi.fn(() => captured.piProjectSettings ?? {}),
       })),
     },
     DefaultResourceLoader: FakeDefaultResourceLoader,
@@ -83,7 +93,10 @@ beforeEach(() => {
   captured.subscriber = null
   captured.session = null
   captured.modelsOverride = null
+  captured.piGlobalSettings = null
+  captured.piProjectSettings = null
   sessionState.messages = []
+  delete process.env.KODE_REVIEW_MODEL
 })
 
 function pushAssistantText(text: string) {
@@ -149,6 +162,99 @@ describe('runReview', () => {
 
   it('throws a clear error when --model does not match any available model', async () => {
     await expect(runReview({ diffContent: 'd', context: 'c', model: 'foo/nope' })).rejects.toThrow(/not available in pi/)
+  })
+
+  it('honors pi defaultProvider/defaultModel when no --model is set', async () => {
+    captured.piGlobalSettings = { defaultProvider: 'google', defaultModel: 'gemini-3-pro' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captured.options.model.provider).toBe('google')
+    expect(captured.options.model.id).toBe('gemini-3-pro')
+  })
+
+  it('lets project-scoped pi settings override global pi settings', async () => {
+    captured.piGlobalSettings = { defaultProvider: 'google', defaultModel: 'gemini-3-pro' }
+    captured.piProjectSettings = { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captured.options.model.provider).toBe('anthropic')
+    expect(captured.options.model.id).toBe('claude-sonnet-4-6')
+  })
+
+  it('honors KODE_REVIEW_MODEL above pi defaults', async () => {
+    process.env.KODE_REVIEW_MODEL = 'google/gemini-3-pro'
+    captured.piGlobalSettings = { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captured.options.model.provider).toBe('google')
+    expect(captured.options.model.id).toBe('gemini-3-pro')
+  })
+
+  it('--model wins over KODE_REVIEW_MODEL and pi defaults', async () => {
+    process.env.KODE_REVIEW_MODEL = 'google/gemini-3-pro'
+    captured.piGlobalSettings = { defaultProvider: 'google', defaultModel: 'gemini-3-pro' }
+    const promise = runReview({ diffContent: 'd', context: 'c', model: 'anthropic/claude-sonnet-4-6' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captured.options.model.provider).toBe('anthropic')
+    expect(captured.options.model.id).toBe('claude-sonnet-4-6')
+  })
+
+  it('warns and falls back when KODE_REVIEW_MODEL points at an unavailable model', async () => {
+    process.env.KODE_REVIEW_MODEL = 'foo/bar'
+    captured.piGlobalSettings = { defaultProvider: 'google', defaultModel: 'gemini-3-pro' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    // KODE_REVIEW_MODEL miss → falls through to pi default, which is available.
+    expect(captured.options.model.provider).toBe('google')
+    expect(captured.options.model.id).toBe('gemini-3-pro')
+  })
+
+  it('does not cross-pair global defaultProvider with project defaultModel', async () => {
+    // Global says anthropic; project only overrides the model id. We must
+    // NOT synthesize "anthropic/gemini-3-pro" — instead, project sets only
+    // the bare id, so we look that up by id (which matches gemini-3-pro).
+    captured.piGlobalSettings = { defaultProvider: 'anthropic', defaultModel: 'claude-sonnet-4-6' }
+    captured.piProjectSettings = { defaultModel: 'gemini-3-pro' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    expect(captured.options.model.provider).toBe('google')
+    expect(captured.options.model.id).toBe('gemini-3-pro')
+  })
+
+  it('warns and falls back when pi defaultModel points at an unavailable model', async () => {
+    captured.piGlobalSettings = { defaultProvider: 'minimax', defaultModel: 'MiniMax-M2.7' }
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    // pi default miss → first-available wins.
+    expect(captured.options.model.provider).toBe('anthropic')
   })
 
   it('forwards onProgress through runWithPi even in basic (no-tools) mode', async () => {

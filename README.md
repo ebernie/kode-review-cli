@@ -468,7 +468,14 @@ pi              # opens interactive UI
 # Pick Anthropic, Google (Gemini API key), OpenAI Codex, GitHub Copilot, etc.
 ```
 
-`pi --list-models` shows what is currently usable. Kode-review picks the first available model unless you override with `--model <provider>/<id>` per invocation.
+`pi --list-models` shows what is currently usable. Model resolution order (highest → lowest):
+
+1. `--model <provider>/<id>` (per-invocation)
+2. `KODE_REVIEW_MODEL` env var (per-shell)
+3. Pi's `defaultProvider` / `defaultModel` from `~/.pi/agent/settings.json` (project-scoped overrides honored)
+4. First available model in pi's registry
+
+So setting your default inside pi (e.g. via the pi TUI's model selector) is automatically respected by kode-review — no separate kode-review config needed.
 
 ### VCS Integration
 
@@ -753,6 +760,7 @@ kode-review --scope pr --pr 123 --post-to-pr --quiet
 | Variable | Description |
 |----------|-------------|
 | `KODE_REVIEW_MIGRATE_YES` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
+| `KODE_REVIEW_MODEL` | Default model for this shell (e.g. `anthropic/claude-sonnet-4-6`). Overridden by `--model`. |
 | `DEBUG` | Set to `1` for verbose logging |
 
 Pi-specific variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MINIMAX_API_KEY`, etc.) are honored by pi directly. For the full provider → env-var mapping, see `node_modules/@mariozechner/pi-coding-agent/docs/providers.md` (installed alongside pi) or run `pi --list-models` to see which providers your current setup can reach. Pi homepage: <https://pi.dev>.
