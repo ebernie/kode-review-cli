@@ -589,4 +589,23 @@ describe('runRepoAudit — edge cases', () => {
     expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
     expect(result.featuresReviewed).toBe(1)
   })
+
+  it('--report-only short-circuits before Node/clawpatch gates fire', async () => {
+    // Even on a broken environment (incompatible Node, no clawpatch), report-only
+    // must list the findings already on disk — that's the whole point of the flag.
+    mocks.isNodeVersionCompatible.mockReturnValue(false)
+    mocks.detectClawpatch.mockResolvedValue({ installed: false, version: null })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli, reportOnly: true },
+    })
+
+    expect(result.featuresReviewed).toBe(0)
+    expect(result.findingsOnDisk).toBe(0)
+    expect(mocks.isNodeVersionCompatible).not.toHaveBeenCalled()
+    expect(mocks.detectClawpatch).not.toHaveBeenCalled()
+    expect(mocks.runClawpatchMap).not.toHaveBeenCalled()
+  })
 })

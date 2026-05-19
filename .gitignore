@@ -40,3 +40,9 @@ build/
 config.json
 
 .clawpatch/
+
+# Local kode-review state (per-repo findings, locks, run history)
+.kode-review/
+
+# Claude Code scratch state
+.claude/scheduled_tasks.lock

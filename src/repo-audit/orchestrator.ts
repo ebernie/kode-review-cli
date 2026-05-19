@@ -79,24 +79,9 @@ export async function runRepoAudit(
     )
   }
 
-  // Hard gate: Node 22+ required (clawpatch's minimum).
-  if (!isNodeVersionCompatible()) {
-    throw new Error(buildNodeUpgradeHint())
-  }
-
-  // Hard gate: clawpatch must be on PATH (unless --report-only, which never
-  // shells out to clawpatch — we just read .clawpatch/features/ if present).
-  if (!cli.reportOnly) {
-    const status = await detectClawpatch()
-    if (!status.installed) {
-      throw new Error(buildInstallHint(repoRoot))
-    }
-    if (status.version !== null) {
-      logger.info(`Detected ${status.version}`)
-    }
-  }
-
-  // Report-only short circuit.
+  // Report-only short-circuit runs BEFORE any environment gate: this path
+  // only reads `.kode-review/findings/`, never shells out to clawpatch, and
+  // must work on Node 18+ where users have existing reports to inspect.
   if (cli.reportOnly) {
     const records = await listFindings(repoRoot)
     return {
@@ -106,6 +91,20 @@ export async function runRepoAudit(
       findingsSuppressed: 0,
       findingsOnDisk: records.length,
     }
+  }
+
+  // Hard gate: Node 22+ required (clawpatch's minimum).
+  if (!isNodeVersionCompatible()) {
+    throw new Error(buildNodeUpgradeHint())
+  }
+
+  // Hard gate: clawpatch must be on PATH.
+  const status = await detectClawpatch()
+  if (!status.installed) {
+    throw new Error(buildInstallHint(repoRoot))
+  }
+  if (status.version !== null) {
+    logger.info(`Detected ${status.version}`)
   }
 
   // Step 1: ensure clawpatch has mapped this repo (idempotent; auto-inits).

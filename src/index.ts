@@ -101,7 +101,7 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
 
   // List reviewers (no side effects, works without onboarding)
   if (options.listReviewers) {
-    printReviewerList()
+    printReviewerList(options.format)
     return true
   }
 
@@ -1323,11 +1323,15 @@ async function processReviewOutput(
 /**
  * Print the list of available reviewers (built-in + user-defined).
  *
- * Reads `--format json` to decide between human-readable text and a JSON
- * array suitable for scripting.
+ * When `format === 'json'`, emits a JSON array suitable for scripting and
+ * skips the human-readable help text.
  */
-function printReviewerList(): void {
+function printReviewerList(format: 'text' | 'json' | 'markdown'): void {
   const reviewers = listAvailableReviewers()
+  if (format === 'json') {
+    console.log(JSON.stringify(reviewers, null, 2))
+    return
+  }
   console.log('')
   console.log('Available reviewers:')
   console.log('')
@@ -1553,16 +1557,10 @@ async function main(): Promise<void> {
     // Non-blocking daily update check (fire-and-forget)
     checkForUpdateNotification().catch(() => {})
 
-    // Check if watch mode requested
+    // Check if watch mode requested. --watch + --scope repo is rejected at
+    // parse time (see src/cli/args.ts); reaching here with --watch means
+    // diff-scope watch mode.
     if (options.watch) {
-      // --watch + --scope repo is reserved for a future PR. Fail loudly
-      // rather than silently entering diff-scope watch.
-      if (options.scope === 'repo') {
-        throw new Error(
-          '--watch with --scope repo is not yet supported. Run `--scope repo` ' +
-            'manually on a schedule (e.g., via cron) for now.',
-        )
-      }
       await runWatchMode(options, ctx)
       return
     }

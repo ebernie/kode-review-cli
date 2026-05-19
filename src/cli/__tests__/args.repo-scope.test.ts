@@ -81,10 +81,9 @@ describe('parseArgs: --scope repo', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--report-only', '--revalidate'))).toThrow(/contradictory intent|cannot be combined/)
   })
 
-  it('--scope repo is compatible with --watch (periodic re-audit)', () => {
-    // Per the plan, watch and repo scope are NOT mutually exclusive.
-    const opts = parseArgs(args('--scope', 'repo', '--watch'))
-    expect(opts.scope).toBe('repo')
-    expect(opts.watch).toBe(true)
+  it('rejects --scope repo + --watch at parse time (periodic repo-audit not yet supported)', () => {
+    expect(() => parseArgs(args('--scope', 'repo', '--watch'))).toThrow(
+      /--watch with --scope repo is not yet supported/,
+    )
   })
 })

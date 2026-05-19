@@ -299,6 +299,15 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`--scope repo cannot be combined with --pr <number>. Use --scope pr for PR review.`)
   }
 
+  // --scope repo + --watch is reserved for a future PR; reject at parse time
+  // so users see a deterministic error instead of executing setup work first.
+  if (opts.scope === 'repo' && opts.watch) {
+    throw new Error(
+      `--watch with --scope repo is not yet supported. ` +
+        `Run \`--scope repo\` manually on a schedule (e.g., via cron) for now.`,
+    )
+  }
+
   // --report-only and --revalidate have contradictory intent.
   if (opts.reportOnly && opts.revalidate) {
     throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
