@@ -567,26 +567,26 @@ async function runRepoScopeAudit(
   // Optional indexer URL (used by agentic tools for richer search).
   const indexerUrl = await resolveIndexerUrlIfRunning()
 
-  const result = await runRepoAudit({
-    repoRoot,
-    repoUrl,
-    branch,
-    indexerUrl,
-    cli: options,
-  })
+  let result: Awaited<ReturnType<typeof runRepoAudit>> | null = null
+  let runError: unknown = null
+  try {
+    result = await runRepoAudit({
+      repoRoot,
+      repoUrl,
+      branch,
+      indexerUrl,
+      cli: options,
+    })
+  } catch (err) {
+    runError = err
+    logger.error(
+      `Repo audit terminated early: ${err instanceof Error ? err.message : String(err)}. ` +
+        `Rendering whatever findings landed on disk before the failure.`,
+    )
+  }
 
-  // Concise summary line for CI / scripting consumers.
-  logger.success(
-    cyan(
-      `Repo audit complete: reviewed=${result.featuresReviewed} ` +
-        `skipped=${result.featuresSkipped} ` +
-        `findings=${result.findingsEmitted} ` +
-        `suppressed=${result.findingsSuppressed} ` +
-        `on-disk=${result.findingsOnDisk}`,
-    ),
-  )
-
-  // Read findings once and reuse for both rendering and the CI gate.
+  // Always render whatever's on disk — even on hard abort the previously
+  // persisted findings are still useful to the user.
   const allFindings = await listRepoAuditFindings(repoRoot)
   await writeRepoReport({
     records: allFindings,
@@ -595,6 +595,22 @@ async function runRepoScopeAudit(
     outputFile: options.outputFile,
     quiet: options.quiet,
   })
+
+  if (result) {
+    const abortedSuffix = result.aborted ? ' (aborted)' : ''
+    logger.success(
+      cyan(
+        `Repo audit complete${abortedSuffix}: reviewed=${result.featuresReviewed} ` +
+          `skipped=${result.featuresSkipped} ` +
+          `findings=${result.findingsEmitted} ` +
+          `suppressed=${result.findingsSuppressed} ` +
+          `on-disk=${result.findingsOnDisk}`,
+      ),
+    )
+    if (result.aborted) {
+      logger.warn(`Abort reason: ${result.abortReason ?? '(unspecified)'}`)
+    }
+  }
 
   // CI mode: fail on CRITICAL (or HIGH if --fail-on=high).
   if (options.ci) {
@@ -606,6 +622,12 @@ async function runRepoScopeAudit(
       logger.error(`CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s); failing.`)
       process.exit(1)
     }
+  }
+
+  // Re-throw any hard error AFTER rendering, so the user still gets their
+  // findings file but the shell still sees a non-zero exit.
+  if (runError) {
+    throw runError
   }
 }
 
