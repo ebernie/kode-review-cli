@@ -59,6 +59,31 @@ const SAFE_PATTERNS = [
 ]
 
 /**
+ * Extension-based denylist for cryptographic key / certificate files.
+ * Matched case-insensitively against the basename's suffix. `.pub` files
+ * (public-key counterparts) are explicitly exempted by the caller.
+ */
+const SENSITIVE_EXTENSIONS = ['.pem', '.key', '.p12', '.pfx', '.crt', '.cer']
+
+/**
+ * Exact-basename denylist for SSH private keys. These do not carry an
+ * extension, so we match the file name verbatim.
+ */
+const SSH_PRIVATE_KEY_BASENAMES = ['id_rsa', 'id_ed25519', 'id_ecdsa', 'id_dsa']
+
+/**
+ * GCP / generic service-account credential file basenames. Matches
+ * service-account.json, my-service_account.json, etc.
+ */
+const SERVICE_ACCOUNT_PATTERN = /(^|[-_.])service[-_]?account.*\.json$/i
+
+/**
+ * Generic "credentials.json" / "credential.json" file basenames as used by
+ * gcloud and various OAuth client libraries.
+ */
+const GCP_CREDENTIAL_PATTERN = /(^|[-_.])credentials?\.json$/i
+
+/**
  * Check if a path matches sensitive file patterns
  */
 function isSensitivePath(relativePath: string): boolean {
@@ -85,6 +110,27 @@ function isSensitivePath(relativePath: string): boolean {
 
     // Check for Spring Boot profile-specific config files (application-{profile}.properties/yml/yaml)
     if (SPRING_PROFILE_PATTERN.test(part)) {
+      return true
+    }
+
+    // Extension-based check for cryptographic key / certificate files.
+    // Public-key counterparts (*.pub) are safe to share, so exempt them.
+    const lowerPart = part.toLowerCase()
+    if (!lowerPart.endsWith('.pub')) {
+      for (const ext of SENSITIVE_EXTENSIONS) {
+        if (lowerPart.endsWith(ext)) {
+          return true
+        }
+      }
+    }
+
+    // Exact-basename match for SSH private keys (no extension).
+    if (SSH_PRIVATE_KEY_BASENAMES.includes(part)) {
+      return true
+    }
+
+    // Service-account / credentials JSON files (GCP and generic OAuth).
+    if (SERVICE_ACCOUNT_PATTERN.test(part) || GCP_CREDENTIAL_PATTERN.test(part)) {
       return true
     }
   }
@@ -143,7 +189,8 @@ export async function readFileHandler(
     throw new Error(`Path traversal detected: ${input.path} resolves outside repository root`)
   }
 
-  // Security check: block access to sensitive files/directories
+  // First-pass security check on the requested (pre-realpath) path. This
+  // catches the common case where the user directly names a sensitive file.
   if (isSensitivePath(relativePath)) {
     throw new Error(`Access denied: "${input.path}" matches a sensitive file pattern (.git, .env, etc.)`)
   }
@@ -153,8 +200,11 @@ export async function readFileHandler(
     throw new Error(`Access denied: "${input.path}" is in .gitignore (build artifacts, dependencies, etc. are not readable)`)
   }
 
-  // Additional security: resolve symlinks and check again
-  // This prevents symlink attacks where a symlink in the repo points outside
+  // Resolve symlinks and re-run every security check against the canonical
+  // path. This closes the symlink-bypass hole where e.g. notes.md -> .env
+  // would pass the first-pass check but read secrets. We also read from the
+  // canonical path below to close the TOCTOU window between checks and read.
+  let canonicalReadPath = filePath
   try {
     const realFilePath = await realpath(filePath)
     const realRepoRoot = await realpath(normalizedRepoRoot)
@@ -163,16 +213,29 @@ export async function readFileHandler(
     if (realRelativePath.startsWith('..') || isAbsolute(realRelativePath)) {
       throw new Error(`Path traversal detected: ${input.path} resolves to symlink outside repository root`)
     }
+
+    if (isSensitivePath(realRelativePath)) {
+      throw new Error(`Access denied: "${input.path}" is a symlink to a sensitive file`)
+    }
+
+    if (gitignore && gitignore.ignores(realRelativePath)) {
+      throw new Error(`Access denied: "${input.path}" is a symlink to a gitignored path`)
+    }
+
+    canonicalReadPath = realFilePath
   } catch (error) {
-    // If realpath fails, the file doesn't exist - let it fail at readFile
-    // But don't throw the security error for non-existent files
+    // If realpath fails because the file doesn't exist, fall through and let
+    // readFile produce the canonical ENOENT. Any other realpath failure
+    // (EACCES, ELOOP) or one of the security errors thrown above must
+    // propagate.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       throw error
     }
   }
 
-  // Read the file
-  const content = await readFile(filePath, 'utf-8')
+  // Read the canonical (post-realpath) path so that nothing the security
+  // checks just approved can be swapped underneath us before this call.
+  const content = await readFile(canonicalReadPath, 'utf-8')
   const lines = content.split('\n')
   const totalLines = lines.length
 
