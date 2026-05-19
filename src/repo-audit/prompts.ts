@@ -15,7 +15,7 @@
  * hint — the agent can still reach them, but they don't bloat the seed.
  */
 import { realpath } from 'node:fs/promises'
-import { resolve, sep } from 'node:path'
+import { relative, resolve, sep } from 'node:path'
 import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/index.js'
 import { readFileSafe } from '../review/suppressions.js'
 import { assertWithinRepo } from '../review/tools/path-guard.js'
@@ -51,6 +51,53 @@ function pickFence(body: string): string {
 }
 
 /**
+ * Minimal sensitive-path predicate for prompt inlining. Mirrors the most
+ * common patterns from `src/review/tools/read-file.ts` but is intentionally
+ * narrower — we only need to catch the exfiltration class where an in-repo
+ * symlink points at a credential-bearing file. Path components are matched
+ * exactly (case-insensitive on the basename for extensions / known names).
+ *
+ * This is a defense-in-depth check after realpath containment. The primary
+ * boundary is `readFileForPrompt`'s realpath/repo-root verification — this
+ * function exists to close the in-repo-symlink-to-sensitive subcase.
+ */
+function isSensitivePathForPrompt(relPath: string): boolean {
+  const parts = relPath.split(sep).filter(Boolean)
+  const basename = parts[parts.length - 1] ?? ''
+  const lower = basename.toLowerCase()
+
+  // Path-component matches: .git, .ssh, .aws, .gnupg, .docker, .env*, etc.
+  for (const part of parts) {
+    if (part === '.git' || part === '.ssh' || part === '.aws' ||
+        part === '.gnupg' || part === '.docker' || part === '.npmrc' ||
+        part === '.pypirc') {
+      return true
+    }
+    if (part === '.env' || (part.startsWith('.env.') &&
+        part !== '.env.example' && part !== '.env.sample' && part !== '.env.template')) {
+      return true
+    }
+  }
+
+  // Basename: private-key extensions (with .pub exempt), SSH basenames,
+  // service-account / credentials JSON.
+  const SENSITIVE_EXTS = ['.pem', '.key', '.p12', '.pfx']
+  if (!lower.endsWith('.pub')) {
+    for (const ext of SENSITIVE_EXTS) {
+      if (lower.endsWith(ext)) return true
+    }
+  }
+  if (lower === 'id_rsa' || lower === 'id_ed25519' ||
+      lower === 'id_ecdsa' || lower === 'id_dsa') {
+    return true
+  }
+  if (/(^|[-_.])service[-_]?account.*\.json$/i.test(lower)) return true
+  if (/(^|[-_.])credentials?\.json$/i.test(lower)) return true
+
+  return false
+}
+
+/**
  * Read a file for inclusion in the model-bound prompt with strict realpath
  * verification: a symlink that resolves outside the repository is rejected,
  * even if the original path was within. This is stricter than `readFileSafe`,
@@ -75,6 +122,13 @@ async function readFileForPrompt(repoRoot: string, relPath: string): Promise<str
     return null
   }
   if (realFile !== realRoot && !realFile.startsWith(realRoot + sep)) {
+    return null
+  }
+  // Even in-repo symlinks must not point at sensitive files (e.g., a symlink
+  // `src/innocuous.ts → .env` would otherwise leak secrets into the prompt,
+  // since Node's readFile follows symlinks transparently).
+  const realRelative = relative(realRoot, realFile)
+  if (isSensitivePathForPrompt(realRelative)) {
     return null
   }
   return readFileSafe(repoRoot, relPath)

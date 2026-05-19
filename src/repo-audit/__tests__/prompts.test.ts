@@ -282,6 +282,28 @@ describe('buildFeatureReviewPrompt — output instructions', () => {
     }
   })
 
+  it('rejects a symlinked owned file that resolves to an in-repo sensitive file', async () => {
+    // A symlink whose target is INSIDE the repo but is a denylisted file
+    // (e.g., .env). The existing realpath check passes (the target is
+    // in-repo), so this would otherwise leak secrets to the model.
+    const { symlink } = await import('node:fs/promises')
+    await writeFile(join(tmp, '.env'), 'SECRET_API_KEY=hunter2')
+    await mkdir(join(tmp, 'src'), { recursive: true })
+    await symlink(join(tmp, '.env'), join(tmp, 'src/leaky.ts'))
+
+    const built = await buildFeatureReviewPrompt({
+      feature: makeFeature({
+        ownedFiles: [{ path: 'src/leaky.ts', reason: 'owned' }],
+      }),
+      repoRoot: tmp,
+    })
+
+    expect(built.inlinedFiles).not.toContain('src/leaky.ts')
+    expect(built.deferredFiles).toContain('src/leaky.ts')
+    expect(built.userPrompt).not.toContain('SECRET_API_KEY')
+    expect(built.userPrompt).not.toContain('hunter2')
+  })
+
   it('escapes XML attribute characters in feature path / reason', async () => {
     await writeFileAt('src/inner.ts', 'export const x = 1\n')
     const built = await buildFeatureReviewPrompt({
