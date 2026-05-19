@@ -1326,7 +1326,7 @@ async function processReviewOutput(
  * When `format === 'json'`, emits a JSON array suitable for scripting and
  * skips the human-readable help text.
  */
-function printReviewerList(format: 'text' | 'json' | 'markdown'): void {
+export function printReviewerList(format: 'text' | 'json' | 'markdown'): void {
   const reviewers = listAvailableReviewers()
   if (format === 'json') {
     console.log(JSON.stringify(reviewers, null, 2))
