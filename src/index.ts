@@ -1028,9 +1028,13 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           logger.info(`Dispatching ${agenticReviewerInfos.length} agentic reviewer(s) in parallel: ${names}`)
         }
 
+        // Strip `onProgress` for the parallel path: a single spinner being
+        // driven by N reviewers in parallel produces incoherent flicker. The
+        // per-reviewer completion line below is the right granularity here.
+        const { onProgress: _drop, ...agenticBaseForMulti } = agenticOptions
         const results = await runAgenticReviewers({
           reviewers: agenticReviewerInfos,
-          agenticBase: agenticOptions,
+          agenticBase: agenticBaseForMulti,
           onReviewerComplete: (r) => {
             if (ctx.quiet) return
             if (r.ok) {
@@ -1080,7 +1084,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           }
         }
 
-        await processMultiReviewerOutput(results, options, ctx, prMr, branch)
+        await processMultiReviewerOutput(results, options, ctx, prMr, branch, true)
 
         if (aggregateCiExitCode !== undefined) {
           process.exit(aggregateCiExitCode)
@@ -1462,6 +1466,7 @@ async function processMultiReviewerOutput(
   ctx: CliContext,
   prMr: { id: number; platform: VcsPlatform } | null,
   branch: string,
+  agentic: boolean = false,
 ): Promise<void> {
   const okResults = results.filter((r) => r.ok && r.content !== undefined)
   const failed = results.filter((r) => !r.ok)
@@ -1497,7 +1502,10 @@ async function processMultiReviewerOutput(
       reviewOutput.structured.metadata = {
         timestamp: new Date().toISOString(),
         scope: scope as 'local' | 'pr' | 'both',
-        agentic: false,
+        agentic,
+        toolCalls: r.toolCallCount,
+        truncated: r.truncated,
+        truncationReason: r.truncationReason,
         prNumber: prMr?.platform === 'github' ? prMr.id : undefined,
         mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
         branch,
@@ -1517,6 +1525,18 @@ async function processMultiReviewerOutput(
       console.log(cyan(` Reviewer: ${r.reviewer.name} ${tag}`))
       console.log(cyan('────────────────────────────────────────'))
       console.log('')
+    }
+
+    // Agentic-mode signals: surface truncation + tool-call counts per reviewer
+    // so an iteration-cap truncation in --reviewer X,Y is visible instead of
+    // silently dropped. Mirrors the single-shot agentic path's wording.
+    if (!ctx.quiet && agentic) {
+      if (r.truncated && r.truncationReason) {
+        logger.warn(`  Note: ${r.reviewer.name} review was truncated (${r.truncationReason})`)
+      }
+      if (typeof r.toolCallCount === 'number' && r.toolCallCount > 0) {
+        logger.info(`  Tool calls (${r.reviewer.name}): ${r.toolCallCount}`)
+      }
     }
 
     await writeReviewOutput(reviewOutput, {

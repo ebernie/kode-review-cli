@@ -471,9 +471,11 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
     const sec = results.find((r) => r.reviewer.name === 'security')!
     const arch = results.find((r) => r.reviewer.name === 'architect')!
     expect(sec.usage?.input).toBe(100)
+    expect(sec.usage?.output).toBe(50)
     expect(sec.usage?.totalTokens).toBe(150)
     expect(sec.usage?.cost.total).toBe(0.001)
     expect(arch.usage?.input).toBe(200)
+    expect(arch.usage?.output).toBe(75)
     expect(arch.usage?.totalTokens).toBe(275)
     expect(arch.usage?.cost.total).toBe(0.002)
   })
@@ -518,6 +520,31 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
     })
     expect(seen.map((s) => s.name).sort()).toEqual(['architect', 'security'])
     for (const s of seen) expect(s.ok).toBe(true)
+  })
+
+  it('threads toolCallCount / truncated / truncationReason onto each ReviewerRunResult', async () => {
+    runAgenticImpl = async (opts) => {
+      const isSec = /application security engineer/i.test(String(opts.systemPrompt))
+      return {
+        content: 'ok',
+        toolCallCount: isSec ? 7 : 2,
+        truncated: isSec,
+        truncationReason: isSec ? 'iteration limit reached' : undefined,
+      }
+    }
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    const results = await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+    const sec = results.find((r) => r.reviewer.name === 'security')!
+    const arch = results.find((r) => r.reviewer.name === 'architect')!
+    expect(sec.toolCallCount).toBe(7)
+    expect(sec.truncated).toBe(true)
+    expect(sec.truncationReason).toBe('iteration limit reached')
+    expect(arch.toolCallCount).toBe(2)
+    expect(arch.truncated).toBe(false)
+    expect(arch.truncationReason).toBeUndefined()
   })
 
   it('forwards an explicit userPromptOverride to every reviewer', async () => {

@@ -44,6 +44,12 @@ export interface ReviewerRunResult {
    * cases have nothing to populate, and not every consumer asks for them.
    */
   findings?: Finding[]
+  /** Number of tool calls the agent made. Only populated in agentic mode. */
+  toolCallCount?: number
+  /** True when the agent hit maxIterations and was forced to finalize. */
+  truncated?: boolean
+  /** Human-readable truncation reason when `truncated` is true. */
+  truncationReason?: string
 }
 
 export interface RunReviewersOptions {
@@ -229,7 +235,8 @@ export async function runAgenticReviewers(
         systemPrompt,
         userPromptOverride: options.userPromptOverride,
       }
-      const { content, usage, findings } = await runAgenticReview(agenticOptions)
+      const { content, usage, findings, toolCallCount, truncated, truncationReason } =
+        await runAgenticReview(agenticOptions)
       const result: ReviewerRunResult = {
         reviewer,
         ok: true,
@@ -237,6 +244,9 @@ export async function runAgenticReviewers(
         durationMs: Date.now() - started,
         usage,
         findings,
+        toolCallCount,
+        truncated,
+        truncationReason,
       }
       options.onReviewerComplete?.(result)
       return result
