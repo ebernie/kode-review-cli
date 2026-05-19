@@ -41,6 +41,8 @@ export interface PostReviewResult {
   success: boolean
   commentPosted: boolean
   inlineCommentsPosted: number
+  inlineCommentsFailed: number
+  inlineCommentsAttempted: number
   approvalStatusSet: boolean
   errors: string[]
 }
@@ -56,6 +58,8 @@ export async function postReviewToPR(
     success: false,
     commentPosted: false,
     inlineCommentsPosted: 0,
+    inlineCommentsFailed: 0,
+    inlineCommentsAttempted: 0,
     approvalStatusSet: false,
     errors: [],
   }
@@ -105,6 +109,8 @@ export async function postReviewToPR(
       .filter(issue => issue.file && issue.line)
       .slice(0, maxInlineComments)
 
+    result.inlineCommentsAttempted = issuesWithLocation.length
+
     if (issuesWithLocation.length > 0) {
       logger.info(`Posting ${issuesWithLocation.length} inline comment(s)...`)
 
@@ -114,7 +120,12 @@ export async function postReviewToPR(
         : await getGitLabMRContext(identifier)
 
       if (!ctxResult.success) {
-        logger.debug(`Failed to fetch PR/MR context for inline comments: ${ctxResult.error}`)
+        // Context fetch failed — every intended inline comment is a failure.
+        // Callers need this surfaced; debug-level logging is invisible at default verbosity.
+        result.inlineCommentsFailed = issuesWithLocation.length
+        const msg = `Failed to fetch PR/MR context for inline comments: ${ctxResult.error}`
+        result.errors.push(msg)
+        logger.warn(msg)
       } else {
         const ctx = ctxResult.context
         for (const issue of issuesWithLocation) {
@@ -126,13 +137,19 @@ export async function postReviewToPR(
           if (inlineResult.success) {
             result.inlineCommentsPosted++
           } else {
-            logger.debug(`Failed to post inline comment: ${inlineResult.error}`)
+            result.inlineCommentsFailed++
+            const msg = `Inline comment failed (${issue.file}:${issue.line}): ${inlineResult.error}`
+            result.errors.push(msg)
+            logger.warn(msg)
           }
         }
       }
 
       if (result.inlineCommentsPosted > 0) {
-        logger.success(`Posted ${result.inlineCommentsPosted} inline comment(s)`)
+        logger.success(`Posted ${result.inlineCommentsPosted}/${result.inlineCommentsAttempted} inline comment(s)`)
+      }
+      if (result.inlineCommentsFailed > 0) {
+        logger.warn(`${result.inlineCommentsFailed} inline comment(s) failed`)
       }
     }
   }

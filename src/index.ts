@@ -1396,10 +1396,14 @@ async function processReviewOutput(
     if (postResult.success) {
       logger.success('Review posted to PR/MR')
       if (postResult.inlineCommentsPosted > 0) {
-        logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+        logger.success(`Posted ${postResult.inlineCommentsPosted}/${postResult.inlineCommentsAttempted} inline comment(s)`)
       }
       if (postResult.approvalStatusSet) {
         logger.success(`Review status: ${reviewOutput.structured.verdict.recommendation}`)
+      }
+      // Inline-comment failures don't flip overall success but must still be visible
+      if (postResult.inlineCommentsFailed > 0) {
+        logger.warn(`${postResult.inlineCommentsFailed} inline comment(s) failed to post`)
       }
     } else {
       for (const error of postResult.errors) {
@@ -1578,7 +1582,11 @@ async function processMultiReviewerOutput(
       if (postResult.success) {
         logger.success(`Posted ${r.reviewer.name} review to PR/MR`)
         if (postResult.inlineCommentsPosted > 0) {
-          logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+          logger.success(`Posted ${postResult.inlineCommentsPosted}/${postResult.inlineCommentsAttempted} inline comment(s)`)
+        }
+        // Inline-comment failures don't flip overall success but must still be visible
+        if (postResult.inlineCommentsFailed > 0) {
+          logger.warn(`${postResult.inlineCommentsFailed} inline comment(s) failed to post`)
         }
       } else {
         for (const error of postResult.errors) {

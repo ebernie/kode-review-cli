@@ -326,6 +326,128 @@ describe('postReviewToPR', () => {
   })
 })
 
+describe('postReviewToPR — inline comment failures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGitHubPRContext.mockResolvedValue({
+      success: true,
+      context: { owner: 'test-owner', repo: 'test-repo', commitId: 'abc123' },
+    })
+    mockPostGitHubPRComment.mockResolvedValue({ success: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('records inline comment failures in result.inlineCommentsFailed and result.errors', async () => {
+    mockPostGitHubPRLineComment
+      .mockResolvedValueOnce({ success: true })
+      .mockResolvedValueOnce({ success: false, error: 'API rate limit' })
+      .mockResolvedValueOnce({ success: false, error: 'Not found' })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+          { severity: 'LOW', category: 'Style', title: 'c', description: '', confidence: 'HIGH', file: 'c.ts', line: 3 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(3)
+    expect(result.inlineCommentsPosted).toBe(1)
+    expect(result.inlineCommentsFailed).toBe(2)
+    // Exactly 2 errors — one per failed inline comment, not more
+    expect(result.errors).toHaveLength(2)
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/API rate limit/),
+        expect.stringMatching(/Not found/),
+      ]),
+    )
+    expect(mockPostGitHubPRLineComment).toHaveBeenCalledTimes(3)
+  })
+
+  it('records a context-fetch failure as N failures (one per eligible issue), no line-comment calls', async () => {
+    mockGetGitHubPRContext.mockResolvedValue({ success: false, error: 'PR not found' })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(2)
+    expect(result.inlineCommentsPosted).toBe(0)
+    expect(result.inlineCommentsFailed).toBe(2)
+    // Exactly one error for the context-fetch failure, not one per issue
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors).toEqual(expect.arrayContaining([expect.stringMatching(/PR not found/)]))
+    // Line-comment API was never called — the context failure short-circuited it
+    expect(mockPostGitHubPRLineComment).not.toHaveBeenCalled()
+  })
+
+  it('leaves inlineCommentsFailed at 0 when all inline comments succeed', async () => {
+    mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(2)
+    expect(result.inlineCommentsPosted).toBe(2)
+    expect(result.inlineCommentsFailed).toBe(0)
+    expect(result.errors).toHaveLength(0)
+  })
+
+  it('sets all inline counters to 0 and makes no API calls when postInlineComments is false', async () => {
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false, postInlineComments: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(0)
+    expect(result.inlineCommentsPosted).toBe(0)
+    expect(result.inlineCommentsFailed).toBe(0)
+    expect(result.errors).toHaveLength(0)
+    expect(mockGetGitHubPRContext).not.toHaveBeenCalled()
+    expect(mockPostGitHubPRLineComment).not.toHaveBeenCalled()
+  })
+})
+
 describe('postSimpleComment', () => {
   beforeEach(() => {
     vi.clearAllMocks()
