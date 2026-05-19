@@ -64,7 +64,24 @@ deleted file mode 100644
 --- a/src/gone.ts
 +++ /dev/null
 `
-    expect(extractModifiedFilesFromDiff(diff)).toEqual(['src/gone.ts'])
+    const result = extractModifiedFilesFromDiff(diff)
+    expect(result).toEqual(['src/gone.ts'])
+    // Counter-assertion: /dev/null filter is explicitly validated, not just
+    // implied by the toEqual.
+    expect(result).not.toContain('/dev/null')
+  })
+
+  it('returns the new path on a rename diff (b/ side, not a/ side)', () => {
+    // Git renames produce asymmetric a/b paths; the function must return the
+    // post-rename name, not the pre-rename one.
+    const diff = `diff --git a/src/old.ts b/src/renamed.ts
+similarity index 100%
+rename from src/old.ts
+rename to src/renamed.ts
+`
+    const result = extractModifiedFilesFromDiff(diff)
+    expect(result).toEqual(['src/renamed.ts'])
+    expect(result).not.toContain('src/old.ts')
   })
 })
 
@@ -106,6 +123,9 @@ describe('getProjectStructureContext (integration)', () => {
     expect(ctx.directoryTree).toContain('index.ts')
     expect(ctx.directoryTree).toContain('lib/')
     expect(ctx.directoryTree).toContain('util.ts')
+    // Baseline exclusion guard: even without a node_modules dir present,
+    // confirm the tree didn't accidentally include excluded markers.
+    expect(ctx.directoryTree).not.toContain('node_modules')
   })
 
   it('extracts a README summary capped at 500 chars', async () => {
@@ -148,18 +168,36 @@ describe('getProjectStructureContext (integration)', () => {
 +y
 `
     const ctx = await getProjectStructureContext(repoRoot, diff)
-    // The exact spacing/format of the marker depends on the tree renderer.
-    // Contract: a file mentioned in the diff has a `*` after its name.
-    expect(ctx.directoryTree).toMatch(/index\.ts\s*\*/)
+    // Pin the exact render format (renderTree uses ' *' — single space + star).
+    expect(ctx.directoryTree).toMatch(/index\.ts \*/)
     // A file NOT in the diff must not be marked.
-    expect(ctx.directoryTree).not.toMatch(/util\.ts\s*\*/)
+    expect(ctx.directoryTree).not.toMatch(/util\.ts \*/)
   })
 
   it('omits .gitignored directories from the tree', async () => {
-    await mkdir(join(repoRoot, 'node_modules', 'foo'), { recursive: true })
-    await writeFile(join(repoRoot, 'node_modules', 'foo', 'pkg.json'), '{}')
-    const ctx = await getProjectStructureContext(repoRoot, '')
-    expect(ctx.directoryTree).not.toContain('node_modules')
+    // Use an isolated repo so the shared beforeAll fixture stays pristine
+    // for subsequent tests (no test-order coupling).
+    const isolated = await mkdtemp(join(tmpdir(), 'kode-gitignored-'))
+    await execa('git', ['init', '-q'], { cwd: isolated })
+    await execa('git', ['config', 'user.email', 'test@example.com'], { cwd: isolated })
+    await execa('git', ['config', 'user.name', 'Test'], { cwd: isolated })
+    await execa('git', ['config', 'commit.gpgsign', 'false'], { cwd: isolated })
+    await writeFile(join(isolated, '.gitignore'), 'node_modules/\n')
+    await mkdir(join(isolated, 'src'), { recursive: true })
+    await writeFile(join(isolated, 'src', 'x.ts'), 'export const x = 1\n')
+    await execa('git', ['add', '.'], { cwd: isolated })
+    await execa('git', ['commit', '-q', '-m', 'init'], { cwd: isolated })
+    await mkdir(join(isolated, 'node_modules', 'foo'), { recursive: true })
+    await writeFile(join(isolated, 'node_modules', 'foo', 'pkg.json'), '{}')
+    try {
+      const ctx = await getProjectStructureContext(isolated, '')
+      expect(ctx.directoryTree).not.toContain('node_modules')
+      // Counter-assertion: tracked files still appear, proving the tree
+      // wasn't empty for an unrelated reason.
+      expect(ctx.directoryTree).toContain('src/')
+    } finally {
+      await rm(isolated, { recursive: true, force: true }).catch(() => {})
+    }
   })
 })
 
@@ -174,7 +212,9 @@ describe('formatProjectStructureContext', () => {
     expect(out).toContain('### Directory Structure')
     expect(out).toContain('```')
     expect(out).toContain('└── x.ts')
-    expect(out).toContain('Files marked with `*` are modified in this change.')
+    // Pin the exact italicized form (formatProjectStructureContext emits the
+    // sentence wrapped in single asterisks for markdown italics).
+    expect(out).toContain('*Files marked with `*` are modified in this change.*')
   })
 
   it('includes the README section only when readmeSummary is set', () => {
