@@ -13,6 +13,23 @@ describe('UNTRUSTED_CONTENT_BOUNDARY', () => {
     }
   })
 
+  it('does not promise to escape tags the sanitizer cannot enforce', () => {
+    // Reverse direction: any tag named in the boundary text MUST also be
+    // in STRUCTURAL_TAGS, so the sanitizer can actually escape it when
+    // it appears in user content. Without this check, the model is told
+    // "we treat <foo> as untrusted" while <foo> flows through verbatim —
+    // a false sense of security.
+    const mentioned = new Set<string>()
+    const tagRe = /<([a-z_]+)>/gi
+    let m: RegExpExecArray | null
+    while ((m = tagRe.exec(UNTRUSTED_CONTENT_BOUNDARY)) !== null) {
+      mentioned.add(m[1].toLowerCase())
+    }
+    const known = new Set(STRUCTURAL_TAGS.map(t => t.toLowerCase()))
+    const unenforced = [...mentioned].filter(t => !known.has(t))
+    expect(unenforced).toEqual([])
+  })
+
   it('names file-content and tool-output sources', () => {
     expect(UNTRUSTED_CONTENT_BOUNDARY).toMatch(/<file[^>]*>/)
     expect(UNTRUSTED_CONTENT_BOUNDARY).toContain('<feature_metadata>')

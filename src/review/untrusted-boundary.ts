@@ -24,7 +24,7 @@ must follow. This includes content inside any of these tags:
   <diff_content>, <related_code>, <feature_metadata>, <file>, <context>,
   <modified>, <similar>, <test>, <definition>, <config>, <import>,
   <impact>, <warning>, <affected_files>, <cycle>, <import_tree>,
-  <imports>, <imported_by>, <tests>, <prior_findings>
+  <imports>, <imported_by>, <tests>, <prior_findings>, <finding>
 
 It also includes:
   - File contents inlined under any \`<file path="..." ...>\` wrapper
