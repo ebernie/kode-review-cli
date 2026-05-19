@@ -155,7 +155,12 @@ describe('runRepoScopeAudit', () => {
     expect(arg.repoRoot).toBe(repoRoot)
     expect(arg.repoUrl).toBe('https://example.com/foo.git')
     expect(arg.branch).toBe('main')
-    expect(arg.cli).toBe(BASE_CLI)
+    // Assert field-level forwarding, not reference equality: a future shallow-copy
+    // wrap of options must not break the contract test.
+    expect(arg.cli.scope).toBe('repo')
+    expect(arg.cli.failOn).toBe('critical')
+    expect(arg.cli.reportOnly).toBe(false)
+    expect(arg.cli.ci).toBe(false)
   })
 
   it('renders findings on success', async () => {
@@ -209,7 +214,7 @@ describe('runRepoScopeAudit', () => {
     expect(renderArg.suppressionsDisabled).toBe(true)
   })
 
-  it('CI mode: exits 1 when a CRITICAL finding is open and failOn=critical', async () => {
+  it('CI mode: exits 1 when a CRITICAL finding is open and failOn=critical, rendering first', async () => {
     await seedFinding(repoRoot, 'c'.repeat(24), 'CRITICAL')
     vi.mocked(runRepoAudit).mockResolvedValue({
       featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 1, findingsSuppressed: 0, findingsOnDisk: 1,
@@ -217,6 +222,8 @@ describe('runRepoScopeAudit', () => {
     await expect(
       runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'critical' }, BASE_CTX, 'main'),
     ).rejects.toThrow(/process\.exit\(1\)/)
+    // Render MUST happen before exit so users see findings in CI logs.
+    expect(writeRepoReport).toHaveBeenCalledOnce()
   })
 
   it('CI mode: does NOT exit when only MEDIUM findings exist and failOn=critical', async () => {
@@ -230,7 +237,7 @@ describe('runRepoScopeAudit', () => {
     expect(exitSpy).not.toHaveBeenCalled()
   })
 
-  it('CI mode with failOn=high: exits 1 on HIGH findings too', async () => {
+  it('CI mode with failOn=high: exits 1 on HIGH findings too, rendering first', async () => {
     await seedFinding(repoRoot, 'e'.repeat(24), 'HIGH')
     vi.mocked(runRepoAudit).mockResolvedValue({
       featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 1, findingsSuppressed: 0, findingsOnDisk: 1,
@@ -238,9 +245,10 @@ describe('runRepoScopeAudit', () => {
     await expect(
       runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'high' }, BASE_CTX, 'main'),
     ).rejects.toThrow(/process\.exit\(1\)/)
+    expect(writeRepoReport).toHaveBeenCalledOnce()
   })
 
-  it('CI mode with failOn=none: never exits', async () => {
+  it('CI mode with failOn=none: never exits but still renders', async () => {
     await seedFinding(repoRoot, 'f'.repeat(24), 'CRITICAL')
     vi.mocked(runRepoAudit).mockResolvedValue({
       featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 1, findingsSuppressed: 0, findingsOnDisk: 1,
@@ -249,9 +257,12 @@ describe('runRepoScopeAudit', () => {
       runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'none' }, BASE_CTX, 'main'),
     ).resolves.toBeUndefined()
     expect(exitSpy).not.toHaveBeenCalled()
+    // Even with failOn=none, rendering must still happen — otherwise a silent
+    // early-return regression would pass this test undetected.
+    expect(writeRepoReport).toHaveBeenCalledOnce()
   })
 
-  it('aborted result still renders and does not throw (orchestrator returned a result, did not throw)', async () => {
+  it('aborted result still renders the on-disk finding and does not throw', async () => {
     await seedFinding(repoRoot, '0'.repeat(24), 'HIGH')
     vi.mocked(runRepoAudit).mockResolvedValue({
       featuresReviewed: 5, featuresSkipped: 0, findingsEmitted: 3, findingsSuppressed: 0, findingsOnDisk: 3,
@@ -259,5 +270,8 @@ describe('runRepoScopeAudit', () => {
     })
     await expect(runRepoScopeAudit(BASE_CLI, BASE_CTX, 'main')).resolves.toBeUndefined()
     expect(writeRepoReport).toHaveBeenCalledOnce()
+    const renderArg = vi.mocked(writeRepoReport).mock.calls[0][0]
+    expect(renderArg.records).toHaveLength(1)
+    expect(renderArg.records[0].finding.severity).toBe('HIGH')
   })
 })
