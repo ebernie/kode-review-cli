@@ -613,13 +613,23 @@ export async function runRepoScopeAudit(
   }
 
   // CI mode: fail on CRITICAL (or HIGH if --fail-on=high).
+  // `uncertain` status (set by --revalidate when the agent couldn't determine
+  // whether the finding is fixed) is treated the same as `open` — the agent
+  // gave up, so a human still needs to look. Letting CI silently pass on
+  // uncertain CRITICAL findings would defeat the purpose of the gate.
   if (options.ci) {
     const triggerSev = options.failOn === 'high' ? ['CRITICAL', 'HIGH'] : ['CRITICAL']
     const blockers = allFindings.filter(
-      (r) => r.status === 'open' && triggerSev.includes(r.finding.severity),
+      (r) =>
+        (r.status === 'open' || r.status === 'uncertain') &&
+        triggerSev.includes(r.finding.severity),
     )
     if (options.failOn !== 'none' && blockers.length > 0) {
-      logger.error(`CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s); failing.`)
+      const uncertainCount = blockers.filter((r) => r.status === 'uncertain').length
+      const uncertainSuffix = uncertainCount > 0 ? ` (${uncertainCount} uncertain)` : ''
+      logger.error(
+        `CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s)${uncertainSuffix}; failing.`,
+      )
       process.exit(1)
     }
   }

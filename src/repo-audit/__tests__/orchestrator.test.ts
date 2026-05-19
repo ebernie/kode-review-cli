@@ -421,16 +421,39 @@ describe('runRepoAudit — --since filtering', () => {
 })
 
 describe('runRepoAudit — --revalidate', () => {
-  it('throws a clear "not yet implemented" error rather than silently running a full audit', async () => {
-    await expect(
-      runRepoAudit({
-        repoRoot: tmp,
-        repoUrl: 'https://x.test/r.git',
-        cli: { ...baseCli, revalidate: true },
-      }),
-    ).rejects.toThrow(/--revalidate is not yet implemented/)
+  it('delegates to runRevalidate (which has its own dedicated test file) and does NOT invoke the audit pipeline', async () => {
+    // Seed an open finding so runRevalidate has something to look at. The
+    // engine mock is left unconfigured — runRevalidate's own tests cover the
+    // happy path; here we only assert delegation does not fall through to
+    // the audit pipeline (clawpatch map, reviewFeatureWithAgent).
+    const { writeFinding } = await import('../state.js')
+    await writeFinding(tmp, {
+      schemaVersion: 1,
+      findingId: 'seed',
+      featureId: 'feat-x',
+      persona: 'general',
+      status: 'fixed', // already closed → runRevalidate short-circuits, no engine call
+      finding: {
+        severity: 'LOW', category: 'other', confidence: 'LOW',
+        title: 't', file: 'f.ts', lineStart: 1, lineEnd: 1,
+        evidence: 'x', problem: 'p', recommendation: 'r',
+      },
+      createdByRunId: 'r0',
+      createdAt: '2026-05-19T10:00:00.000Z',
+      updatedAt: '2026-05-19T10:00:00.000Z',
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, revalidate: true },
+    })
+    // Audit pipeline must not have been engaged.
     expect(mocks.runClawpatchMap).not.toHaveBeenCalled()
     expect(mocks.reviewFeatureWithAgent).not.toHaveBeenCalled()
+    // runRevalidate observed the (closed) seed finding and returned cleanly.
+    expect(result.findingsOnDisk).toBe(1)
+    expect(result.featuresReviewed).toBe(0)
   })
 })
 

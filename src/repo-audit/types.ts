@@ -120,6 +120,20 @@ export const REPO_FINDING_STATUSES = [
 export type RepoFindingStatus = (typeof REPO_FINDING_STATUSES)[number]
 
 /**
+ * Verdicts the agent can emit during `--revalidate`. Deliberately narrower
+ * than `RepoFindingStatus`: `'false-positive'` and `'wont-fix'` are user
+ * intents, not observations the model can make, so they are never assigned
+ * by revalidation.
+ */
+export const REVALIDATION_VERDICTS = [
+  'still-present',
+  'fixed',
+  'uncertain',
+] as const
+
+export type RevalidationVerdict = (typeof REVALIDATION_VERDICTS)[number]
+
+/**
  * Persisted in `.kode-review/findings/<findingId>.json`.
  *
  * `finding` is the verbatim parsed `Finding` from the LLM. The wrapper adds:
@@ -130,6 +144,13 @@ export type RepoFindingStatus = (typeof REPO_FINDING_STATUSES)[number]
  *   - createdAt / updatedAt: ISO timestamps.
  *   - createdByRunId: the run that emitted this finding (for tracing).
  *   - persona: which reviewer persona produced it.
+ *
+ * Revalidation trail (all optional; added by `--revalidate`):
+ *   - lastRevalidatedAt: ISO timestamp of the most recent revalidation pass.
+ *   - revalidationVerdict: the agent's most recent verdict. Preserved even
+ *     when the verdict is `'still-present'` so the audit trail can show
+ *     "open, last checked 3 days ago" vs "open, never re-checked".
+ *   - revalidationRunId: the run id that emitted the most recent verdict.
  */
 export const RepoFindingRecordSchema = z.object({
   schemaVersion: z.literal(1),
@@ -141,6 +162,9 @@ export const RepoFindingRecordSchema = z.object({
   createdByRunId: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  lastRevalidatedAt: z.string().optional(),
+  revalidationVerdict: z.enum(REVALIDATION_VERDICTS).optional(),
+  revalidationRunId: z.string().optional(),
 })
 
 export type RepoFindingRecord = z.infer<typeof RepoFindingRecordSchema>
@@ -184,6 +208,21 @@ export interface RepoAuditOptions {
 export const REPO_AUDIT_DEFAULTS = {
   MAX_OWNED_FILES_IN_PROMPT: 12,
   MAX_CONTEXT_FILES_IN_PROMPT: 24,
+  /**
+   * Cap on distinct cited files inlined into a `--revalidate` prompt.
+   *
+   * Revalidation prompts reference files via finding citations (one row each
+   * in `RepoFindingRecord.finding.file`). Without a cap, a feature with many
+   * findings spread across many files inlines every one of them, blowing the
+   * model's context budget on a workload that already has tool access.
+   *
+   * The ceiling mirrors `MAX_CONTEXT_FILES_IN_PROMPT` (24) because cited files
+   * behave like context files: the agent reads them, but can fall back to
+   * `read_file` for the overflow. Tuned independently so future evolution
+   * (e.g. raising owned vs. context) does not silently change revalidation
+   * behavior.
+   */
+  MAX_REVALIDATION_FILES_IN_PROMPT: 24,
   MAX_FINDINGS_PER_FEATURE: 10,
   DEFAULT_JOBS: 4,
 } as const

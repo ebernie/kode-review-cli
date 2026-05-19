@@ -25,8 +25,11 @@ import { REPO_AUDIT_DEFAULTS, type FeatureRecord } from './types.js'
  * XML attribute escaper — guards against feature paths / reasons containing
  * `"`, `<`, `>`, `&`, `'` from corrupting the `<file path="..." reason="...">`
  * wrappers we use to delimit inlined file content in the prompt.
+ *
+ * Exported so sibling prompt builders (`revalidation-prompts.ts`) share the
+ * same escaping semantics.
  */
-function escXmlAttr(s: string): string {
+export function escXmlAttr(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;')
@@ -42,7 +45,7 @@ function escXmlAttr(s: string): string {
  * containing ```code```) from prematurely closing the fence and letting
  * downstream text become instructions to the model.
  */
-function pickFence(body: string): string {
+export function pickFence(body: string): string {
   const runs = body.match(/`{3,}/g)
   if (!runs) return '```'
   let longest = 0
@@ -58,7 +61,7 @@ function pickFence(body: string): string {
  * to the model) but inappropriate here — we must never inline `/etc/passwd`
  * or similar via a malicious in-repo symlink.
  */
-async function readFileForPrompt(repoRoot: string, relPath: string): Promise<string | null> {
+export async function readFileForPrompt(repoRoot: string, relPath: string): Promise<string | null> {
   let safe: string
   try {
     safe = assertWithinRepo(repoRoot, relPath)
@@ -110,7 +113,7 @@ context rules accordingly:
  * hint is best-effort: it gives the model a syntax cue but does not
  * structurally rely on accuracy.
  */
-function langHintFromPath(path: string): string {
+export function langHintFromPath(path: string): string {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
   const map: Record<string, string> = {
     ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',

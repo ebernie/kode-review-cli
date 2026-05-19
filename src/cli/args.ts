@@ -313,6 +313,13 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
   }
 
+  // --revalidate is implemented only for the kode-agent engine. The clawpatch
+  // engine has its own pipeline for emitting findings and there is no
+  // equivalent re-check operation, so mixing the two is incoherent.
+  if (opts.revalidate && engine === 'clawpatch') {
+    throw new Error(`--revalidate is not supported with --engine clawpatch. Run with --engine kode-agent (the default).`)
+  }
+
   return {
     scope: opts.scope as ReviewScope | undefined,
     pr: opts.pr,

@@ -81,6 +81,12 @@ describe('parseArgs: --scope repo', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--report-only', '--revalidate'))).toThrow(/contradictory intent|cannot be combined/)
   })
 
+  it('refuses --revalidate combined with --engine clawpatch (clawpatch has no equivalent re-check)', () => {
+    expect(() => parseArgs(args('--scope', 'repo', '--revalidate', '--engine', 'clawpatch'))).toThrow(
+      /not supported with --engine clawpatch/,
+    )
+  })
+
   it('rejects --scope repo + --watch at parse time (periodic repo-audit not yet supported)', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--watch'))).toThrow(
       /--watch with --scope repo is not yet supported/,
