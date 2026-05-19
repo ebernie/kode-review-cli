@@ -36,6 +36,10 @@ describe('printReviewerList', () => {
       expect(typeof out).toBe('string')
       const parsed = JSON.parse(out as string)
       expect(Array.isArray(parsed)).toBe(true)
+      // Pretty-printed (2-space indent) — pinned so a switch to compact
+      // JSON.stringify breaks this test rather than silently changing the
+      // user-visible format.
+      expect(out as string).toMatch(/\n {4}"name":/)
     })
 
     it('serializes every reviewer with name, description, builtin, and templatePath', () => {

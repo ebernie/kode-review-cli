@@ -33,6 +33,12 @@ vi.mock('../indexer/index.js', () => ({
 import { runRepoScopeAudit } from '../index.js'
 import { runRepoAudit } from '../repo-audit/orchestrator.js'
 import { writeRepoReport } from '../repo-audit/report.js'
+// `state.js` is intentionally NOT mocked — these tests validate the real
+// filesystem round-trip: seeded findings written by `writeFinding` must be
+// readable by the real `listFindings` inside `runRepoScopeAudit`. If a future
+// refactor routes the listing path through the (mocked) orchestrator instead,
+// these tests would silently exercise the mock — re-evaluate the mock graph
+// at that point.
 import { writeFinding } from '../repo-audit/state.js'
 import { getRepoRoot, getRepoUrl } from '../vcs/index.js'
 import type { CliOptions } from '../cli/args.js'
