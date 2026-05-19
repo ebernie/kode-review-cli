@@ -22,6 +22,8 @@ export {
 export {
   resolveReviewerNames,
   runReviewers,
+  runAgenticReviewers,
   type ReviewerRunResult,
   type RunReviewersOptions,
+  type RunAgenticReviewersOptions,
 } from './runner.js'

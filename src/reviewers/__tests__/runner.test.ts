@@ -33,8 +33,26 @@ let runReviewImpl: (opts: CapturedOptions) => Promise<{ content: string; usage?:
   content: 'default',
 })
 
+// Separate capture / impl for the agentic engine so the two paths can be
+// asserted independently and never cross-contaminate.
+const capturedAgentic: CapturedRun[] = []
+let runAgenticImpl: (
+  opts: CapturedOptions,
+) => Promise<{
+  content: string
+  toolCallCount: number
+  truncated: boolean
+  truncationReason?: string
+  usage?: UsageTotals
+}> = async () => ({
+  content: 'default-agentic',
+  toolCallCount: 0,
+  truncated: false,
+})
+
 vi.mock('../../review/engine.js', () => ({
   runReview: vi.fn(async (opts: CapturedOptions) => runReviewImpl(opts)),
+  runAgenticReview: vi.fn(async (opts: CapturedOptions) => runAgenticImpl(opts)),
 }))
 
 import {
@@ -42,6 +60,7 @@ import {
   clearReviewerPromptCacheForTests,
   resolveReviewerNames,
   runReviewers,
+  runAgenticReviewers,
 } from '../index.js'
 
 describe('resolveReviewerNames', () => {
@@ -305,5 +324,212 @@ describe('runReviewers — parallel orchestration', () => {
     })
     expect(captured[0].model).toBe('anthropic/claude-sonnet-4-6')
     expect(captured[0].timeoutMs).toBe(90_000)
+  })
+})
+
+describe('runAgenticReviewers — parallel agentic orchestration', () => {
+  // The agentic base shape supplies every AgenticReviewOptions field the
+  // engine needs except systemPrompt + userPromptOverride, which the runner
+  // adds per reviewer. Kept minimal — agentic-specific fields like
+  // indexerUrl/maxIterations aren't required for the tests below.
+  const baseAgentic = {
+    diffContent: 'fake-diff',
+    context: 'ctx',
+    repoRoot: '/tmp/repo',
+    repoUrl: 'https://example.com/repo',
+    branch: 'main',
+  } as unknown as Parameters<typeof runAgenticReviewers>[0]['agenticBase']
+
+  beforeEach(() => {
+    clearReviewerPromptCacheForTests()
+    capturedAgentic.length = 0
+    runAgenticImpl = async (opts) => {
+      capturedAgentic.push({
+        systemPrompt: opts.systemPrompt,
+        userPromptOverride: opts.userPromptOverride,
+        model: opts.model,
+        timeoutMs: opts.timeoutMs,
+        releasedAt: Date.now(),
+      })
+      return {
+        content: `AGENTIC from system: ${String(opts.systemPrompt).slice(0, 40)}`,
+        toolCallCount: 0,
+        truncated: false,
+      }
+    }
+  })
+
+  afterEach(() => {
+    clearReviewerPromptCacheForTests()
+  })
+
+  it('sends each reviewer its own system prompt through the agentic engine', async () => {
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    const results = await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+
+    expect(results).toHaveLength(2)
+    for (const r of results) expect(r.ok).toBe(true)
+
+    // Each reviewer must get its OWN system prompt — that's the whole
+    // point of the persona dispatch.
+    const systemPrompts = new Set(capturedAgentic.map((r) => r.systemPrompt))
+    expect(systemPrompts.size).toBe(2)
+    // The system prompts are the actual built-in templates.
+    expect(
+      capturedAgentic.find((r) =>
+        /senior application security engineer/i.test(String(r.systemPrompt)),
+      ),
+    ).toBeDefined()
+    expect(
+      capturedAgentic.find((r) =>
+        /staff-level software architect/i.test(String(r.systemPrompt)),
+      ),
+    ).toBeDefined()
+  })
+
+  it('runs agentic reviewers in parallel, not serially', async () => {
+    const gates: Array<() => void> = []
+    runAgenticImpl = () =>
+      new Promise((resolve) => {
+        gates.push(() =>
+          resolve({ content: 'ok', toolCallCount: 0, truncated: false }),
+        )
+      })
+
+    const reviewers = resolveReviewerNames(['security', 'architect', 'doc-reviewer'])
+    const promise = runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(gates).toHaveLength(3)
+
+    // Release in reverse order — only possible if all three are concurrently
+    // suspended inside runAgenticReview(). A serial implementation would
+    // have only ONE gate registered at this point.
+    gates[2]()
+    gates[1]()
+    gates[0]()
+
+    const results = await promise
+    expect(results.map((r) => r.reviewer.name)).toEqual([
+      'security',
+      'architect',
+      'doc-reviewer',
+    ])
+    for (const r of results) expect(r.ok).toBe(true)
+  })
+
+  it('captures per-reviewer agentic failures without throwing', async () => {
+    runAgenticImpl = async (opts) => {
+      if (/application security engineer/i.test(String(opts.systemPrompt))) {
+        throw new Error('engine boom')
+      }
+      return { content: 'ok', toolCallCount: 0, truncated: false }
+    }
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    const results = await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+    expect(results).toHaveLength(2)
+    const sec = results.find((r) => r.reviewer.name === 'security')!
+    const arch = results.find((r) => r.reviewer.name === 'architect')!
+    expect(sec.ok).toBe(false)
+    expect(sec.error).toMatch(/engine boom/)
+    expect(arch.ok).toBe(true)
+    expect(arch.content).toBe('ok')
+  })
+
+  it('threads usage from runAgenticReview onto each ReviewerRunResult', async () => {
+    runAgenticImpl = async (opts) => {
+      const isSec = /application security engineer/i.test(String(opts.systemPrompt))
+      return {
+        content: 'ok',
+        toolCallCount: 3,
+        truncated: false,
+        usage: {
+          input: isSec ? 100 : 200,
+          output: isSec ? 50 : 75,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: isSec ? 150 : 275,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: isSec ? 0.001 : 0.002 },
+          assistantMessages: 1,
+        },
+      }
+    }
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    const results = await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+    const sec = results.find((r) => r.reviewer.name === 'security')!
+    const arch = results.find((r) => r.reviewer.name === 'architect')!
+    expect(sec.usage?.input).toBe(100)
+    expect(sec.usage?.totalTokens).toBe(150)
+    expect(sec.usage?.cost.total).toBe(0.001)
+    expect(arch.usage?.input).toBe(200)
+    expect(arch.usage?.totalTokens).toBe(275)
+    expect(arch.usage?.cost.total).toBe(0.002)
+  })
+
+  it('captures a failure to load the agentic template without invoking the engine', async () => {
+    // Use the user-reviewers tmpdir route to register a deliberately broken
+    // template that loadReviewerSystemPrompt will reject.
+    const tmp = mkdtempSync(join(tmpdir(), 'kode-review-runner-agentic-'))
+    const originalEnv = process.env.KODE_REVIEW_REVIEWERS_DIR
+    process.env.KODE_REVIEW_REVIEWERS_DIR = tmp
+    clearReviewerPromptCacheForTests()
+    try {
+      writeFileSync(join(tmp, 'broken.md'), '   \n')
+      const reviewers = resolveReviewerNames(['broken'])
+      const results = await runAgenticReviewers({
+        reviewers,
+        agenticBase: baseAgentic,
+      })
+      expect(results).toHaveLength(1)
+      expect(results[0].ok).toBe(false)
+      expect(results[0].error).toMatch(/empty/i)
+      // The engine must NOT have been invoked when the template failed.
+      expect(capturedAgentic).toHaveLength(0)
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.KODE_REVIEW_REVIEWERS_DIR
+      } else {
+        process.env.KODE_REVIEW_REVIEWERS_DIR = originalEnv
+      }
+      rmSync(tmp, { recursive: true, force: true })
+      clearReviewerPromptCacheForTests()
+    }
+  })
+
+  it('fires onReviewerComplete for each agentic reviewer', async () => {
+    const seen: Array<{ name: string; ok: boolean }> = []
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+      onReviewerComplete: (r) => seen.push({ name: r.reviewer.name, ok: r.ok }),
+    })
+    expect(seen.map((s) => s.name).sort()).toEqual(['architect', 'security'])
+    for (const s of seen) expect(s.ok).toBe(true)
+  })
+
+  it('forwards an explicit userPromptOverride to every reviewer', async () => {
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+      userPromptOverride: 'CUSTOM-AGENTIC-USER-PROMPT',
+    })
+    expect(capturedAgentic).toHaveLength(2)
+    for (const r of capturedAgentic) {
+      expect(r.userPromptOverride).toBe('CUSTOM-AGENTIC-USER-PROMPT')
+    }
   })
 })

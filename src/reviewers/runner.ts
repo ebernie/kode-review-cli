@@ -7,7 +7,12 @@
  * (which is the order returned by `resolveReviewerNames`).
  */
 
-import { runReview, type ReviewOptions } from '../review/engine.js'
+import {
+  runAgenticReview,
+  runReview,
+  type AgenticReviewOptions,
+  type ReviewOptions,
+} from '../review/engine.js'
 import type { Finding } from '../review/finding-schema.js'
 import type { UsageTotals } from '../review/usage.js'
 import {
@@ -145,6 +150,86 @@ export async function runReviewers(
         timeoutMs: options.timeoutMs,
       }
       const { content, usage, findings } = await runReview(reviewOptions)
+      const result: ReviewerRunResult = {
+        reviewer,
+        ok: true,
+        content,
+        durationMs: Date.now() - started,
+        usage,
+        findings,
+      }
+      options.onReviewerComplete?.(result)
+      return result
+    } catch (err) {
+      const result: ReviewerRunResult = {
+        reviewer,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - started,
+      }
+      options.onReviewerComplete?.(result)
+      return result
+    }
+  })
+
+  return Promise.all(work)
+}
+
+export interface RunAgenticReviewersOptions {
+  /** Reviewer names to run (post-resolution: no duplicates, no `all`). */
+  reviewers: ReviewerInfo[]
+  /**
+   * Common agentic data shared by every reviewer (everything except
+   * `systemPrompt` and `userPromptOverride`, which the runner sets per
+   * reviewer).
+   */
+  agenticBase: Omit<AgenticReviewOptions, 'systemPrompt' | 'userPromptOverride'>
+  /**
+   * Optional user prompt override. When undefined, runAgenticReview builds
+   * the default agentic prompt from `agenticBase` — that's the recommended
+   * shape so every reviewer sees the same structured agentic context.
+   */
+  userPromptOverride?: string
+  /** Notification hook fired when a reviewer completes (success or failure). */
+  onReviewerComplete?: (result: ReviewerRunResult) => void
+}
+
+/**
+ * Agentic analogue of `runReviewers`. Dispatches each reviewer to its own
+ * agentic `AgentSession` in parallel, substituting the reviewer's system
+ * prompt while preserving the tool-enabled agent loop.
+ *
+ * One reviewer's failure does NOT cancel the others — failures are captured
+ * per-reviewer and surfaced via the returned `ReviewerRunResult`.
+ *
+ * Returns one result per reviewer in the input order.
+ */
+export async function runAgenticReviewers(
+  options: RunAgenticReviewersOptions,
+): Promise<ReviewerRunResult[]> {
+  const work = options.reviewers.map(async (reviewer): Promise<ReviewerRunResult> => {
+    const started = Date.now()
+    let systemPrompt: string
+    try {
+      systemPrompt = loadReviewerSystemPrompt(reviewer)
+    } catch (err) {
+      const result: ReviewerRunResult = {
+        reviewer,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - started,
+      }
+      options.onReviewerComplete?.(result)
+      return result
+    }
+
+    try {
+      const agenticOptions: AgenticReviewOptions = {
+        ...options.agenticBase,
+        systemPrompt,
+        userPromptOverride: options.userPromptOverride,
+      }
+      const { content, usage, findings } = await runAgenticReview(agenticOptions)
       const result: ReviewerRunResult = {
         reviewer,
         ok: true,
