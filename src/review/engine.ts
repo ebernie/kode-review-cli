@@ -360,10 +360,6 @@ export async function runAgenticReview(
   const maxIterations = options.maxIterations ?? DEFAULT_AGENTIC_MAX_ITERATIONS
   const timeoutSec = options.timeout ?? DEFAULT_AGENTIC_TIMEOUT_SEC
 
-  if (!options.indexerUrl) {
-    logger.warn('Indexer URL not provided — only `read_file` will be available to the agent.')
-  }
-
   let userPrompt: string
   if (options.userPromptOverride !== undefined) {
     userPrompt = options.userPromptOverride

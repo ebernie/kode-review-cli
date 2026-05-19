@@ -162,10 +162,18 @@ export function createKodeReviewToolsExtension(
     const haveIndexer = resolved.indexerClient !== null
     const haveSearch = haveIndexer || resolved.rgAvailable
 
-    if (!haveIndexer && !resolved.rgAvailable) {
+    if (haveIndexer) {
+      logger.info('Agentic tools: indexer-backed (8 tools registered).')
+    } else if (resolved.rgAvailable) {
+      logger.info(
+        'Agentic tools: ripgrep + git fallbacks (8 tools registered; ' +
+          'get_call_graph/get_impact run in degraded mode without the indexer).',
+      )
+    } else {
       logger.warn(
         'Agentic mode: neither indexer nor ripgrep is available — ' +
-          'only read_file, get_call_graph (degraded), get_commits, and get_file_history will be registered.',
+          'only read_file, get_call_graph (degraded), get_commits, and get_file_history will be registered. ' +
+          'Install ripgrep (`brew install ripgrep`) for code search fallbacks.',
       )
     }
 
