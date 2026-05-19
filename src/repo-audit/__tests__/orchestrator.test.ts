@@ -582,10 +582,11 @@ describe('runRepoAudit — edge cases', () => {
     })
 
     // Loop broke after the rate-limit fired on the second persona of feat-x —
-    // we should NOT have proceeded to feat-y's personas.
-    expect(call).toBeLessThanOrEqual(3)
+    // exactly 2 calls (success + rate-limit) and exactly 1 feature touched.
+    // Tight equality catches any regression that delays the break.
+    expect(call).toBe(2)
     expect(result.aborted).toBe(true)
     expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
-    expect(result.featuresReviewed).toBeLessThanOrEqual(1)
+    expect(result.featuresReviewed).toBe(1)
   })
 })
