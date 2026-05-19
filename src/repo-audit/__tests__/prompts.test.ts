@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { FINDINGS_BLOCK_INSTRUCTIONS, FINDINGS_FENCE_TAG } from '../../review/index.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../../review/untrusted-boundary.js'
 import { buildFeatureReviewPrompt, FEATURE_REVIEW_MODE_SUFFIX } from '../prompts.js'
 import type { FeatureRecord, TrustBoundary } from '../types.js'
 
@@ -333,6 +334,12 @@ describe('buildFeatureReviewPrompt — output instructions', () => {
     expect(built.userPrompt).toContain('````')
     // Body itself is still present verbatim.
     expect(built.userPrompt).toContain('const x = 1')
+  })
+})
+
+describe('FEATURE_REVIEW_MODE_SUFFIX — untrusted boundary', () => {
+  it('includes UNTRUSTED_CONTENT_BOUNDARY', () => {
+    expect(FEATURE_REVIEW_MODE_SUFFIX).toContain(UNTRUSTED_CONTENT_BOUNDARY)
   })
 })
 

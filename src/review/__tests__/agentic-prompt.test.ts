@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { buildAgenticPrompt } from '../agentic-prompt.js'
+import { buildAgenticPrompt, AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../untrusted-boundary.js'
 
 describe('buildAgenticPrompt — XML injection hardening', () => {
   it('escapes a </diff_content> close hidden in the diff body', () => {
@@ -51,5 +52,11 @@ describe('buildAgenticPrompt — XML injection hardening', () => {
     })
     expect(out).toContain('<\\diff_content foo="bar">')
     expect(out).not.toContain('<diff_content foo="bar">')
+  })
+})
+
+describe('AGENTIC_SYSTEM_PROMPT — untrusted boundary', () => {
+  it('appends UNTRUSTED_CONTENT_BOUNDARY', () => {
+    expect(AGENTIC_SYSTEM_PROMPT).toContain(UNTRUSTED_CONTENT_BOUNDARY)
   })
 })

@@ -19,6 +19,7 @@ import { relative, resolve, sep } from 'node:path'
 import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/index.js'
 import { readFileSafe } from '../review/suppressions.js'
 import { assertWithinRepo } from '../review/tools/path-guard.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../review/untrusted-boundary.js'
 import { REPO_AUDIT_DEFAULTS, type FeatureRecord } from './types.js'
 
 /**
@@ -160,7 +161,7 @@ context rules accordingly:
 - The feature's declared trust_boundaries tell you what attack surface it
   crosses; use them to focus rather than to gate (every persona still
   applies its own criteria).
-`.trim()
+`.trim() + '\n\n' + UNTRUSTED_CONTENT_BOUNDARY
 
 /**
  * Wrap raw file content in a fenced, language-hinted block. The language
