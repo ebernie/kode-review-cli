@@ -36,9 +36,10 @@ export const STRUCTURAL_TAGS = [
 /**
  * Escape any structural tag occurrence in `content` so it cannot break out
  * of its enclosing prompt section. Matches:
- *   - Plain forms:           `<tag>`, `</tag>`
- *   - Whitespace variants:   `</tag >`, `<tag  >`
- *   - Attribute variants:    `<tag attr="x">`, `<tag a="x" b='y'>`, `<tag />`
+ *   - Plain forms:              `<tag>`, `</tag>`
+ *   - Whitespace variants:      `</tag >`, `<tag  >`
+ *   - Attribute variants:       `<tag attr="x">`, `<tag a="x" b='y'>`, `<tag />`
+ *   - Closing-tag attr variants:`</tag foo="bar">` (malformed but injection-relevant)
  * Case-insensitive. Idempotent (already-escaped `<\tag>` forms are left
  * unchanged because the inserted backslash prevents a re-match).
  *
@@ -49,9 +50,10 @@ export function sanitizeXmlContent(content: string, _tagName?: string): string {
   let sanitized = content
 
   for (const tag of STRUCTURAL_TAGS) {
-    // Closing tag: </tag> or </tag\s*>
+    // Closing tag: </tag>, </tag >, or </tag attr="x"> (malformed but injection-relevant).
+    // `([^>]*)` captures everything up to the first `>`, preserving the suffix literally.
     sanitized = sanitized.replace(
-      new RegExp(`</(${tag})(\\s*)>`, 'gi'),
+      new RegExp(`</(${tag})([^>]*)>`, 'gi'),
       '<\\/$1$2>',
     )
     // Opening tag: <tag>, <tag\s+attrs>, <tag />, <tag attr/>

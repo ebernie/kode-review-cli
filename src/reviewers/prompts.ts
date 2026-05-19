@@ -10,6 +10,7 @@
 
 import { readFileSync } from 'node:fs'
 import { resolveReviewer, type ReviewerInfo } from './registry.js'
+import { sanitizeXmlContent } from '../review/xml-sanitize.js'
 
 export interface ReviewData {
   /** One-line description of what is being reviewed (branch, PR ref, etc.). */
@@ -73,38 +74,6 @@ export function getReviewerSystemPrompt(name: string): string {
   return loadReviewerSystemPrompt(resolveReviewer(name))
 }
 
-/** Structural XML tags we use in user-prompt sections — escaped if found in user content. */
-const STRUCTURAL_TAGS = [
-  'pr_mr_info',
-  'related_code',
-  'diff_content',
-  'author_intent',
-  'project_structure',
-  'modified',
-  'similar',
-  'test',
-  'definition',
-  'config',
-  'import',
-  'context',
-  'impact',
-  'warning',
-  'affected_files',
-  'cycle',
-  'import_tree',
-  'imports',
-  'imported_by',
-]
-
-function sanitizeXmlContent(content: string): string {
-  let out = content
-  for (const tag of STRUCTURAL_TAGS) {
-    out = out.replace(new RegExp(`</${tag}>`, 'gi'), `<\\/${tag}>`)
-    out = out.replace(new RegExp(`<${tag}>`, 'gi'), `<\\${tag}>`)
-  }
-  return out
-}
-
 /**
  * Build the user-prompt body shared across all reviewers.
  *
@@ -125,7 +94,7 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
     parts.push('The PR/MR author describes the purpose of these changes as:')
     parts.push('')
     parts.push('<author_intent>')
-    parts.push(sanitizeXmlContent(data.prDescriptionSummary))
+    parts.push(sanitizeXmlContent(data.prDescriptionSummary, 'author_intent'))
     parts.push('</author_intent>')
     parts.push('')
   }
@@ -134,7 +103,7 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
     parts.push('## Project Structure')
     parts.push('')
     parts.push('<project_structure>')
-    parts.push(sanitizeXmlContent(data.projectStructureContext))
+    parts.push(sanitizeXmlContent(data.projectStructureContext, 'project_structure'))
     parts.push('</project_structure>')
     parts.push('')
   }
@@ -142,7 +111,7 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
   if (data.prMrInfo) {
     parts.push('## PR/MR Information')
     parts.push('<pr_mr_info>')
-    parts.push(sanitizeXmlContent(data.prMrInfo))
+    parts.push(sanitizeXmlContent(data.prMrInfo, 'pr_mr_info'))
     parts.push('</pr_mr_info>')
     parts.push('')
   }
@@ -151,14 +120,14 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
     parts.push('## Related Code Context')
     parts.push('')
     parts.push('<related_code>')
-    parts.push(sanitizeXmlContent(data.semanticContext))
+    parts.push(sanitizeXmlContent(data.semanticContext, 'related_code'))
     parts.push('</related_code>')
     parts.push('')
   }
 
   parts.push('## Code Changes (Diff)')
   parts.push('<diff_content>')
-  parts.push(sanitizeXmlContent(data.diffContent))
+  parts.push(sanitizeXmlContent(data.diffContent, 'diff_content'))
   parts.push('</diff_content>')
 
   return parts.join('\n')

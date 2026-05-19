@@ -85,6 +85,11 @@ describe('sanitizeXmlContent — attribute breakouts', () => {
     expect(sanitizeXmlContent('a <diff_content/> b', 'diff_content'))
       .toBe('a <\\diff_content/> b')
   })
+
+  it('escapes closing tag with attributes (malformed but injection-relevant)', () => {
+    expect(sanitizeXmlContent('a </author_intent foo="bar"> b', 'author_intent'))
+      .toBe('a <\\/author_intent foo="bar"> b')
+  })
 })
 
 describe('sanitizeXmlContent — prefix-neighbor isolation', () => {
@@ -114,6 +119,8 @@ describe('sanitizeXmlContent — every tag in STRUCTURAL_TAGS is covered', () =>
     expect(attr).toBe(`pre <\\${tag} a="b"> post`)
     const ws = sanitizeXmlContent(`pre </${tag} > post`, tag)
     expect(ws).toBe(`pre <\\/${tag} > post`)
+    const closingAttr = sanitizeXmlContent(`pre </${tag} x="y"> post`, tag)
+    expect(closingAttr).toBe(`pre <\\/${tag} x="y"> post`)
   })
 })
 
