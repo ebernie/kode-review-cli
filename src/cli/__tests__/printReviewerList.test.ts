@@ -39,21 +39,10 @@ describe('printReviewerList', () => {
       expect(parsed).toHaveLength(3)
     })
 
-    it('includes name, description, builtin, and templatePath for every reviewer', () => {
+    it('serializes every reviewer with name, description, builtin, and templatePath', () => {
       printReviewerList('json')
       const parsed = JSON.parse(logSpy.mock.calls[0][0] as string)
-      expect(parsed[0]).toEqual({
-        name: 'general',
-        description: 'General-purpose code review',
-        builtin: true,
-        templatePath: '/builtin/general.md',
-      })
-      expect(parsed[2]).toEqual({
-        name: 'myteam',
-        description: 'Custom team reviewer',
-        builtin: false,
-        templatePath: '/home/u/.config/kode-review/reviewers/myteam.md',
-      })
+      expect(parsed).toEqual(FIXTURE_REVIEWERS)
     })
 
     it('preserves input order', () => {
