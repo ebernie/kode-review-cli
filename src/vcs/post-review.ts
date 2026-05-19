@@ -257,14 +257,14 @@ async function setApprovalStatusForReview(
   } else {
     if (verdict === 'APPROVE') {
       return setGitLabMRApproval(identifier, true)
-    } else if (verdict === 'REQUEST_CHANGES') {
-      // GitLab has no native "request changes" verb. Explicitly revoke any
-      // prior bot approval so the MR doesn't sit in "approved" state while
-      // the review comment flags a regression.
-      return unapproveGitLabMR(identifier)
     } else {
-      // NEEDS_DISCUSSION — no approval action needed.
-      return { success: true }
+      // GitLab has no native "request changes" verb, and the severity gate
+      // can downgrade an APPROVE verdict to NEEDS_DISCUSSION when CRITICAL/HIGH
+      // issues are present. In both cases the desired postcondition is the same:
+      // the MR must NOT be approved. Revoke any prior bot approval idempotently
+      // (succeeds if there was no prior approval) so a stale APPROVE never
+      // contradicts the current review verdict.
+      return unapproveGitLabMR(identifier)
     }
   }
 }

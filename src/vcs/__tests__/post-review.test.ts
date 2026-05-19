@@ -580,7 +580,9 @@ describe('postReviewToPR — severity gate on auto-approve', () => {
     expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(7, '', 'APPROVE')
   })
 
-  it('downgrades GitLab APPROVE to no-op when there is a CRITICAL issue', async () => {
+  it('downgrades GitLab APPROVE to unapprove when there is a CRITICAL issue', async () => {
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
+
     await postReviewToPR(
       {
         verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
@@ -592,8 +594,11 @@ describe('postReviewToPR — severity gate on auto-approve', () => {
       { platform: 'gitlab', mrIid: 7, postInlineComments: false, setApprovalStatus: true },
     )
 
-    // Must NOT approve when CRITICAL is present
+    // Must NOT approve when CRITICAL is present...
     expect(mockSetGitLabMRApproval).not.toHaveBeenCalledWith(7, true)
+    // ...AND must actively revoke any prior bot approval so the MR doesn't
+    // sit in "approved" state contradicting the new review verdict.
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(7)
   })
 
   it('lets APPROVE through when there are zero issues', async () => {
@@ -660,7 +665,7 @@ describe('postReviewToPR — GitLab REQUEST_CHANGES revokes prior approval', () 
     expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
   })
 
-  it('does nothing on NEEDS_DISCUSSION (no approve, no unapprove)', async () => {
+  it('calls unapproveGitLabMR on NEEDS_DISCUSSION to clear any prior approval', async () => {
     await postReviewToPR(
       {
         summary: 'test',
@@ -672,8 +677,10 @@ describe('postReviewToPR — GitLab REQUEST_CHANGES revokes prior approval', () 
       { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
     )
 
-    // NEEDS_DISCUSSION must not touch approval state in either direction
-    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+    // GitLab can only express APPROVE or not-APPROVE. NEEDS_DISCUSSION means
+    // the bot wants the MR in the not-APPROVE state. Revoke any prior approval
+    // (idempotent on "not approved"); never call setGitLabMRApproval(_, true).
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(42)
     expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
   })
 
