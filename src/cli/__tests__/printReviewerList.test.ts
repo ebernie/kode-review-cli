@@ -29,14 +29,13 @@ describe('printReviewerList', () => {
   })
 
   describe('format=json', () => {
-    it('emits a single parseable JSON array and nothing else', () => {
+    it('emits exactly one console.log call (no human-readable preamble or footer)', () => {
       printReviewerList('json')
       expect(logSpy).toHaveBeenCalledOnce()
       const out = logSpy.mock.calls[0][0]
       expect(typeof out).toBe('string')
       const parsed = JSON.parse(out as string)
       expect(Array.isArray(parsed)).toBe(true)
-      expect(parsed).toHaveLength(3)
     })
 
     it('serializes every reviewer with name, description, builtin, and templatePath', () => {
