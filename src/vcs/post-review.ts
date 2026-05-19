@@ -155,17 +155,22 @@ export async function postReviewToPR(
     }
   }
 
-  // Set approval status based on verdict
+  // Set approval status based on verdict, with severity-count ground-truth gate
   if (setApprovalStatus) {
+    const effective = effectiveVerdictForApproval(review)
+    if (effective.downgraded) {
+      result.errors.push(effective.reason!)
+      logger.warn(effective.reason!)
+    }
     const approvalResult = await setApprovalStatusForReview(
       identifier,
       platform,
-      review.verdict.recommendation
+      effective.verdict,
     )
 
     if (approvalResult.success) {
       result.approvalStatusSet = true
-      logger.success(`Review status set: ${review.verdict.recommendation}`)
+      logger.success(`Review status set: ${effective.verdict}`)
     } else if (approvalResult.error) {
       result.errors.push(`Failed to set approval status: ${approvalResult.error}`)
     }
@@ -174,6 +179,32 @@ export async function postReviewToPR(
   // Overall success if at least the main comment was posted
   result.success = result.commentPosted
   return result
+}
+
+/**
+ * The `setApprovalStatusForReview` call publishes a verdict to GitHub/GitLab.
+ * Mirror the same severity-count ground truth that `resolveCiExitCode`
+ * applies to the CI exit code: if there is any CRITICAL or HIGH issue in
+ * the review, an APPROVE verdict from the model is downgraded to
+ * NEEDS_DISCUSSION (becomes COMMENT on GitHub / no-op on GitLab).
+ * The model's recommendation is advisory; the count axis is the ground truth.
+ */
+function effectiveVerdictForApproval(
+  review: { verdict: { recommendation: Verdict }; issues: { severity: string }[] },
+): { verdict: Verdict; downgraded: boolean; reason?: string } {
+  const declared = review.verdict.recommendation
+  if (declared !== 'APPROVE') return { verdict: declared, downgraded: false }
+
+  const critical = review.issues.filter(i => i.severity === 'CRITICAL').length
+  const high = review.issues.filter(i => i.severity === 'HIGH').length
+  if (critical > 0 || high > 0) {
+    return {
+      verdict: 'NEEDS_DISCUSSION', // becomes COMMENT on GitHub / no-op on GitLab
+      downgraded: true,
+      reason: `APPROVE downgraded: ${critical} critical, ${high} high issue(s) present`,
+    }
+  }
+  return { verdict: declared, downgraded: false }
 }
 
 /**
