@@ -75,8 +75,29 @@ describe('sanitizeXmlContent — attribute breakouts', () => {
       'a <related_code attr="a>b"> tail',
       'related_code',
     )
-    expect(result.startsWith('a <\\related_code')).toBe(true)
-    expect(result).not.toMatch(/(?<!\\)<related_code/)
+    // The opening '<' is broken by '\'; the literal substring '<related_code'
+    // (angle-bracket directly before 'r') must not appear anywhere.
+    expect(result).not.toContain('<related_code')
+    expect(result).toContain('<\\related_code')
+  })
+
+  it('escapes self-closing tag without preceding space', () => {
+    expect(sanitizeXmlContent('a <diff_content/> b', 'diff_content'))
+      .toBe('a <\\diff_content/> b')
+  })
+})
+
+describe('sanitizeXmlContent — prefix-neighbor isolation', () => {
+  it('does not let the import rule misfire on imports content', () => {
+    // Both tags are in STRUCTURAL_TAGS, so both get escaped — but
+    // verify the result uses the imports escape (full word), never a
+    // partial-prefix escape from the import rule.
+    const input = 'x <imports> y </imports> z'
+    const result = sanitizeXmlContent(input)
+    expect(result).toBe('x <\\imports> y <\\/imports> z')
+    // Cross-check: no partial-prefix escape was emitted.
+    expect(result).not.toContain('<\\import>')
+    expect(result).not.toContain('<\\/import>')
   })
 })
 
