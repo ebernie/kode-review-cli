@@ -11,6 +11,7 @@ import { resolveReviewer } from '../reviewers/registry.js'
 import { logger } from '../utils/logger.js'
 import { runClawpatchMap } from './clawpatch-cli.js'
 import { reviewFeatureWithAgent } from './engines/kode-agent.js'
+import { isRateLimitError, isTransientModelError } from './error-classify.js'
 import { filterFeaturesBySince } from './feature-filter.js'
 import { pendingFeatures, readFeatures } from './features.js'
 import {
@@ -45,6 +46,10 @@ export interface RunRepoAuditResult {
   findingsSuppressed: number
   /** Total findings on disk after the run (open + closed). */
   findingsOnDisk: number
+  /** True if a transient/terminal error stopped the loop before all features were reviewed. */
+  aborted?: boolean
+  /** Human-readable explanation when aborted is true (e.g. rate-limit notice). */
+  abortReason?: string
 }
 
 /**
@@ -184,19 +189,38 @@ export async function runRepoAudit(
       cyan(`feature=${feature.featureId} personas=${personaNames.join(',')}`),
     )
 
+    let abortLoop: { reason: string } | null = null
     for (const name of personaNames) {
       const persona = resolveReviewer(name)
-      const result = await reviewFeatureWithAgent({
-        feature,
-        persona,
-        repoRoot,
-        repoUrl: opts.repoUrl,
-        branch: opts.branch,
-        indexerUrl: opts.indexerUrl,
-        model: cli.model,
-        maxIterations: cli.maxIterations,
-        timeoutSec: cli.agenticTimeout,
-      })
+      let result
+      try {
+        result = await reviewFeatureWithAgent({
+          feature,
+          persona,
+          repoRoot,
+          repoUrl: opts.repoUrl,
+          branch: opts.branch,
+          indexerUrl: opts.indexerUrl,
+          model: cli.model,
+          maxIterations: cli.maxIterations,
+          timeoutSec: cli.agenticTimeout,
+        })
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        if (isRateLimitError(err)) {
+          logger.error(
+            `  ${persona.name}: rate limit hit — aborting the run. Already-written findings are preserved. (${msg})`,
+          )
+          abortLoop = { reason: msg }
+          break
+        }
+        if (isTransientModelError(err)) {
+          logger.warn(`  ${persona.name}: transient model error — skipping this persona. (${msg})`)
+        } else {
+          logger.warn(`  ${persona.name}: error — skipping this persona. (${msg})`)
+        }
+        continue
+      }
 
       // Apply structured suppression filter (unless --no-suppressions).
       let kept = result.findings
@@ -235,6 +259,28 @@ export async function runRepoAudit(
     }
 
     reviewed += 1
+    if (abortLoop) {
+      // Record what we accomplished and propagate aborted=true to the caller.
+      await appendRunHistory(repoRoot, {
+        runId,
+        startedAt,
+        endedAt: new Date().toISOString(),
+        engine: 'kode-agent',
+        featuresReviewed: reviewed,
+        findingsEmitted: totalEmitted,
+        model: cli.model,
+        since: cli.since,
+      })
+      return {
+        featuresReviewed: reviewed,
+        featuresSkipped: skipped,
+        findingsEmitted: totalEmitted,
+        findingsSuppressed: totalSuppressed,
+        findingsOnDisk: (await listFindings(repoRoot)).length,
+        aborted: true,
+        abortReason: abortLoop.reason,
+      }
+    }
   }
 
   // Record run history.

@@ -495,4 +495,97 @@ describe('runRepoAudit — edge cases', () => {
     // Override is verbatim — no auto-dispatch — so only security ran.
     expect(personas).toEqual(['security'])
   })
+
+  it('continues to the next persona when one persona throws a non-rate-limit error', async () => {
+    // kind=service + user-input boundary → general + architect + security (3 personas).
+    await writeFeatureFile('feat-a', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+
+    let callCount = 0
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ persona }) => {
+      callCount += 1
+      if (persona.name === 'security') {
+        throw new Error('Some weird transient blip')
+      }
+      return {
+        feature: undefined,
+        persona,
+        findings: [
+          {
+            severity: 'LOW',
+            category: 'maintainability',
+            confidence: 'HIGH',
+            title: `tidy from ${persona.name}`,
+            file: 'src/foo.ts',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'foo',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        ],
+        content: '',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+        truncated: false,
+      }
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    // All 3 personas were dispatched; security threw, general + architect
+    // each emitted one finding.
+    expect(callCount).toBe(3)
+    expect(result.featuresReviewed).toBe(1)
+    expect(result.findingsEmitted).toBe(2)
+    expect(result.aborted).toBeFalsy()
+  })
+
+  it('breaks the loop on a rate-limit error and reports aborted=true', async () => {
+    // Two features, each dispatching 3 personas (general/architect/security).
+    await writeFeatureFile('feat-x', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+    await writeFeatureFile('feat-y', {
+      kind: 'service',
+      trustBoundaries: ['user-input'],
+    })
+
+    let call = 0
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ persona }) => {
+      call += 1
+      if (call === 1) {
+        return {
+          feature: undefined,
+          persona,
+          findings: [],
+          content: '',
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+          truncated: false,
+        }
+      }
+      throw new Error(
+        'Model returned an error: You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.',
+      )
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    // Loop broke after the rate-limit fired on the second persona of feat-x —
+    // we should NOT have proceeded to feat-y's personas.
+    expect(call).toBeLessThanOrEqual(3)
+    expect(result.aborted).toBe(true)
+    expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
+    expect(result.featuresReviewed).toBeLessThanOrEqual(1)
+  })
 })
