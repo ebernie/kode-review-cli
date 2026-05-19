@@ -17,6 +17,23 @@ import type { RepoFindingRecord } from './types.js'
 export type RepoSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
 const SEVERITIES: RepoSeverity[] = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']
 
+/**
+ * "Needs-attention" predicate: open + uncertain.
+ *
+ * `uncertain` is set by `--revalidate` when the agent cannot determine
+ * whether a finding has been fixed. Treating it as closed would silently
+ * drop CRITICAL findings from the report and let CI gates pass — which
+ * is the exact opposite of the intent. The agent gave up; a human still
+ * needs to look. So uncertain rolls up alongside open everywhere a
+ * human-eyeball gate is applied (Open section, severity rollup, Feature ×
+ * Severity matrix, per-finding detail, CI fail-on gate).
+ *
+ * The truly-closed terminal states are: `fixed`, `wont-fix`, `false-positive`.
+ */
+function isUnresolved(r: RepoFindingRecord): boolean {
+  return r.status === 'open' || r.status === 'uncertain'
+}
+
 export interface RenderRepoReportOptions {
   records: RepoFindingRecord[]
   format: OutputFormat
@@ -62,13 +79,23 @@ export async function writeRepoReport(
 // ── JSON ──────────────────────────────────────────────────────────────────
 
 function renderJson(records: RepoFindingRecord[]): string {
+  const openCount = records.filter((r) => r.status === 'open').length
+  const uncertainCount = records.filter((r) => r.status === 'uncertain').length
   return JSON.stringify(
     {
       version: 1,
       generatedAt: new Date().toISOString(),
       total: records.length,
+      // openCount / uncertainCount / closedCount: separate counts so machine
+      // consumers (CI bots, dashboards) can distinguish "needs human" from
+      // truly-closed without re-deriving from byStatus.
+      openCount,
+      uncertainCount,
+      closedCount: records.length - openCount - uncertainCount,
       byStatus: groupCounts(records, (r) => r.status),
-      bySeverity: groupCounts(records.filter((r) => r.status === 'open'), (r) => r.finding.severity),
+      // bySeverity counts unresolved (open + uncertain) — uncertain still
+      // represents unresolved risk that needs human attention.
+      bySeverity: groupCounts(records.filter(isUnresolved), (r) => r.finding.severity),
       findings: records.map((r) => ({
         findingId: r.findingId,
         featureId: r.featureId,
@@ -97,15 +124,19 @@ function renderJson(records: RepoFindingRecord[]): string {
 // ── Text ──────────────────────────────────────────────────────────────────
 
 function renderText(records: RepoFindingRecord[], suppressionsDisabled?: boolean): string {
-  const open = records.filter((r) => r.status === 'open')
+  const unresolved = records.filter(isUnresolved)
+  const openOnly = records.filter((r) => r.status === 'open')
+  const uncertain = records.filter((r) => r.status === 'uncertain')
+  const closedCount = records.length - unresolved.length
   const lines: string[] = []
   lines.push('═══════════════════════════════════════════════════════════════')
   lines.push('  Repo Audit Report')
   lines.push('═══════════════════════════════════════════════════════════════')
   lines.push('')
   lines.push(`Total findings:  ${records.length}`)
-  lines.push(`Open:            ${open.length}`)
-  lines.push(`Closed:          ${records.length - open.length}  (fixed / wont-fix / false-positive)`)
+  lines.push(`Open:            ${openOnly.length}`)
+  lines.push(`Uncertain:       ${uncertain.length}  (revalidation could not determine)`)
+  lines.push(`Closed:          ${closedCount}  (fixed / wont-fix / false-positive)`)
   if (suppressionsDisabled === true) {
     lines.push(`Suppressions:    DISABLED (--no-suppressions)`)
   }
@@ -116,31 +147,33 @@ function renderText(records: RepoFindingRecord[], suppressionsDisabled?: boolean
     return lines.join('\n')
   }
 
-  // Severity rollup for open findings.
-  const sev = severityRollup(open)
-  lines.push('Open by severity:')
+  // Severity rollup for unresolved findings (open + uncertain).
+  const sev = severityRollup(unresolved)
+  lines.push('Unresolved by severity (open + uncertain):')
   for (const s of SEVERITIES) {
     lines.push(`  ${s.padEnd(8)} ${sev[s]}`)
   }
   lines.push('')
 
   // Feature × severity matrix.
-  lines.push('Feature × Severity (open findings):')
-  lines.push(formatFeatureSeverityTable(open))
+  lines.push('Feature × Severity (unresolved findings):')
+  lines.push(formatFeatureSeverityTable(unresolved))
   lines.push('')
 
   // Per-finding detail, grouped by severity then feature.
   lines.push('───────────────────────────────────────────────────────────────')
-  lines.push('  Findings (open, by severity → feature)')
+  lines.push('  Findings (unresolved, by severity → feature)')
   lines.push('───────────────────────────────────────────────────────────────')
   for (const s of SEVERITIES) {
-    const inSev = open.filter((r) => r.finding.severity === s)
+    const inSev = unresolved.filter((r) => r.finding.severity === s)
     if (inSev.length === 0) continue
     lines.push('')
     lines.push(`[${s}]`)
     for (const r of inSev) {
+      // Tag uncertain findings so readers see they're inconclusive, not new.
+      const uncertainTag = r.status === 'uncertain' ? ' [UNCERTAIN]' : ''
       lines.push('')
-      lines.push(`  · ${r.finding.title}`)
+      lines.push(`  · ${r.finding.title}${uncertainTag}`)
       lines.push(`    feature: ${r.featureId}  persona: ${r.persona}  confidence: ${r.finding.confidence}`)
       lines.push(`    file:    ${r.finding.file}:${r.finding.lineStart}${r.finding.lineEnd !== r.finding.lineStart ? `-${r.finding.lineEnd}` : ''}`)
       lines.push(`    evidence:    ${oneLine(r.finding.evidence)}`)
@@ -154,13 +187,17 @@ function renderText(records: RepoFindingRecord[], suppressionsDisabled?: boolean
 // ── Markdown ──────────────────────────────────────────────────────────────
 
 function renderMarkdown(records: RepoFindingRecord[], suppressionsDisabled?: boolean): string {
-  const open = records.filter((r) => r.status === 'open')
+  const unresolved = records.filter(isUnresolved)
+  const openOnly = records.filter((r) => r.status === 'open')
+  const uncertain = records.filter((r) => r.status === 'uncertain')
+  const closedCount = records.length - unresolved.length
   const lines: string[] = []
   lines.push('# Repo Audit Report')
   lines.push('')
   lines.push(`- **Total findings:** ${records.length}`)
-  lines.push(`- **Open:** ${open.length}`)
-  lines.push(`- **Closed:** ${records.length - open.length}`)
+  lines.push(`- **Open:** ${openOnly.length}`)
+  lines.push(`- **Uncertain:** ${uncertain.length} _(revalidation could not determine)_`)
+  lines.push(`- **Closed:** ${closedCount} _(fixed / wont-fix / false-positive)_`)
   if (suppressionsDisabled === true) {
     lines.push(`- **Suppressions:** DISABLED (\`--no-suppressions\`)`)
   }
@@ -171,8 +208,8 @@ function renderMarkdown(records: RepoFindingRecord[], suppressionsDisabled?: boo
     return lines.join('\n')
   }
 
-  const sev = severityRollup(open)
-  lines.push('## Open Findings by Severity')
+  const sev = severityRollup(unresolved)
+  lines.push('## Unresolved Findings by Severity (open + uncertain)')
   lines.push('')
   lines.push('| Severity | Count |')
   lines.push('|----------|-------|')
@@ -180,21 +217,23 @@ function renderMarkdown(records: RepoFindingRecord[], suppressionsDisabled?: boo
   lines.push('')
 
   // Feature × severity matrix as a markdown table.
-  lines.push('## Feature × Severity (open findings)')
+  lines.push('## Feature × Severity (unresolved findings)')
   lines.push('')
-  lines.push(formatFeatureSeverityMarkdownTable(open))
+  lines.push(formatFeatureSeverityMarkdownTable(unresolved))
   lines.push('')
 
   for (const s of SEVERITIES) {
-    const inSev = open.filter((r) => r.finding.severity === s)
+    const inSev = unresolved.filter((r) => r.finding.severity === s)
     if (inSev.length === 0) continue
     lines.push(`## ${s} Findings`)
     lines.push('')
     for (const r of inSev) {
-      lines.push(`### ${r.finding.title}`)
+      const uncertainTag = r.status === 'uncertain' ? ' [UNCERTAIN]' : ''
+      lines.push(`### ${r.finding.title}${uncertainTag}`)
       lines.push('')
       lines.push(`- **Feature:** ${r.featureId}`)
       lines.push(`- **Persona:** ${r.persona}`)
+      lines.push(`- **Status:** ${r.status}`)
       lines.push(`- **Confidence:** ${r.finding.confidence}`)
       lines.push(`- **Category:** ${r.finding.category}`)
       lines.push(`- **File:** \`${r.finding.file}:${r.finding.lineStart}${r.finding.lineEnd !== r.finding.lineStart ? `-${r.finding.lineEnd}` : ''}\``)
@@ -279,7 +318,7 @@ function formatFeatureSeverityTable(records: RepoFindingRecord[]): string {
 
 function formatFeatureSeverityMarkdownTable(records: RepoFindingRecord[]): string {
   const rows = buildFeatureRows(records)
-  if (rows.length === 0) return '_(no open findings)_'
+  if (rows.length === 0) return '_(no unresolved findings)_'
   const lines = [
     '| Feature | CRITICAL | HIGH | MEDIUM | LOW | Total |',
     '|---------|---------:|-----:|-------:|----:|------:|',

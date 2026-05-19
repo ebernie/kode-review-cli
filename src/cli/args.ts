@@ -138,7 +138,7 @@ export function createProgram(): Command {
 
   // ── Agent / CI tuning ──────────────────────────────────────────────────────
   program
-    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 10)', '10')
+    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 20)', '20')
     .option('--agentic-timeout <s>', 'Timeout in seconds for agent mode (default: 600)', '600')
     .option('--fail-on <level>', 'In --ci mode, exit non-zero on findings of this severity (critical|high|none)', 'critical')
     .option('--no-suppressions', 'Disable kode-review: ignore markers in source — report every finding')
@@ -243,7 +243,7 @@ export function parseArgs(argv: string[]): CliOptions {
   }
 
   // Validate max iterations for agentic mode
-  const maxIterationsRaw = opts.maxIterations ?? '10'
+  const maxIterationsRaw = opts.maxIterations ?? '20'
   const maxIterations = parseInt(maxIterationsRaw, 10)
   if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 50) {
     throw new Error(`Invalid max-iterations: "${maxIterationsRaw}". Must be a number between 1 and 50.`)
@@ -330,6 +330,13 @@ export function parseArgs(argv: string[]): CliOptions {
   // --report-only and --revalidate have contradictory intent.
   if (opts.reportOnly && opts.revalidate) {
     throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
+  }
+
+  // --revalidate is implemented only for the kode-agent engine. The clawpatch
+  // engine has its own pipeline for emitting findings and there is no
+  // equivalent re-check operation, so mixing the two is incoherent.
+  if (opts.revalidate && engine === 'clawpatch') {
+    throw new Error(`--revalidate is not supported with --engine clawpatch. Run with --engine kode-agent (the default).`)
   }
 
   return {

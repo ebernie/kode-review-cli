@@ -255,6 +255,19 @@ export interface RunHistoryEntry {
   findingsEmitted: number
   model?: string
   since?: string
+  /**
+   * Run mode. Absent in pre-revalidate logs (assume `'audit'`).
+   */
+  mode?: 'audit' | 'revalidate'
+  /** Open findings inspected during a revalidate run. */
+  findingsRevalidated?: number
+  /** Findings flipped from `'open'` to `'fixed'` in this run. */
+  findingsClosed?: number
+  /** Findings left in `'uncertain'` state by this run. */
+  findingsUncertain?: number
+  /** Findings whose verdict was `'still-present'` — counted separately so
+   * `closed + uncertain + stillPresent === revalidated`. */
+  findingsStillPresent?: number
 }
 
 export async function appendRunHistory(
