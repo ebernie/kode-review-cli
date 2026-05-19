@@ -87,6 +87,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
 
 import { runReview, runAgenticReview } from '../engine.js'
 import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
+import { AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
 
 beforeEach(() => {
   captured.options = null
@@ -550,6 +551,8 @@ describe('engine option overrides', () => {
     captured.resolvePrompt()
     await promise
 
+    // Guard: missing-call regression must show as "0 captures" not "wrong content".
+    expect(captures.length).toBeGreaterThan(0)
     expect(captureContains(captures, USER_OVERRIDE_BASIC)).toBe(true)
 
     // The default builder's distinctive opening must NOT appear — proves
@@ -616,11 +619,10 @@ describe('engine option overrides', () => {
     }
     expect(loader.options.systemPromptOverride).toBeDefined()
     const defaultPrompt = loader.options.systemPromptOverride!()
-    expect(typeof defaultPrompt).toBe('string')
-    expect(defaultPrompt.length).toBeGreaterThan(0)
-    // Must NOT be the persona override sentinel from the previous test —
-    // proves a different (default) value flows through when override is absent.
-    expect(defaultPrompt).not.toBe(SYSTEM_OVERRIDE_AGENTIC)
+    // Pin to the actual exported constant: an unrelated non-empty string
+    // (e.g. from a regression that hardcoded a different default) would
+    // pass the previous length+inequality check but fail this one.
+    expect(defaultPrompt).toBe(AGENTIC_SYSTEM_PROMPT)
   })
 
   it('runAgenticReview: userPromptOverride is forwarded to session.prompt verbatim, bypassing buildAgenticPrompt', async () => {
@@ -639,6 +641,7 @@ describe('engine option overrides', () => {
     captured.resolvePrompt()
     await promise
 
+    expect(captures.length).toBeGreaterThan(0)
     expect(captureContains(captures, USER_OVERRIDE_AGENTIC)).toBe(true)
 
     // buildAgenticPrompt's distinctive section header must NOT appear.
