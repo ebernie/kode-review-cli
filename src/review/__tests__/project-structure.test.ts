@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execa } from 'execa'
@@ -239,5 +239,79 @@ describe('formatProjectStructureContext', () => {
 
     const without = formatProjectStructureContext({ directoryTree: 'r/' })
     expect(without).not.toContain('### Architecture Documentation')
+  })
+})
+
+// ── symlink hardening ─────────────────────────────────────────────────────
+
+describe('project-structure symlink hardening', () => {
+  it('does not follow README.md symlinks that resolve outside the repo', async () => {
+    const outer = await mkdtemp(join(tmpdir(), 'ps-outer-'))
+    const repo = await mkdtemp(join(tmpdir(), 'ps-repo-'))
+    try {
+      await writeFile(join(outer, 'secret.txt'), 'SECRET=hunter2')
+      await symlink(join(outer, 'secret.txt'), join(repo, 'README.md'))
+
+      const context = await getProjectStructureContext(repo, '')
+      // The symlink points outside repoRoot — content must not be inlined.
+      expect(context.readmeSummary ?? '').not.toContain('hunter2')
+    } finally {
+      await rm(outer, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('does not follow ARCHITECTURE.md symlinks that resolve outside the repo', async () => {
+    const outer = await mkdtemp(join(tmpdir(), 'ps-arch-outer-'))
+    const repo = await mkdtemp(join(tmpdir(), 'ps-arch-repo-'))
+    try {
+      await writeFile(join(outer, 'secret.txt'), 'API_KEY=topsecret')
+      await symlink(join(outer, 'secret.txt'), join(repo, 'ARCHITECTURE.md'))
+
+      const context = await getProjectStructureContext(repo, '')
+      // The symlink points outside repoRoot — content must not be inlined.
+      expect(context.architectureDoc ?? '').not.toContain('topsecret')
+    } finally {
+      await rm(outer, { recursive: true, force: true })
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('still reads README.md when it is a regular file', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'ps-regular-'))
+    try {
+      await writeFile(join(repo, 'README.md'), '# Real readme\n\nContent here.')
+      const context = await getProjectStructureContext(repo, '')
+      // Happy-path: a legitimate regular-file README must be readable.
+      expect(context.readmeSummary).toContain('Real readme')
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('still reads ARCHITECTURE.md when it is a regular file inside the repo', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'ps-arch-regular-'))
+    try {
+      await writeFile(join(repo, 'ARCHITECTURE.md'), '# System Design\n\nLayered architecture.')
+      const context = await getProjectStructureContext(repo, '')
+      // Happy-path: a legitimate regular-file ARCHITECTURE.md must be readable.
+      expect(context.architectureDoc).toContain('System Design')
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
+  })
+
+  it('reads a README.md that is an intra-repo symlink (symlink target inside repo)', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'ps-intra-repo-'))
+    try {
+      // Create the real file inside the repo, symlink to it from README.md
+      await writeFile(join(repo, 'docs-readme.md'), '# Intra-repo readme\n\nContents visible.')
+      await symlink(join(repo, 'docs-readme.md'), join(repo, 'README.md'))
+      const context = await getProjectStructureContext(repo, '')
+      // Intra-repo symlink should be allowed through.
+      expect(context.readmeSummary).toContain('Intra-repo readme')
+    } finally {
+      await rm(repo, { recursive: true, force: true })
+    }
   })
 })
