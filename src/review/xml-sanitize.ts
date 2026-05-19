@@ -12,6 +12,7 @@ export const STRUCTURAL_TAGS = [
   'pr_mr_info',
   'related_code',
   'diff_content',
+  'prior_findings',
   'author_intent',
   'project_structure',
   'trust_boundaries',

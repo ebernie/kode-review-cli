@@ -8,6 +8,7 @@
  */
 import { z } from 'zod'
 import type { Finding } from './finding-schema.js'
+import { pickFence } from '../repo-audit/prompts.js'
 import { sanitizeXmlContent } from './xml-sanitize.js'
 
 export const REVALIDATION_FENCE_TAG = 'kode-revalidation'
@@ -31,7 +32,21 @@ export interface RevalidatePromptOptions {
 }
 
 export function buildRevalidatePrompt(opts: RevalidatePromptOptions): string {
-  const findingsJson = JSON.stringify({ findings: opts.priorFindings }, null, 2)
+  // Sanitize free-text fields of each finding before serializing. This is
+  // belt-and-braces: the <prior_findings untrusted="true"> wrapper plus the
+  // UNTRUSTED_CONTENT_BOUNDARY in the system prompt should be sufficient,
+  // but stripping structural-tag closes from the data eliminates whole
+  // classes of partial-match confusion.
+  const sanitizedFindings = opts.priorFindings.map(f => ({
+    ...f,
+    title: sanitizeXmlContent(f.title, 'prior_findings'),
+    problem: sanitizeXmlContent(f.problem, 'prior_findings'),
+    recommendation: sanitizeXmlContent(f.recommendation, 'prior_findings'),
+  }))
+
+  const findingsJson = JSON.stringify({ findings: sanitizedFindings }, null, 2)
+  const fence = pickFence(findingsJson)
+
   return [
     'You are reviewing an updated version of a PR you previously reviewed.',
     '',
@@ -39,9 +54,11 @@ export function buildRevalidatePrompt(opts: RevalidatePromptOptions): string {
     '',
     '## Prior findings (from the previous review)',
     '',
-    '```json',
+    '<prior_findings untrusted="true">',
+    fence + 'json',
     findingsJson,
-    '```',
+    fence,
+    '</prior_findings>',
     '',
     opts.prMrInfo ? '## PR/MR Information\n\n<pr_mr_info>\n' + sanitizeXmlContent(opts.prMrInfo, 'pr_mr_info') + '\n</pr_mr_info>\n' : '',
     '## New diff (current state of the PR)',
