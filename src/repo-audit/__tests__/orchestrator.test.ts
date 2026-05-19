@@ -590,6 +590,28 @@ describe('runRepoAudit — edge cases', () => {
     expect(result.featuresReviewed).toBe(1)
   })
 
+  it('skips a feature when another runner already holds its lock', async () => {
+    const { acquireFeatureLock } = await import('../state.js')
+    mocks.isNodeVersionCompatible.mockReturnValue(true)
+    mocks.detectClawpatch.mockResolvedValue({ installed: true, version: '0.3.0' })
+    mocks.runClawpatchMap.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    await writeFeatureFile('feat_locked', { trustBoundaries: ['user-input'], kind: 'service' })
+
+    // Pre-acquire the lock on behalf of a phantom "other runner" so the
+    // orchestrator's own acquireFeatureLock call returns null.
+    const held = await acquireFeatureLock(tmp, 'feat_locked', 'phantom-run-id')
+    expect(held).not.toBeNull()
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli },
+    })
+
+    expect(mocks.reviewFeatureWithAgent).not.toHaveBeenCalled()
+    expect(result.featuresReviewed).toBe(0)
+  })
+
   it('--report-only short-circuits before Node/clawpatch gates fire', async () => {
     // Even on a broken environment (incompatible Node, no clawpatch), report-only
     // must list the findings already on disk — that's the whole point of the flag.

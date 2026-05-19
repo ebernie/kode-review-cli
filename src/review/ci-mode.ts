@@ -56,7 +56,10 @@ export function extractPrNumber(
 
 export function resolveCiExitCode(summary: ReviewSummary, failOn: FailOn): number {
   if (failOn === 'none') return 0
-  if (summary.verdict === 'APPROVE') return 0
+  // Evaluate the counts FIRST and only honor an APPROVE verdict when the
+  // counts agree. An LLM that emits APPROVE alongside critical/high findings
+  // (model error, prompt injection, persona inconsistency) must still fail
+  // CI — the count axis is the ground truth, the verdict is advisory.
   if (failOn === 'critical' && summary.issuesByCount.critical > 0) return 1
   if (failOn === 'high' && (summary.issuesByCount.critical > 0 || summary.issuesByCount.high > 0)) return 1
   return 0

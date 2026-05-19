@@ -22,10 +22,12 @@ import {
 } from './install.js'
 import { resolvePersonasWithOverride } from './persona-dispatch.js'
 import {
+  acquireFeatureLock,
   appendRunHistory,
   computeFindingId,
   listFindings,
   newRunId,
+  releaseFeatureLock,
   writeFinding,
 } from './state.js'
 import { filterSuppressedStructured } from './suppressions-structured.js'
@@ -184,11 +186,25 @@ export async function runRepoAudit(
 
   for (const feature of toReview) {
     const personaNames = resolvePersonasWithOverride(feature, cli.reviewers === undefined || arraysEqual(cli.reviewers, ['general']) ? [] : cli.reviewers)
+
+    // Acquire an exclusive per-feature lock so concurrent audits on the same
+    // repo don't double-spend model budget or race on the deterministic
+    // finding-file path. A held lock means another runner is already on it —
+    // skip and let that runner finish.
+    const lock = await acquireFeatureLock(repoRoot, feature.featureId, runId)
+    if (lock === null) {
+      logger.info(
+        cyan(`feature=${feature.featureId} skipped — locked by another runner`),
+      )
+      continue
+    }
+
     logger.info(
       cyan(`feature=${feature.featureId} personas=${personaNames.join(',')}`),
     )
 
     let abortLoop: { reason: string } | null = null
+    try {
     for (const name of personaNames) {
       const persona = resolveReviewer(name)
       let result
@@ -255,6 +271,9 @@ export async function runRepoAudit(
       if (result.truncated) {
         logger.warn(`  ${persona.name}: ${result.truncationReason ?? 'truncated'}`)
       }
+    }
+    } finally {
+      await releaseFeatureLock(repoRoot, feature.featureId)
     }
 
     reviewed += 1

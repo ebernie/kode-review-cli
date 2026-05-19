@@ -68,7 +68,10 @@ describe('createKodeReviewToolsExtension', () => {
     testRepoRoot = join(tmpdir(), `kode-review-pi-tools-${Date.now()}-${Math.random().toString(36).slice(2)}`)
     await mkdir(testRepoRoot, { recursive: true })
     await writeFile(join(testRepoRoot, '.gitignore'), 'node_modules\ndist\n')
-    mockClientImpl = {}
+    // Default: indexer health probe succeeds. Tests that exercise the
+    // unreachable-indexer path override with `mockClientImpl.health = vi.fn().mockResolvedValue(false)`
+    // (or a rejection) before constructing the extension.
+    mockClientImpl = { health: vi.fn().mockResolvedValue(true) }
     mockRgAvailable.mockResolvedValue(true)
     mockRgMatches = []
   })
@@ -110,6 +113,35 @@ describe('createKodeReviewToolsExtension', () => {
       'read_file',
       'search_code',
     ])
+  })
+
+  it('falls back to ripgrep when indexerUrl is configured but /health fails', async () => {
+    // A configured-but-unreachable indexer must NOT register the indexer-backed
+    // tool handlers — those would just reject every call. Fall back to the
+    // ripgrep/git fs handlers so the agent still gets useful tools.
+    mockClientImpl = { health: vi.fn().mockResolvedValue(false) }
+    mockRgAvailable.mockResolvedValue(true)
+    const pi = createFakePi()
+    const factory = createKodeReviewToolsExtension({
+      repoRoot: testRepoRoot,
+      repoUrl: 'https://github.com/x/y',
+      indexerUrl: 'http://localhost:8321',
+      branch: 'main',
+    })
+    await factory(pi as never)
+
+    // Use the fs-path probe: search_code executed on the fs handler returns
+    // results with matchTypes=['lexical']. The indexer handler would call
+    // hybridSearch (not mocked here) and fail.
+    mockRgMatches = [{ path: 'x.ts', line: 1, text: 'foo', matchText: 'foo', column: 1 }]
+    const searchCode = pi.tools.find((t) => t.name === 'search_code')!
+    const result = (await searchCode.execute('id-1', { query: 'foo' })) as {
+      content: { type: string; text: string }[]
+    }
+    const parsed = JSON.parse(result.content[0].text) as {
+      results: Array<{ matchTypes: string[] }>
+    }
+    expect(parsed.results[0]?.matchTypes).toEqual(['lexical'])
   })
 
   it('registers all 8 tools when indexer is absent but rg is present (fs path)', async () => {

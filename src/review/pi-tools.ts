@@ -135,10 +135,27 @@ export function createKodeReviewToolsExtension(
       }),
     ])
 
+    // Only adopt the indexer client when /health responds OK. A configured
+    // but-unreachable indexerUrl previously registered the indexer-backed
+    // tools anyway, so every tool call rejected instead of falling back to
+    // ripgrep — exactly the wrong failure mode.
+    let indexerClient: IndexerClient | null = null
+    if (ctx.indexerUrl) {
+      const candidate = new IndexerClient(ctx.indexerUrl)
+      const ok = await candidate.health().catch(() => false)
+      if (ok) {
+        indexerClient = candidate
+      } else {
+        logger.warn(
+          `Indexer at ${ctx.indexerUrl} did not pass /health — falling back to ripgrep/git tools.`,
+        )
+      }
+    }
+
     const resolved: ResolvedToolContext = {
       ...ctx,
       gitignore,
-      indexerClient: ctx.indexerUrl ? new IndexerClient(ctx.indexerUrl) : null,
+      indexerClient,
       rgAvailable,
       defaultBase,
     }
