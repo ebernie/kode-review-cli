@@ -543,7 +543,7 @@ async function determineScope(
  * Dispatch `--scope repo`. Self-contained — does not consult local diffs or
  * PR/MR detection. Delegates to runRepoAudit() in src/repo-audit/.
  */
-async function runRepoScopeAudit(
+export async function runRepoScopeAudit(
   options: CliOptions,
   _ctx: CliContext,
   branch: string,
