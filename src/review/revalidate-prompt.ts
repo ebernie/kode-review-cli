@@ -41,6 +41,7 @@ export function buildRevalidatePrompt(opts: RevalidatePromptOptions): string {
     ...f,
     title: sanitizeXmlContent(f.title, 'prior_findings'),
     problem: sanitizeXmlContent(f.problem, 'prior_findings'),
+    evidence: sanitizeXmlContent(f.evidence, 'prior_findings'),
     recommendation: sanitizeXmlContent(f.recommendation, 'prior_findings'),
   }))
 
