@@ -6,6 +6,7 @@
 
 import type { IndexerClient } from '../../indexer/client.js'
 import type { CallGraphDirection, CallGraphNode } from '../../indexer/types.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 
 export interface GetCallGraphInput {
   functionName: string
@@ -61,12 +62,18 @@ export async function getCallGraphHandler(
     depth: node.depth,
   })
 
+  // Drop nodes whose file path matches the sensitive denylist before they
+  // reach the model. `totalNodes` is recomputed from the filtered sets so
+  // downstream callers see a consistent count.
+  const safeCallers = filterSensitivePaths(result.callers.map(mapNode))
+  const safeCallees = filterSensitivePaths(result.callees.map(mapNode))
+
   return {
     function: result.function,
     direction: result.direction,
-    callers: result.callers.map(mapNode),
-    callees: result.callees.map(mapNode),
-    totalNodes: result.totalNodes,
+    callers: safeCallers,
+    callees: safeCallees,
+    totalNodes: safeCallers.length + safeCallees.length,
   }
 }
 

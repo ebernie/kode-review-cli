@@ -5,6 +5,7 @@
  */
 
 import { ripgrepSearch } from './ripgrep.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 import type { SearchCodeInput, SearchCodeOutput } from './search-code-indexer.js'
 
 const DEFAULT_LIMIT = 10
@@ -20,15 +21,22 @@ export async function searchCodeFsHandler(
     fixedString: true,
   })
 
+  // Apply the same sensitive-path filter `read_file` uses so matches in
+  // .env / SSH key / credentials files never reach the model. The ripgrep
+  // wrapper does respect .gitignore via rg's defaults; this denylist
+  // covers tracked sensitive files (e.g. application-prod.yml) that
+  // .gitignore would not catch.
+  const safeMatches = filterSensitivePaths(matches)
+
   return {
-    results: matches.map((m) => ({
+    results: safeMatches.map((m) => ({
       path: m.path,
       lines: `${m.line}-${m.line}`,
       content: m.text,
       score: 1,
       matchTypes: ['lexical'],
     })),
-    totalMatches: matches.length,
+    totalMatches: safeMatches.length,
     query: input.query,
   }
 }

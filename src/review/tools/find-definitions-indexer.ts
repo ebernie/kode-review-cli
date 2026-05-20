@@ -6,6 +6,7 @@
 
 import type { IndexerClient } from '../../indexer/client.js'
 import type { DefinitionLocation } from '../../indexer/types.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 
 export interface FindDefinitionsInput {
   symbol: string
@@ -56,10 +57,12 @@ export async function findDefinitionsHandler(
     reexportSource: def.reexportSource ?? undefined,
   }))
 
+  const safeDefinitions = filterSensitivePaths(definitions)
+
   return {
     symbol: result.symbol,
-    definitions,
-    totalCount: result.totalCount,
+    definitions: safeDefinitions,
+    totalCount: safeDefinitions.length,
   }
 }
 

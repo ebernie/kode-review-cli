@@ -6,6 +6,7 @@
 
 import type { IndexerClient } from '../../indexer/client.js'
 import type { HybridMatch } from '../../indexer/types.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 
 export interface SearchCodeInput {
   query: string
@@ -53,9 +54,14 @@ export async function searchCodeHandler(
     matchTypes: match.sources,
   }))
 
+  // Mirror the sensitive-path filter used by the fs-backed handler so an
+  // indexed secrets file (mis-committed .env, application-prod.yml) does
+  // not leak its contents into the model's context.
+  const safeResults = filterSensitivePaths(results)
+
   return {
-    results,
-    totalMatches: searchResult.totalCount,
+    results: safeResults,
+    totalMatches: safeResults.length,
     query: input.query,
   }
 }

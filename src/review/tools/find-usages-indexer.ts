@@ -6,6 +6,7 @@
 
 import type { IndexerClient } from '../../indexer/client.js'
 import type { UsageLocation } from '../../indexer/types.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 
 export interface FindUsagesInput {
   symbol: string
@@ -53,10 +54,12 @@ export async function findUsagesHandler(
     isDynamic: usage.isDynamic,
   }))
 
+  const safeUsages = filterSensitivePaths(usages)
+
   return {
     symbol: result.symbol,
-    usages,
-    totalCount: result.totalCount,
+    usages: safeUsages,
+    totalCount: safeUsages.length,
   }
 }
 
