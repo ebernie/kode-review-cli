@@ -669,6 +669,16 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
     throw new Error('Not in a git repository')
   }
 
+  // --ci posts a sticky comment but does NOT route through
+  // postReviewToPR, so it never triggers a platform approval mutation
+  // regardless of --auto-approve. Surface this so users who pass both
+  // flags don't silently get a comment-only run.
+  if (options.ci && options.autoApprove) {
+    logger.warn(
+      '--auto-approve is ignored in --ci mode: the CI sticky-comment path does not call the approval API. Drop --ci or run without --auto-approve to silence this warning.',
+    )
+  }
+
   // Detect platform and branch. Detached-HEAD (no current branch) is the
   // norm in CI runs that check out by SHA — fall back to a literal label.
   const platform = await detectPlatform()
@@ -1394,7 +1404,11 @@ async function processReviewOutput(
         mrIid: prMr.platform === 'gitlab' ? prMr.id : undefined,
         platform: prMr.platform as VcsPlatformType,
         postInlineComments: true,
-        setApprovalStatus: true,
+        // Approval mutation is gated behind --auto-approve. Without
+        // that flag the review still posts as a comment, but the
+        // bot never trips an actual platform approval based on a
+        // model-derived verdict from possibly-injected PR content.
+        setApprovalStatus: options.autoApprove,
       }
     )
 
@@ -1580,7 +1594,12 @@ async function processMultiReviewerOutput(
           mrIid: prMr.platform === 'gitlab' ? prMr.id : undefined,
           platform: prMr.platform as VcsPlatformType,
           postInlineComments: true,
-          setApprovalStatus: !multi, // only the lone reviewer toggles approval state
+          // Approval mutation requires BOTH (a) the user explicitly
+          // opting in via --auto-approve AND (b) being in single-
+          // reviewer mode — multi-reviewer runs never approve, since a
+          // single persona's verdict shouldn't represent the whole
+          // review's outcome.
+          setApprovalStatus: options.autoApprove && !multi,
         }
       )
 

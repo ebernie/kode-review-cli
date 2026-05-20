@@ -76,3 +76,42 @@ describe('parseArgs short-flag aliases', () => {
     expect(opts.quiet).toBe(true)
   })
 })
+
+/**
+ * D-5a: --auto-approve is the explicit opt-in gate for letting the
+ * model's verdict drive an actual platform approval (GitHub APPROVE /
+ * GitLab approve). The default is OFF — without this flag the bot can
+ * post a comment but cannot trip a privileged approval mutation.
+ *
+ * These tests pin the flag's existence and default. A regression that
+ * silently dropped --auto-approve from the Commander definition (or
+ * inverted its default) would re-expose the original threat without
+ * any other test failing.
+ */
+describe('parseArgs --auto-approve (D-5a opt-in gate)', () => {
+  it('autoApprove defaults to false when --auto-approve is absent', () => {
+    const opts = parseArgs(args())
+    expect(opts.autoApprove).toBe(false)
+  })
+
+  it('--auto-approve flips autoApprove to true', () => {
+    const opts = parseArgs(args('--auto-approve'))
+    expect(opts.autoApprove).toBe(true)
+  })
+
+  it('autoApprove stays false in CI mode without --auto-approve (does NOT inherit from -c)', () => {
+    // --ci sets postToPr + agentic + quiet defaults, but it must NOT
+    // also flip auto-approve on. CI runs in shared org-level bot
+    // contexts where prompt-injected approvals would be most damaging.
+    const opts = parseArgs(args('-c'))
+    expect(opts.ci).toBe(true)
+    expect(opts.postToPr).toBe(true)
+    expect(opts.autoApprove).toBe(false)
+  })
+
+  it('-c --auto-approve composes — both flags on', () => {
+    const opts = parseArgs(args('-c', '--auto-approve'))
+    expect(opts.ci).toBe(true)
+    expect(opts.autoApprove).toBe(true)
+  })
+})

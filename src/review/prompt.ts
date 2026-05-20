@@ -1,4 +1,20 @@
 import { sanitizeXmlContent } from './xml-sanitize.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from './untrusted-boundary.js'
+
+/**
+ * System prompt for non-agentic (diff-only) review.
+ *
+ * Mirrors the agentic path which appends `UNTRUSTED_CONTENT_BOUNDARY` to
+ * its custom system prompt. Without this, an attacker-controlled PR/MR
+ * diff or description could carry instruction-shaped text into the
+ * model and influence the verdict (CVE-class: model-prompt injection
+ * across an LLM trust boundary). The reviewer-role text is intentionally
+ * minimal here because the detailed criteria and output schema live in
+ * the user-message body produced by `buildReviewPrompt`.
+ */
+export const NONAGENTIC_SYSTEM_PROMPT =
+  `You are an expert code reviewer. The user message contains the diff and supporting context; follow the detailed instructions in that message to produce the review.\n\n` +
+  UNTRUSTED_CONTENT_BOUNDARY
 
 /**
  * Review prompt template - base instructions
@@ -375,7 +391,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
     parts.push('')
     parts.push('The PR/MR author describes the purpose of these changes as:')
     parts.push('')
-    parts.push('<author_intent>')
+    // `untrusted="true"` mirrors the marker on <related_code>. The
+    // author-supplied description originates from a PR/MR field that
+    // any contributor can write into; treat it as evidence, not as
+    // instructions, per UNTRUSTED_CONTENT_BOUNDARY.
+    parts.push('<author_intent untrusted="true">')
     parts.push(sanitizeXmlContent(options.prDescriptionSummary, 'author_intent'))
     parts.push('</author_intent>')
     parts.push('')
@@ -407,7 +427,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
 
   if (options.prMrInfo) {
     parts.push('## PR/MR Information')
-    parts.push('<pr_mr_info>')
+    // `untrusted="true"` — pr_mr_info comes from the PR/MR JSON shape
+    // returned by gh/glab; the title, body, label names, and reviewer
+    // strings are all author-controlled. Treat as data per
+    // UNTRUSTED_CONTENT_BOUNDARY.
+    parts.push('<pr_mr_info untrusted="true">')
     parts.push(sanitizeXmlContent(options.prMrInfo, 'pr_mr_info'))
     parts.push('</pr_mr_info>')
     parts.push('')
@@ -439,7 +463,11 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
   }
 
   parts.push('## Code Changes (Diff)')
-  parts.push('<diff_content>')
+  // `untrusted="true"` — the diff content is the primary attack surface
+  // for prompt injection through PR titles, commit messages, code
+  // comments, and string literals. UNTRUSTED_CONTENT_BOUNDARY pins this
+  // attribute as the universal "treat-as-data" marker.
+  parts.push('<diff_content untrusted="true">')
   parts.push(sanitizeXmlContent(options.diffContent, 'diff_content'))
   parts.push('</diff_content>')
 

@@ -57,6 +57,7 @@ const baseCli: CliOptions = {
   quiet: false,
   format: 'text',
   postToPr: false,
+  autoApprove: false,
   initHooks: false,
   reviewers: ['general'],
   listReviewers: false,

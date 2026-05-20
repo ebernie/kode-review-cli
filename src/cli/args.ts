@@ -36,6 +36,14 @@ export interface CliOptions {
   format: OutputFormat
   outputFile?: string
   postToPr: boolean
+  /**
+   * Allow the model's verdict to drive an actual PR/MR approval (GitHub
+   * APPROVE / GitLab approve). Default: false — the comment is always
+   * posted, but the privileged approval mutation is gated behind this
+   * explicit opt-in because a prompt-injected verdict from untrusted PR
+   * content could otherwise cause the bot to approve attacker changes.
+   */
+  autoApprove: boolean
 
   // Hook generation
   initHooks: boolean
@@ -135,6 +143,11 @@ export function createProgram(): Command {
     .option('-o, --output-file <path>', 'Write output to file instead of stdout')
     .option('-q, --quiet', 'Minimal output (suitable for agents)', false)
     .option('--post-to-pr', 'Post review as PR/MR comment', false)
+    .option(
+      '--auto-approve',
+      "Allow the model's verdict to drive actual PR/MR approval (GitHub APPROVE / GitLab approve). Off by default — without this flag, the review is posted as a comment regardless of the verdict.",
+      false,
+    )
 
   // ── Agent / CI tuning ──────────────────────────────────────────────────────
   program
@@ -346,6 +359,7 @@ export function parseArgs(argv: string[]): CliOptions {
     format,
     outputFile: opts.outputFile,
     postToPr,
+    autoApprove: opts.autoApprove ?? false,
     initHooks: opts.initHooks ?? false,
     model: opts.model,
     reviewers: Array.isArray(opts.reviewer) && opts.reviewer.length > 0

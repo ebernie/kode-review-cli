@@ -93,7 +93,9 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
     parts.push('')
     parts.push('The PR/MR author describes the purpose of these changes as:')
     parts.push('')
-    parts.push('<author_intent>')
+    // `untrusted="true"` — author-supplied PR/MR description field.
+    // Treat as evidence, not instructions, per UNTRUSTED_CONTENT_BOUNDARY.
+    parts.push('<author_intent untrusted="true">')
     parts.push(sanitizeXmlContent(data.prDescriptionSummary, 'author_intent'))
     parts.push('</author_intent>')
     parts.push('')
@@ -110,7 +112,10 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
 
   if (data.prMrInfo) {
     parts.push('## PR/MR Information')
-    parts.push('<pr_mr_info>')
+    // `untrusted="true"` — pr_mr_info is JSON from gh/glab containing
+    // author-controlled title, body, label, and reviewer fields. Treat
+    // as data per UNTRUSTED_CONTENT_BOUNDARY.
+    parts.push('<pr_mr_info untrusted="true">')
     parts.push(sanitizeXmlContent(data.prMrInfo, 'pr_mr_info'))
     parts.push('</pr_mr_info>')
     parts.push('')
@@ -129,7 +134,11 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
   }
 
   parts.push('## Code Changes (Diff)')
-  parts.push('<diff_content>')
+  // `untrusted="true"` — primary attack surface for prompt injection
+  // (PR title, commit messages, code comments, string literals). The
+  // attribute mirrors buildReviewPrompt and the agentic prompt path,
+  // giving the persona-dispatch flow the same per-tag trust marker.
+  parts.push('<diff_content untrusted="true">')
   parts.push(sanitizeXmlContent(data.diffContent, 'diff_content'))
   parts.push('</diff_content>')
 

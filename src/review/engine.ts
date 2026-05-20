@@ -27,7 +27,11 @@ import {
 import type { Api, Model } from '@mariozechner/pi-ai'
 import { logger } from '../utils/logger.js'
 import { AppError } from '../utils/errors.js'
-import { buildReviewPrompt, type ReviewPromptOptions } from './prompt.js'
+import {
+  buildReviewPrompt,
+  NONAGENTIC_SYSTEM_PROMPT,
+  type ReviewPromptOptions,
+} from './prompt.js'
 import {
   AGENTIC_SYSTEM_PROMPT,
   buildAgenticPrompt,
@@ -346,7 +350,12 @@ export async function runReview(options: ReviewOptions): Promise<ReviewResult> {
     userPrompt,
     modelPattern: options.model,
     cwd: process.cwd(),
-    systemPromptOverride: options.systemPrompt,
+    // Caller-supplied systemPrompt wins (persona dispatch needs to
+    // substitute the role). Otherwise default to NONAGENTIC_SYSTEM_PROMPT
+    // so the UNTRUSTED_CONTENT_BOUNDARY is always in force on the
+    // non-agentic path — without an override pi would fall back to its
+    // permissive built-in system prompt, leaving the boundary unstated.
+    systemPromptOverride: options.systemPrompt ?? NONAGENTIC_SYSTEM_PROMPT,
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     onProgress: options.onProgress,
   })

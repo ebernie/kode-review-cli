@@ -88,6 +88,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
 import { runReview, runAgenticReview } from '../engine.js'
 import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
 import { AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
+import { NONAGENTIC_SYSTEM_PROMPT } from '../prompt.js'
 import { logger } from '../../utils/logger.js'
 
 beforeEach(() => {
@@ -325,6 +326,46 @@ describe('runReview', () => {
 
     const result = await promise
     expect(result.findings).toEqual([])
+  })
+
+  /**
+   * D-5b: non-agentic runReview must install NONAGENTIC_SYSTEM_PROMPT
+   * (which carries UNTRUSTED_CONTENT_BOUNDARY) as the system-prompt
+   * override unless the caller supplies its own systemPrompt. Without
+   * this wiring, pi's permissive default applies and the boundary is
+   * never delivered to the model.
+   */
+  it('installs NONAGENTIC_SYSTEM_PROMPT when no systemPrompt is provided', async () => {
+    const promise = runReview({ diffContent: 'd', context: 'c' })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    // The override is wired through DefaultResourceLoader's
+    // `systemPromptOverride` constructor option as a `() => string`
+    // thunk. Read it back via the captured session's resourceLoader.
+    const loader = captured.options.resourceLoader as { options: { systemPromptOverride?: () => string } }
+    expect(loader.options.systemPromptOverride).toBeTypeOf('function')
+    expect(loader.options.systemPromptOverride!()).toBe(NONAGENTIC_SYSTEM_PROMPT)
+  })
+
+  it('honors a caller-supplied systemPrompt over the default boundary prompt (persona dispatch)', async () => {
+    // Persona reviewers and the repo-audit feature flow pass their own
+    // system prompt. The default-boundary wiring must NOT override
+    // those — otherwise persona-specific role text would be replaced.
+    const customSystem = 'You are a security-focused reviewer.'
+    const promise = runReview({ diffContent: 'd', context: 'c', systemPrompt: customSystem })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const loader = captured.options.resourceLoader as { options: { systemPromptOverride?: () => string } }
+    // toBe(customSystem) fully pins the contract — if the engine reverts
+    // to always passing NONAGENTIC_SYSTEM_PROMPT, this fails. No second
+    // assertion needed.
+    expect(loader.options.systemPromptOverride!()).toBe(customSystem)
   })
 })
 
