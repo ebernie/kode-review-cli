@@ -36,6 +36,7 @@ from sentence_transformers import SentenceTransformer
 
 # Import from the main indexer
 from ast_chunker import chunk_code_ast, CodeChunk
+from call_graph import build_and_store_call_graph
 from import_graph import build_and_store_import_graph
 
 
@@ -469,10 +470,8 @@ def update_file_metadata(
             """
             INSERT INTO files (file_path, repo_id, repo_url, branch, language, size, last_modified)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (file_path) DO UPDATE SET
-                repo_id = EXCLUDED.repo_id,
+            ON CONFLICT (file_path, repo_id, branch) DO UPDATE SET
                 repo_url = EXCLUDED.repo_url,
-                branch = EXCLUDED.branch,
                 language = EXCLUDED.language,
                 size = EXCLUDED.size,
                 last_modified = NOW(),
@@ -766,6 +765,15 @@ def run_incremental_indexing() -> IncrementalResult:
             print(f"  Import edges: {import_stats.get('edges', 0)}")
         except Exception as e:
             print(f"  Warning: Could not update import graph: {e}", file=sys.stderr)
+
+        # Rebuild call graph for changed files. Keeps the /call-graph endpoint
+        # in sync with the import graph on every incremental update.
+        print("Updating call graph...")
+        try:
+            call_stats = build_and_store_call_graph(conn, REPO_URL, REPO_BRANCH)
+            print(f"  Call edges: {call_stats.get('edges_stored', 0)}")
+        except Exception as e:
+            print(f"  Warning: Could not update call graph: {e}", file=sys.stderr)
 
     conn.close()
 

@@ -17,8 +17,12 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Tracks file-level metadata for incremental updates and complexity analysis.
 -- This table helps determine which files need re-indexing when content changes.
 
+-- File identity is repo-scoped: the same file_path can exist on multiple
+-- (repo_id, branch) combinations. The composite PK below replaces an older
+-- single-column PK on file_path; existing databases are migrated by the
+-- DO block further down this file.
 CREATE TABLE IF NOT EXISTS files (
-    file_path TEXT PRIMARY KEY,
+    file_path TEXT NOT NULL,
     last_modified TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     size INTEGER NOT NULL DEFAULT 0,
     language TEXT,
@@ -27,7 +31,8 @@ CREATE TABLE IF NOT EXISTS files (
     repo_url TEXT NOT NULL,
     branch TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (file_path, repo_id, branch)
 );
 
 -- Index for finding files by repository and branch
@@ -41,7 +46,7 @@ CREATE INDEX IF NOT EXISTS files_repo_branch_idx ON files (repo_id, branch);
 
 CREATE TABLE IF NOT EXISTS chunks (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    file_path TEXT NOT NULL REFERENCES files(file_path) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
     content TEXT NOT NULL,
     embedding VECTOR(1536),
     language TEXT,
@@ -54,7 +59,9 @@ CREATE TABLE IF NOT EXISTS chunks (
     repo_id TEXT NOT NULL,
     repo_url TEXT NOT NULL,
     branch TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chunks_files_fk FOREIGN KEY (file_path, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE
 );
 
 -- GIN index on symbol_names for fast lookup of functions, classes, etc.
@@ -70,6 +77,10 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks
 
 -- Index for finding chunks by file (useful when re-indexing a single file)
 CREATE INDEX IF NOT EXISTS chunks_file_path_idx ON chunks (file_path);
+
+-- Composite index covering the (file_path, repo_id, branch) FK on chunks.
+-- Without this, cascade deletes on files trigger a full table scan.
+CREATE INDEX IF NOT EXISTS chunks_file_repo_branch_idx ON chunks (file_path, repo_id, branch);
 
 -- Index for filtering by repository and branch
 CREATE INDEX IF NOT EXISTS chunks_repo_branch_idx ON chunks (repo_id, branch);
@@ -201,14 +212,18 @@ CREATE INDEX IF NOT EXISTS relationships_type_idx ON relationships (relationship
 
 CREATE TABLE IF NOT EXISTS file_imports (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    source_file TEXT NOT NULL REFERENCES files(file_path) ON DELETE CASCADE,
-    target_file TEXT NOT NULL REFERENCES files(file_path) ON DELETE CASCADE,
+    source_file TEXT NOT NULL,
+    target_file TEXT NOT NULL,
     import_type TEXT NOT NULL DEFAULT 'static',  -- 'static', 'dynamic', 're-export'
     imported_symbols TEXT[] DEFAULT '{}',  -- Specific symbols imported
     repo_id TEXT NOT NULL,
     branch TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (source_file, target_file, repo_id, branch)
+    UNIQUE (source_file, target_file, repo_id, branch),
+    CONSTRAINT file_imports_source_fk FOREIGN KEY (source_file, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE,
+    CONSTRAINT file_imports_target_fk FOREIGN KEY (target_file, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE
 );
 
 -- Index for finding what a file imports (outgoing edges)
@@ -267,6 +282,184 @@ CREATE INDEX IF NOT EXISTS code_embeddings_embedding_idx
     ON code_embeddings
     USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+-- ============================================================================
+-- Composite-Key Migration (idempotent upgrade for existing databases)
+-- ============================================================================
+-- Fresh databases get the composite (file_path, repo_id, branch) PK and FKs
+-- directly from the CREATE TABLE statements above. Databases created under
+-- the prior schema have a single-column PRIMARY KEY (file_path) on `files`
+-- and single-column FOREIGN KEYs on `chunks.file_path` /
+-- `file_imports.source_file` / `file_imports.target_file`. This block detects
+-- that legacy shape and upgrades in place. The block is a no-op after the
+-- first successful run.
+
+DO $$
+DECLARE
+    files_pk_columns INTEGER;
+    files_pk_name TEXT;
+    chunks_fk_name TEXT;
+    fi_source_fk_name TEXT;
+    fi_target_fk_name TEXT;
+    orphan_chunks INTEGER;
+    orphan_imports_source INTEGER;
+    orphan_imports_target INTEGER;
+BEGIN
+    -- Count PK columns on `files`. Three columns means the migration already
+    -- ran. Scope to current_schema() so the count is not inflated by a
+    -- same-named table in another schema on a shared Postgres instance.
+    SELECT COUNT(*) INTO files_pk_columns
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema = kcu.table_schema
+    WHERE tc.table_name = 'files'
+      AND tc.table_schema = current_schema()
+      AND tc.constraint_type = 'PRIMARY KEY';
+
+    IF files_pk_columns >= 3 THEN
+        RAISE NOTICE 'files PK already composite (% columns), skipping migration', files_pk_columns;
+        RETURN;
+    END IF;
+
+    IF files_pk_columns = 0 THEN
+        -- Reachable only if `files` was created without a PK at all (manual
+        -- DDL); the CREATE TABLE above always declares one, so a fresh-run
+        -- DB never lands here.
+        RAISE NOTICE 'files table has no PK yet; skipping composite-key migration';
+        RETURN;
+    END IF;
+
+    -- Look up existing constraint names. Postgres auto-names them
+    -- consistently, but we look them up dynamically so the block tolerates
+    -- databases that were patched manually. All lookups are scoped to the
+    -- current schema.
+    SELECT constraint_name INTO files_pk_name
+    FROM information_schema.table_constraints
+    WHERE table_name = 'files'
+      AND table_schema = current_schema()
+      AND constraint_type = 'PRIMARY KEY'
+    LIMIT 1;
+
+    SELECT tc.constraint_name INTO chunks_fk_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.constraint_column_usage ccu
+      ON tc.constraint_name = ccu.constraint_name
+     AND tc.table_schema = ccu.table_schema
+    WHERE tc.table_name = 'chunks'
+      AND tc.table_schema = current_schema()
+      AND tc.constraint_type = 'FOREIGN KEY'
+      AND ccu.table_name = 'files'
+    LIMIT 1;
+
+    SELECT tc.constraint_name INTO fi_source_fk_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema = kcu.table_schema
+    WHERE tc.table_name = 'file_imports'
+      AND tc.table_schema = current_schema()
+      AND tc.constraint_type = 'FOREIGN KEY'
+      AND kcu.column_name = 'source_file'
+    LIMIT 1;
+
+    SELECT tc.constraint_name INTO fi_target_fk_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema = kcu.table_schema
+    WHERE tc.table_name = 'file_imports'
+      AND tc.table_schema = current_schema()
+      AND tc.constraint_type = 'FOREIGN KEY'
+      AND kcu.column_name = 'target_file'
+    LIMIT 1;
+
+    -- Clean up orphan rows that the legacy single-column FKs would have
+    -- allowed (e.g. a chunk whose file_path matches a row in `files` but
+    -- whose repo_id/branch do not). Without this, VALIDATE CONSTRAINT below
+    -- can fail on live data.
+    DELETE FROM chunks c
+    WHERE NOT EXISTS (
+        SELECT 1 FROM files f
+        WHERE f.file_path = c.file_path
+          AND f.repo_id = c.repo_id
+          AND f.branch = c.branch
+    );
+    GET DIAGNOSTICS orphan_chunks = ROW_COUNT;
+    IF orphan_chunks > 0 THEN
+        RAISE NOTICE 'Removed % orphan chunks during composite-key migration', orphan_chunks;
+    END IF;
+
+    DELETE FROM file_imports fi
+    WHERE NOT EXISTS (
+        SELECT 1 FROM files f
+        WHERE f.file_path = fi.source_file
+          AND f.repo_id = fi.repo_id
+          AND f.branch = fi.branch
+    );
+    GET DIAGNOSTICS orphan_imports_source = ROW_COUNT;
+
+    DELETE FROM file_imports fi
+    WHERE NOT EXISTS (
+        SELECT 1 FROM files f
+        WHERE f.file_path = fi.target_file
+          AND f.repo_id = fi.repo_id
+          AND f.branch = fi.branch
+    );
+    GET DIAGNOSTICS orphan_imports_target = ROW_COUNT;
+    IF orphan_imports_source + orphan_imports_target > 0 THEN
+        RAISE NOTICE 'Removed % orphan file_imports (% source, % target) during composite-key migration',
+            orphan_imports_source + orphan_imports_target,
+            orphan_imports_source,
+            orphan_imports_target;
+    END IF;
+
+    -- Drop old FKs first (Postgres rejects dropping a PK while FKs depend on it).
+    IF chunks_fk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE chunks DROP CONSTRAINT %I', chunks_fk_name);
+    END IF;
+    IF fi_source_fk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE file_imports DROP CONSTRAINT %I', fi_source_fk_name);
+    END IF;
+    IF fi_target_fk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE file_imports DROP CONSTRAINT %I', fi_target_fk_name);
+    END IF;
+
+    -- Also defensively drop the NEW constraint names if a prior partial
+    -- patch left them around without finishing the PK swap. Without this,
+    -- the ADD CONSTRAINT below would fail with `duplicate_object`.
+    ALTER TABLE chunks       DROP CONSTRAINT IF EXISTS chunks_files_fk;
+    ALTER TABLE file_imports DROP CONSTRAINT IF EXISTS file_imports_source_fk;
+    ALTER TABLE file_imports DROP CONSTRAINT IF EXISTS file_imports_target_fk;
+
+    -- Drop old single-column PK and replace with composite.
+    IF files_pk_name IS NOT NULL THEN
+        EXECUTE format('ALTER TABLE files DROP CONSTRAINT %I', files_pk_name);
+    END IF;
+    ALTER TABLE files ADD CONSTRAINT files_pkey
+        PRIMARY KEY (file_path, repo_id, branch);
+
+    -- Recreate FKs as composite. NOT VALID skips the full-table scan for
+    -- existing rows so the ALTER takes a short ACCESS EXCLUSIVE; the
+    -- subsequent VALIDATE only needs SHARE UPDATE EXCLUSIVE so reads/writes
+    -- continue during validation.
+    ALTER TABLE chunks ADD CONSTRAINT chunks_files_fk
+        FOREIGN KEY (file_path, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE NOT VALID;
+    ALTER TABLE chunks VALIDATE CONSTRAINT chunks_files_fk;
+
+    ALTER TABLE file_imports ADD CONSTRAINT file_imports_source_fk
+        FOREIGN KEY (source_file, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE NOT VALID;
+    ALTER TABLE file_imports VALIDATE CONSTRAINT file_imports_source_fk;
+
+    ALTER TABLE file_imports ADD CONSTRAINT file_imports_target_fk
+        FOREIGN KEY (target_file, repo_id, branch)
+        REFERENCES files(file_path, repo_id, branch) ON DELETE CASCADE NOT VALID;
+    ALTER TABLE file_imports VALIDATE CONSTRAINT file_imports_target_fk;
+
+    RAISE NOTICE 'Composite-key migration complete';
+END $$;
 
 -- ============================================================================
 -- Helper Functions

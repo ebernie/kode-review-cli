@@ -7,7 +7,7 @@ vi.mock('../../utils/exec.js', () => ({
 
 vi.mock('../../config/index.js', () => ({
   getConfig: vi.fn(),
-  updateConfig: vi.fn(),
+  updateUpdaterConfig: vi.fn(),
 }))
 
 vi.mock('@inquirer/prompts', () => ({
@@ -23,7 +23,7 @@ import {
   checkForUpdateNotification,
 } from '../update.js'
 import { exec, execInteractive } from '../../utils/exec.js'
-import { getConfig, updateConfig } from '../../config/index.js'
+import { getConfig, updateUpdaterConfig } from '../../config/index.js'
 import { confirm } from '@inquirer/prompts'
 
 // Provide PKG_VERSION for bun test (vitest injects via compile-time define)
@@ -33,7 +33,7 @@ import { confirm } from '@inquirer/prompts'
 const mockExec = exec as unknown as ReturnType<typeof vi.fn>
 const mockExecInteractive = execInteractive as unknown as ReturnType<typeof vi.fn>
 const mockGetConfig = getConfig as unknown as ReturnType<typeof vi.fn>
-const mockUpdateConfig = updateConfig as unknown as ReturnType<typeof vi.fn>
+const mockUpdateUpdaterConfig = updateUpdaterConfig as unknown as ReturnType<typeof vi.fn>
 const mockConfirm = confirm as unknown as ReturnType<typeof vi.fn>
 
 // --- Pure function tests (no mocking needed) ---
@@ -153,7 +153,7 @@ describe('runUpdate', () => {
     mockGetConfig.mockReturnValue({
       updater: { lastCheckedAt: '', latestKnownVersion: '' },
     })
-    mockUpdateConfig.mockReturnValue({})
+    mockUpdateUpdaterConfig.mockReturnValue({})
   })
 
   afterEach(() => {
@@ -270,11 +270,9 @@ describe('runUpdate', () => {
 
     await runUpdate()
 
-    expect(mockUpdateConfig).toHaveBeenCalledWith(
+    expect(mockUpdateUpdaterConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        updater: expect.objectContaining({
-          latestKnownVersion: '99.0.0',
-        }),
+        latestKnownVersion: '99.0.0',
       }),
     )
   })
@@ -286,7 +284,7 @@ describe('checkForUpdateNotification', () => {
   beforeEach(() => {
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    mockUpdateConfig.mockReturnValue({})
+    mockUpdateUpdaterConfig.mockReturnValue({})
   })
 
   afterEach(() => {
@@ -370,12 +368,10 @@ describe('checkForUpdateNotification', () => {
 
     await checkForUpdateNotification()
 
-    // First updateConfig call should be the immediate timestamp set
-    expect(mockUpdateConfig).toHaveBeenCalledWith(
+    // First updateUpdaterConfig call should be the immediate timestamp set
+    expect(mockUpdateUpdaterConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        updater: expect.objectContaining({
-          lastCheckedAt: expect.any(String),
-        }),
+        lastCheckedAt: expect.any(String),
       }),
     )
   })

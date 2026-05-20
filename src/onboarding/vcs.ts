@@ -112,7 +112,12 @@ export async function setupVcs(): Promise<VcsSetupResult> {
     result.gitlab = { enabled: enableGitlab, authenticated: false }
   }
 
-  // Save configuration
+  // Save configuration. Passes COMPLETE VcsConfig objects for both sections
+  // (built up above with both `enabled` and `authenticated` set), so a
+  // top-level shallow merge is correct here — there are no sibling fields
+  // inside `github` or `gitlab` to preserve. `updateGithubConfig` /
+  // `updateGitlabConfig` are the right helpers when only one field is
+  // changing; this call writes both sections atomically.
   updateConfig({
     github: result.github,
     gitlab: result.gitlab,
