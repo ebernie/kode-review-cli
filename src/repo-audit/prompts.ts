@@ -19,6 +19,7 @@ import { relative, resolve, sep } from 'node:path'
 import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/index.js'
 import { readFileSafe } from '../review/suppressions.js'
 import { assertWithinRepo } from '../review/tools/path-guard.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../review/untrusted-boundary.js'
 import { REPO_AUDIT_DEFAULTS, type FeatureRecord } from './types.js'
 
 /**
@@ -160,7 +161,7 @@ context rules accordingly:
 - The feature's declared trust_boundaries tell you what attack surface it
   crosses; use them to focus rather than to gate (every persona still
   applies its own criteria).
-`.trim()
+`.trim() + '\n\n' + UNTRUSTED_CONTENT_BOUNDARY
 
 /**
  * Wrap raw file content in a fenced, language-hinted block. The language
@@ -224,26 +225,27 @@ export async function buildFeatureReviewPrompt(
   parts.push('## Feature Under Review')
   parts.push('')
   parts.push('<feature_metadata>')
-  parts.push(`featureId: ${feature.featureId}`)
-  parts.push(`title: ${feature.title}`)
-  parts.push(`kind: ${feature.kind}`)
-  parts.push(`confidence: ${feature.confidence}`)
-  parts.push(`summary: ${feature.summary}`)
+  parts.push(`featureId: ${escXmlAttr(feature.featureId)}`)
+  parts.push(`title: ${escXmlAttr(feature.title)}`)
+  parts.push(`kind: ${escXmlAttr(feature.kind)}`)
+  parts.push(`confidence: ${escXmlAttr(feature.confidence)}`)
+  parts.push(`summary: ${escXmlAttr(feature.summary)}`)
   if (feature.entrypoints.length > 0) {
     parts.push('entrypoints:')
     for (const e of feature.entrypoints) {
-      const bits = [e.path]
-      if (e.symbol) bits.push(`symbol=${e.symbol}`)
-      if (e.route) bits.push(`route=${e.route}`)
-      if (e.command) bits.push(`command=${e.command}`)
+      const bits = [escXmlAttr(e.path)]
+      if (e.symbol) bits.push(`symbol=${escXmlAttr(e.symbol)}`)
+      if (e.route) bits.push(`route=${escXmlAttr(e.route)}`)
+      if (e.command) bits.push(`command=${escXmlAttr(e.command)}`)
       parts.push(`  - ${bits.join('  ')}`)
     }
   }
   if (feature.trustBoundaries.length > 0) {
+    // trustBoundaries is z.enum-validated against TRUST_BOUNDARIES — safe raw.
     parts.push(`trust_boundaries: ${feature.trustBoundaries.join(', ')}`)
   }
   if (feature.tags.length > 0) {
-    parts.push(`tags: ${feature.tags.join(', ')}`)
+    parts.push(`tags: ${feature.tags.map(escXmlAttr).join(', ')}`)
   }
   parts.push('</feature_metadata>')
   parts.push('')
@@ -318,8 +320,8 @@ export async function buildFeatureReviewPrompt(
     parts.push('')
     parts.push('<tests>')
     for (const t of feature.tests) {
-      const bits = [t.path]
-      if (t.command) bits.push(`run via: ${t.command}`)
+      const bits = [escXmlAttr(t.path)]
+      if (t.command) bits.push(`run via: ${escXmlAttr(t.command)}`)
       parts.push(`- ${bits.join('  ')}`)
     }
     parts.push('</tests>')

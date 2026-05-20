@@ -19,6 +19,7 @@
  *      ordering keeps the agent's output mapping stable across runs).
  *   5. Output instructions for the `kode-revalidations` block.
  */
+import { sanitizeXmlContent } from '../review/xml-sanitize.js'
 import { escXmlAttr, langHintFromPath, pickFence, readFileForPrompt } from './prompts.js'
 import { REVALIDATIONS_BLOCK_INSTRUCTIONS } from './revalidation-schema.js'
 import { REPO_AUDIT_DEFAULTS, type FeatureRecord, type RepoFindingRecord } from './types.js'
@@ -133,10 +134,10 @@ export async function buildRevalidationPrompt(
   parts.push('## Feature Under Review')
   parts.push('')
   parts.push('<feature_metadata>')
-  parts.push(`featureId: ${feature.featureId}`)
-  parts.push(`title: ${feature.title}`)
-  parts.push(`kind: ${feature.kind}`)
-  parts.push(`summary: ${feature.summary}`)
+  parts.push(`featureId: ${escXmlAttr(feature.featureId)}`)
+  parts.push(`title: ${escXmlAttr(feature.title)}`)
+  parts.push(`kind: ${escXmlAttr(feature.kind)}`)
+  parts.push(`summary: ${escXmlAttr(feature.summary)}`)
   if (feature.trustBoundaries.length > 0) {
     parts.push(`trust_boundaries: ${feature.trustBoundaries.join(', ')}`)
   }
@@ -181,13 +182,13 @@ export async function buildRevalidationPrompt(
   for (const record of sorted) {
     const f = record.finding
     parts.push(`<finding id="${escXmlAttr(record.findingId)}" persona="${escXmlAttr(record.persona)}">`)
-    parts.push(`originally cited: ${f.file}:${f.lineStart}-${f.lineEnd}`)
+    parts.push(`originally cited: ${escXmlAttr(f.file)}:${f.lineStart}-${f.lineEnd}`)
     parts.push(`severity: ${f.severity}`)
     parts.push(`category: ${f.category}`)
-    parts.push(`title: ${f.title}`)
-    parts.push(`problem: ${f.problem}`)
-    parts.push(`evidence: ${f.evidence}`)
-    parts.push(`recommendation: ${f.recommendation}`)
+    parts.push(`title: ${sanitizeXmlContent(f.title, 'prior_findings')}`)
+    parts.push(`problem: ${sanitizeXmlContent(f.problem, 'prior_findings')}`)
+    parts.push(`evidence: ${sanitizeXmlContent(f.evidence, 'prior_findings')}`)
+    parts.push(`recommendation: ${sanitizeXmlContent(f.recommendation, 'prior_findings')}`)
     parts.push('</finding>')
     parts.push('')
   }
