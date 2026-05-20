@@ -152,6 +152,8 @@ describe('buildReviewerUserPrompt', () => {
         .replace(/<\/related_code>/g, '')
         .replace(/<diff_content(?:\s[^>]*)?>/g, '')
         .replace(/<\/diff_content>/g, '')
+        .replace(/<pr_mr_info(?:\s[^>]*)?>/g, '')
+        .replace(/<\/pr_mr_info>/g, '')
 
     const remainder = stripLegit(out)
     // Raw structural tags from user input must NOT appear anywhere in the
@@ -191,6 +193,61 @@ describe('buildReviewerUserPrompt — untrusted-content marker on related_code',
     const out = buildReviewerUserPrompt({ context: 'ctx', diffContent: 'd' })
     expect(out).not.toContain('<related_code')
     expect(out).not.toContain('</related_code>')
+  })
+})
+
+/**
+ * D-5b parity: the persona-dispatch path (--reviewer security / architect /
+ * test-auditor / ...) must mark <diff_content>, <pr_mr_info>, and
+ * <author_intent> with untrusted="true" — same as buildReviewPrompt did
+ * for the non-agentic single-reviewer path. The reviewer-template
+ * system prompt already carries UNTRUSTED_CONTENT_BOUNDARY, but the
+ * per-wrapper attribute is a local, machine-checkable marker that
+ * survives even if a future refactor swapped the system prompt.
+ */
+describe('buildReviewerUserPrompt — untrusted="true" on external-data wrappers (D-5b parity)', () => {
+  it('wraps the diff in <diff_content untrusted="true">', () => {
+    const out = buildReviewerUserPrompt({ context: 'ctx', diffContent: 'DIFF-PAYLOAD' })
+    expect(out).toMatch(
+      /<diff_content untrusted="true">[\s\S]*DIFF-PAYLOAD[\s\S]*<\/diff_content>/,
+    )
+  })
+
+  it('wraps pr_mr_info in <pr_mr_info untrusted="true"> when supplied', () => {
+    const out = buildReviewerUserPrompt({
+      context: 'ctx',
+      diffContent: 'd',
+      prMrInfo: '{"title":"contributor-supplied"}',
+    })
+    expect(out).toMatch(
+      /<pr_mr_info untrusted="true">[\s\S]*contributor-supplied[\s\S]*<\/pr_mr_info>/,
+    )
+  })
+
+  it('wraps author_intent in <author_intent untrusted="true"> when supplied', () => {
+    const out = buildReviewerUserPrompt({
+      context: 'ctx',
+      diffContent: 'd',
+      prDescriptionSummary: 'INTENT-PAYLOAD',
+    })
+    expect(out).toMatch(
+      /<author_intent untrusted="true">[\s\S]*INTENT-PAYLOAD[\s\S]*<\/author_intent>/,
+    )
+  })
+
+  it('closing tags stay bare (attribute only on the opening tag)', () => {
+    const out = buildReviewerUserPrompt({
+      context: 'ctx',
+      diffContent: 'd',
+      prMrInfo: '{"x":1}',
+      prDescriptionSummary: 'i',
+    })
+    expect(out).toContain('</diff_content>')
+    expect(out).toContain('</pr_mr_info>')
+    expect(out).toContain('</author_intent>')
+    expect(out).not.toContain('</diff_content untrusted')
+    expect(out).not.toContain('</pr_mr_info untrusted')
+    expect(out).not.toContain('</author_intent untrusted')
   })
 })
 

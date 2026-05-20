@@ -32,7 +32,15 @@ export interface PostReviewOptions {
   platform: Platform
   /** Whether to post inline comments for issues with file/line info */
   postInlineComments?: boolean
-  /** Whether to set approval status based on verdict */
+  /**
+   * Allow the model's verdict to drive an actual platform approval
+   * (GitHub APPROVE / GitLab approve). Defaults to `false` so the
+   * comment is always posted but the privileged approval mutation
+   * requires explicit caller opt-in. The motivation is prompt-injection:
+   * untrusted PR/MR content fed to the LLM can influence the verdict,
+   * and the result must NOT be sufficient on its own to approve
+   * attacker-controlled changes.
+   */
   setApprovalStatus?: boolean
   /** Maximum number of inline comments to post */
   maxInlineComments?: number
@@ -70,7 +78,10 @@ export async function postReviewToPR(
     mrIid,
     platform,
     postInlineComments = true,
-    setApprovalStatus = true,
+    // Default OFF — model-derived verdicts must not be sufficient on
+    // their own to trigger a platform approval. Callers opt in via the
+    // CliOptions.autoApprove (--auto-approve) flag.
+    setApprovalStatus = false,
     maxInlineComments = 10,
   } = options
 

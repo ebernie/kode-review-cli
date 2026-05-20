@@ -55,6 +55,7 @@ const BASE_CLI: CliOptions = {
   noSuppressions: false,
   reportOnly: false,
   postToPr: false,
+  autoApprove: false,
   initHooks: false,
   reviewers: ['general'],
   listReviewers: false,

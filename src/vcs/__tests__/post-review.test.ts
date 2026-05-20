@@ -701,3 +701,116 @@ describe('postReviewToPR — GitLab REQUEST_CHANGES revokes prior approval', () 
     expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * Regression tests for D-5a: `setApprovalStatus` defaults to `false`.
+ *
+ * Pre-fix the field defaulted to `true`, which meant a caller that
+ * merely asked to post a review comment would also trigger an actual
+ * GitHub APPROVE / GitLab approve action whenever the model emitted
+ * an APPROVE verdict. Prompt-injection in untrusted PR/MR content
+ * could exploit this to coerce a bot account into approving attacker-
+ * controlled changes.
+ *
+ * The fix flips the default to `false` so the privileged mutation
+ * requires explicit caller opt-in (CliOptions.autoApprove via
+ * --auto-approve).
+ */
+describe('postReviewToPR — default setApprovalStatus is false (D-5a)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockPostGitHubPRComment.mockResolvedValue({ success: true })
+    mockPostGitLabMRComment.mockResolvedValue({ success: true })
+    mockGetGitHubPRContext.mockResolvedValue({ success: true, context: {} })
+    mockGetGitLabMRContext.mockResolvedValue({ success: true, context: {} })
+  })
+
+  it('does NOT call submitGitHubPRReview when setApprovalStatus is omitted (GitHub, APPROVE verdict)', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 1, postInlineComments: false },
+    )
+    // Pre-fix this test would FAIL: submitGitHubPRReview would have been
+    // called with 'APPROVE' because setApprovalStatus defaulted to true.
+    expect(mockSubmitGitHubPRReview).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call setGitLabMRApproval when setApprovalStatus is omitted (GitLab, APPROVE verdict)', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 1, postInlineComments: false },
+    )
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+    // unapproveGitLabMR is *also* gated by setApprovalStatus (the
+    // helper runs the GitLab approval branch only when the flag is on),
+    // so it must not fire either.
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+  })
+
+  it('does NOT call submitGitHubPRReview when setApprovalStatus is omitted (REQUEST_CHANGES verdict)', async () => {
+    // Same default applies regardless of verdict — model-derived
+    // REQUEST_CHANGES is also a "platform-visible mutation" and must
+    // not run without explicit opt-in.
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'REQUEST_CHANGES', reasoning: '', confidence: 'HIGH', mergeDecision: 'DO_NOT_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 1, postInlineComments: false },
+    )
+    expect(mockSubmitGitHubPRReview).not.toHaveBeenCalled()
+  })
+
+  it('still posts the review comment when setApprovalStatus is omitted (default-off only gates approval)', async () => {
+    // Affirmative companion to the negative assertions above:
+    // verify the comment still posts. A regression that flipped the
+    // default to "do nothing at all" would silently break the
+    // happy path.
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 1, postInlineComments: false },
+    )
+    expect(mockPostGitHubPRComment).toHaveBeenCalledTimes(1)
+    expect(result.commentPosted).toBe(true)
+    expect(result.approvalStatusSet).toBe(false)
+  })
+
+  it('still calls submitGitHubPRReview when setApprovalStatus is explicitly true (opt-in works)', async () => {
+    // The opt-in path must remain functional — flipping the default to
+    // false must not also break callers that explicitly request the
+    // approval mutation (e.g., CI with --auto-approve).
+    mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 1, postInlineComments: false, setApprovalStatus: true },
+    )
+    expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(1, '', 'APPROVE')
+  })
+})
