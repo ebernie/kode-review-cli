@@ -7,17 +7,29 @@ const CONFIG_NAME = 'kode-review'
  * Configuration store using Conf
  * Stores in ~/.config/kode-review/config.json (Linux/Mac)
  * or %APPDATA%\kode-review\Config\config.json (Windows)
+ *
+ * Lazily initialized so that a corrupt config file (which causes `new Conf()`
+ * to throw a SyntaxError on first access) is surfaced as a runtime error at
+ * the call site rather than as an unrecoverable module-initialization crash.
+ * This allows `--doctor` to catch the error and render a structured fail row.
  */
-const store = new Conf<Config>({
-  projectName: CONFIG_NAME,
-  defaults: defaultConfig,
-})
+let _store: Conf<Config> | null = null
+
+function getStore(): Conf<Config> {
+  if (_store === null) {
+    _store = new Conf<Config>({
+      projectName: CONFIG_NAME,
+      defaults: defaultConfig,
+    })
+  }
+  return _store
+}
 
 /**
  * Get the current configuration
  */
 export function getConfig(): Config {
-  const raw = store.store
+  const raw = getStore().store
   return ConfigSchema.parse(raw)
 }
 
@@ -26,7 +38,7 @@ export function getConfig(): Config {
  * detect pre-1.0 schemas without throwing on parse.
  */
 export function getRawConfig(): unknown {
-  return store.store
+  return getStore().store
 }
 
 /**
@@ -53,15 +65,16 @@ export function readLegacyComposeProject(): string {
 export function updateConfig(updates: Partial<Config>): Config {
   const current = getConfig()
   const updated = { ...current, ...updates }
-  store.set(updated)
-  return ConfigSchema.parse(store.store)
+  const s = getStore()
+  s.set(updated)
+  return ConfigSchema.parse(s.store)
 }
 
 /**
  * Set a specific config value
  */
 export function setConfigValue<K extends keyof Config>(key: K, value: Config[K]): void {
-  store.set(key, value)
+  getStore().set(key, value)
 }
 
 /**
@@ -90,15 +103,21 @@ export function setOnboardingComplete(complete: boolean = true): void {
  * `onboardingComplete`, so the next CLI invocation will trigger the wizard.
  */
 export function resetConfig(): void {
-  store.clear()
-  store.set(defaultConfig)
+  const s = getStore()
+  s.clear()
+  s.set(defaultConfig)
 }
 
 /**
  * Get the config file path
  */
 export function getConfigPath(): string {
-  return store.path
+  return getStore().path
 }
 
-export { store }
+/**
+ * @internal — Direct access to the underlying Conf instance.
+ * Prefer the typed helpers above. The store is initialized lazily on first
+ * access, so this function call (not property access) is the correct usage.
+ */
+export { getStore as store }

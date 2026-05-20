@@ -4,9 +4,33 @@
  */
 
 import { promises as fs } from 'node:fs'
-import { join, basename } from 'node:path'
+import { realpath } from 'node:fs/promises'
+import { join, basename, relative, sep } from 'node:path'
 import { exec } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
+
+/**
+ * Resolve `filePath` through symlinks and confirm it still lives under
+ * `repoRoot`. Returns the canonical path on success, or null if the file
+ * doesn't exist or escapes the repo via a symlink.
+ *
+ * Mirrors the realpath containment check in `src/repo-audit/prompts.ts:64-98`
+ * and `src/review/tools/read-file.ts`. Files read for LLM prompts are
+ * untrusted: a malicious committer can replace `README.md` with a symlink to
+ * `.env` or `/etc/passwd` and exfiltrate secrets to the model provider.
+ */
+async function realpathInsideRepo(filePath: string, repoRoot: string): Promise<string | null> {
+  try {
+    const [realFile, realRoot] = await Promise.all([realpath(filePath), realpath(repoRoot)])
+    const rel = relative(realRoot, realFile)
+    if (rel.startsWith('..') || rel.startsWith(`..${sep}`) || rel === '..') {
+      return null
+    }
+    return realFile
+  } catch {
+    return null
+  }
+}
 
 /**
  * Maximum number of lines for the directory tree
@@ -346,7 +370,9 @@ async function getReadmeSummary(repoRoot: string): Promise<string | undefined> {
   for (const readmeFile of README_FILES) {
     const readmePath = join(repoRoot, readmeFile)
     try {
-      const content = await fs.readFile(readmePath, 'utf-8')
+      const safePath = await realpathInsideRepo(readmePath, repoRoot)
+      if (safePath === null) continue
+      const content = await fs.readFile(safePath, 'utf-8')
       if (content.trim()) {
         // Extract first README_MAX_CHARS characters, but try to end at a sentence or paragraph
         let summary = content.slice(0, README_MAX_CHARS)
@@ -389,7 +415,9 @@ async function getArchitectureDoc(repoRoot: string): Promise<string | undefined>
   for (const archFile of ARCHITECTURE_FILES) {
     const archPath = join(repoRoot, archFile)
     try {
-      const content = await fs.readFile(archPath, 'utf-8')
+      const safePath = await realpathInsideRepo(archPath, repoRoot)
+      if (safePath === null) continue
+      const content = await fs.readFile(safePath, 'utf-8')
       if (content.trim()) {
         // Return full content (typically architecture docs are meant to be read fully)
         // But cap at a reasonable size to avoid overwhelming the context

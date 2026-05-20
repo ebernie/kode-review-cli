@@ -14,6 +14,7 @@ vi.mock('../gitlab.js', () => ({
   postGitLabMRLineComment: vi.fn(),
   getGitLabMRContext: vi.fn(),
   setGitLabMRApproval: vi.fn(),
+  unapproveGitLabMR: vi.fn(),
 }))
 
 // Mock logger to suppress output during tests
@@ -40,6 +41,7 @@ import {
   postGitLabMRLineComment,
   getGitLabMRContext,
   setGitLabMRApproval,
+  unapproveGitLabMR,
 } from '../gitlab.js'
 
 // Get mock references
@@ -51,6 +53,7 @@ const mockPostGitLabMRComment = postGitLabMRComment as unknown as ReturnType<typ
 const mockPostGitLabMRLineComment = postGitLabMRLineComment as unknown as ReturnType<typeof vi.fn>
 const mockGetGitLabMRContext = getGitLabMRContext as unknown as ReturnType<typeof vi.fn>
 const mockSetGitLabMRApproval = setGitLabMRApproval as unknown as ReturnType<typeof vi.fn>
+const mockUnapproveGitLabMR = unapproveGitLabMR as unknown as ReturnType<typeof vi.fn>
 
 const mockReview: StructuredReview = {
   summary: 'Test review summary.',
@@ -113,6 +116,7 @@ describe('postReviewToPR', () => {
     mockPostGitLabMRLineComment.mockResolvedValue({ success: true })
     mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
     mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
   })
 
   afterEach(() => {
@@ -176,13 +180,23 @@ describe('postReviewToPR', () => {
       expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(42, '', 'REQUEST_CHANGES')
     })
 
-    it('submits APPROVE review when verdict is APPROVE', async () => {
+    it('submits APPROVE review when verdict is APPROVE and no CRITICAL/HIGH issues', async () => {
       mockPostGitHubPRComment.mockResolvedValue({ success: true })
       mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
       mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
 
+      // Use a review with no CRITICAL or HIGH issues — severity gate must pass APPROVE through
       const approvedReview: StructuredReview = {
         ...mockReview,
+        issues: [
+          {
+            severity: 'LOW',
+            category: 'Style',
+            title: 'Minor style issue',
+            description: 'Naming inconsistency.',
+            confidence: 'LOW',
+          },
+        ],
         verdict: { ...mockReview.verdict, recommendation: 'APPROVE' },
       }
 
@@ -190,6 +204,7 @@ describe('postReviewToPR', () => {
         prNumber: 42,
         platform: 'github',
         setApprovalStatus: true,
+        postInlineComments: false,
       })
 
       expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(42, '', 'APPROVE')
@@ -281,12 +296,22 @@ describe('postReviewToPR', () => {
       expect(mockPostGitLabMRLineComment).toHaveBeenCalledTimes(2)
     })
 
-    it('approves MR when verdict is APPROVE', async () => {
+    it('approves MR when verdict is APPROVE and no CRITICAL/HIGH issues', async () => {
       mockPostGitLabMRComment.mockResolvedValue({ success: true })
       mockSetGitLabMRApproval.mockResolvedValue({ success: true })
 
+      // Use a review with no CRITICAL or HIGH issues — severity gate must pass APPROVE through
       const approvedReview: StructuredReview = {
         ...mockReview,
+        issues: [
+          {
+            severity: 'LOW',
+            category: 'Style',
+            title: 'Minor style issue',
+            description: 'Naming inconsistency.',
+            confidence: 'LOW',
+          },
+        ],
         verdict: { ...mockReview.verdict, recommendation: 'APPROVE' },
       }
 
@@ -300,19 +325,22 @@ describe('postReviewToPR', () => {
       expect(mockSetGitLabMRApproval).toHaveBeenCalledWith(123, true)
     })
 
-    it('does not call setApproval for REQUEST_CHANGES (GitLab has no equivalent)', async () => {
+    it('calls unapproveGitLabMR for REQUEST_CHANGES to revoke any prior bot approval', async () => {
       mockPostGitLabMRComment.mockResolvedValue({ success: true })
-      mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+      mockUnapproveGitLabMR.mockResolvedValue({ success: true })
 
-      await postReviewToPR(mockReview, {
+      const result = await postReviewToPR(mockReview, {
         mrIid: 123,
         platform: 'gitlab',
         setApprovalStatus: true,
         postInlineComments: false,
       })
 
-      // Should not call setGitLabMRApproval for REQUEST_CHANGES
+      // Must revoke any prior approval — not silently ignore REQUEST_CHANGES
+      expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(123)
+      // Must not approve while doing so
       expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+      expect(result.approvalStatusSet).toBe(true)
     })
 
     it('returns error when MR IID is missing', async () => {
@@ -323,6 +351,128 @@ describe('postReviewToPR', () => {
       expect(result.success).toBe(false)
       expect(result.errors).toContain('MR IID is required for GitLab')
     })
+  })
+})
+
+describe('postReviewToPR — inline comment failures', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetGitHubPRContext.mockResolvedValue({
+      success: true,
+      context: { owner: 'test-owner', repo: 'test-repo', commitId: 'abc123' },
+    })
+    mockPostGitHubPRComment.mockResolvedValue({ success: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('records inline comment failures in result.inlineCommentsFailed and result.errors', async () => {
+    mockPostGitHubPRLineComment
+      .mockResolvedValueOnce({ success: true })
+      .mockResolvedValueOnce({ success: false, error: 'API rate limit' })
+      .mockResolvedValueOnce({ success: false, error: 'Not found' })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+          { severity: 'LOW', category: 'Style', title: 'c', description: '', confidence: 'HIGH', file: 'c.ts', line: 3 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(3)
+    expect(result.inlineCommentsPosted).toBe(1)
+    expect(result.inlineCommentsFailed).toBe(2)
+    // Exactly 2 errors — one per failed inline comment, not more
+    expect(result.errors).toHaveLength(2)
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/API rate limit/),
+        expect.stringMatching(/Not found/),
+      ]),
+    )
+    expect(mockPostGitHubPRLineComment).toHaveBeenCalledTimes(3)
+  })
+
+  it('records a context-fetch failure as N failures (one per eligible issue), no line-comment calls', async () => {
+    mockGetGitHubPRContext.mockResolvedValue({ success: false, error: 'PR not found' })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(2)
+    expect(result.inlineCommentsPosted).toBe(0)
+    expect(result.inlineCommentsFailed).toBe(2)
+    // Exactly one error for the context-fetch failure, not one per issue
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors).toEqual(expect.arrayContaining([expect.stringMatching(/PR not found/)]))
+    // Line-comment API was never called — the context failure short-circuited it
+    expect(mockPostGitHubPRLineComment).not.toHaveBeenCalled()
+  })
+
+  it('leaves inlineCommentsFailed at 0 when all inline comments succeed', async () => {
+    mockPostGitHubPRLineComment.mockResolvedValue({ success: true })
+
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+          { severity: 'LOW', category: 'Style', title: 'b', description: '', confidence: 'HIGH', file: 'b.ts', line: 2 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(2)
+    expect(result.inlineCommentsPosted).toBe(2)
+    expect(result.inlineCommentsFailed).toBe(0)
+    expect(result.errors).toHaveLength(0)
+  })
+
+  it('sets all inline counters to 0 and makes no API calls when postInlineComments is false', async () => {
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [
+          { severity: 'LOW', category: 'Style', title: 'a', description: '', confidence: 'HIGH', file: 'a.ts', line: 1 } as any,
+        ],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 123, setApprovalStatus: false, postInlineComments: false },
+    )
+
+    expect(result.inlineCommentsAttempted).toBe(0)
+    expect(result.inlineCommentsPosted).toBe(0)
+    expect(result.inlineCommentsFailed).toBe(0)
+    expect(result.errors).toHaveLength(0)
+    expect(mockGetGitHubPRContext).not.toHaveBeenCalled()
+    expect(mockPostGitHubPRLineComment).not.toHaveBeenCalled()
   })
 })
 
@@ -363,5 +513,191 @@ describe('postSimpleComment', () => {
 
     expect(result.success).toBe(false)
     expect(result.error).toBe('Invalid platform or missing identifier')
+  })
+})
+
+describe('postReviewToPR — severity gate on auto-approve', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockPostGitHubPRComment.mockResolvedValue({ success: true })
+    mockPostGitLabMRComment.mockResolvedValue({ success: true })
+    mockSubmitGitHubPRReview.mockResolvedValue({ success: true })
+    mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('downgrades GitHub APPROVE to COMMENT when there is a CRITICAL issue', async () => {
+    const result = await postReviewToPR(
+      {
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        issues: [{ severity: 'CRITICAL', title: 'sql injection', description: '', confidence: 'HIGH', category: 'Security' } as any],
+        summary: 'test',
+        positives: [],
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 7, postInlineComments: false, setApprovalStatus: true },
+    )
+
+    // Must NOT submit APPROVE — the CRITICAL issue should have blocked it
+    expect(mockSubmitGitHubPRReview).not.toHaveBeenCalledWith(7, '', 'APPROVE')
+    // The downgrade reason must be surfaced in result.errors
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.stringMatching(/downgrad/i),
+    ]))
+  })
+
+  it('downgrades GitHub APPROVE to COMMENT when there is a HIGH issue', async () => {
+    await postReviewToPR(
+      {
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        issues: [{ severity: 'HIGH', title: 'auth bypass', description: '', confidence: 'HIGH', category: 'Security' } as any],
+        summary: 'test',
+        positives: [],
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 7, postInlineComments: false, setApprovalStatus: true },
+    )
+
+    expect(mockSubmitGitHubPRReview).not.toHaveBeenCalledWith(7, '', 'APPROVE')
+  })
+
+  it('lets GitHub APPROVE through when issues are MEDIUM/LOW only', async () => {
+    await postReviewToPR(
+      {
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        issues: [{ severity: 'MEDIUM', title: 'naming', description: '', confidence: 'HIGH', category: 'Style' } as any],
+        summary: 'test',
+        positives: [],
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 7, postInlineComments: false, setApprovalStatus: true },
+    )
+
+    expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(7, '', 'APPROVE')
+  })
+
+  it('downgrades GitLab APPROVE to unapprove when there is a CRITICAL issue', async () => {
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
+
+    await postReviewToPR(
+      {
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        issues: [{ severity: 'CRITICAL', title: 'rce', description: '', confidence: 'HIGH', category: 'Security' } as any],
+        summary: 'test',
+        positives: [],
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 7, postInlineComments: false, setApprovalStatus: true },
+    )
+
+    // Must NOT approve when CRITICAL is present...
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalledWith(7, true)
+    // ...AND must actively revoke any prior bot approval so the MR doesn't
+    // sit in "approved" state contradicting the new review verdict.
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(7)
+  })
+
+  it('lets APPROVE through when there are zero issues', async () => {
+    await postReviewToPR(
+      {
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        issues: [],
+        summary: 'test',
+        positives: [],
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'github', prNumber: 7, postInlineComments: false, setApprovalStatus: true },
+    )
+
+    expect(mockSubmitGitHubPRReview).toHaveBeenCalledWith(7, '', 'APPROVE')
+  })
+})
+
+describe('postReviewToPR — GitLab REQUEST_CHANGES revokes prior approval', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockUnapproveGitLabMR.mockResolvedValue({ success: true })
+    mockSetGitLabMRApproval.mockResolvedValue({ success: true })
+    mockPostGitLabMRComment.mockResolvedValue({ success: true })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('calls unapproveGitLabMR when verdict is REQUEST_CHANGES on GitLab', async () => {
+    const result = await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'REQUEST_CHANGES', reasoning: '', confidence: 'HIGH', mergeDecision: 'DO_NOT_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    // Must actively revoke any prior approval when flagging REQUEST_CHANGES
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(42)
+    // Must NOT simultaneously approve
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+    expect(result.approvalStatusSet).toBe(true)
+  })
+
+  it('calls setGitLabMRApproval(42, true) when verdict is APPROVE on GitLab', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'APPROVE', reasoning: '', confidence: 'HIGH', mergeDecision: 'SAFE_TO_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    expect(mockSetGitLabMRApproval).toHaveBeenCalledWith(42, true)
+    // Must not call unapprove when approving
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+  })
+
+  it('calls unapproveGitLabMR on NEEDS_DISCUSSION to clear any prior approval', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'NEEDS_DISCUSSION', reasoning: '', confidence: 'HIGH', mergeDecision: 'CONDITIONAL_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: true },
+    )
+
+    // GitLab can only express APPROVE or not-APPROVE. NEEDS_DISCUSSION means
+    // the bot wants the MR in the not-APPROVE state. Revoke any prior approval
+    // (idempotent on "not approved"); never call setGitLabMRApproval(_, true).
+    expect(mockUnapproveGitLabMR).toHaveBeenCalledWith(42)
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
+  })
+
+  it('does not call unapproveGitLabMR when setApprovalStatus is false', async () => {
+    await postReviewToPR(
+      {
+        summary: 'test',
+        positives: [],
+        issues: [],
+        verdict: { recommendation: 'REQUEST_CHANGES', reasoning: '', confidence: 'HIGH', mergeDecision: 'DO_NOT_MERGE', rationale: '' },
+        metadata: { timestamp: '', scope: 'pr', agentic: false },
+      } as any,
+      { platform: 'gitlab', mrIid: 42, setApprovalStatus: false },
+    )
+
+    // If caller opts out of approval management, neither function is called
+    expect(mockUnapproveGitLabMR).not.toHaveBeenCalled()
+    expect(mockSetGitLabMRApproval).not.toHaveBeenCalled()
   })
 })

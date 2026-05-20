@@ -17,6 +17,7 @@ import {
   postGitLabMRLineComment,
   getGitLabMRContext,
   setGitLabMRApproval,
+  unapproveGitLabMR,
   type GitLabMRContext,
 } from './gitlab.js'
 
@@ -41,6 +42,8 @@ export interface PostReviewResult {
   success: boolean
   commentPosted: boolean
   inlineCommentsPosted: number
+  inlineCommentsFailed: number
+  inlineCommentsAttempted: number
   approvalStatusSet: boolean
   errors: string[]
 }
@@ -56,6 +59,8 @@ export async function postReviewToPR(
     success: false,
     commentPosted: false,
     inlineCommentsPosted: 0,
+    inlineCommentsFailed: 0,
+    inlineCommentsAttempted: 0,
     approvalStatusSet: false,
     errors: [],
   }
@@ -105,6 +110,8 @@ export async function postReviewToPR(
       .filter(issue => issue.file && issue.line)
       .slice(0, maxInlineComments)
 
+    result.inlineCommentsAttempted = issuesWithLocation.length
+
     if (issuesWithLocation.length > 0) {
       logger.info(`Posting ${issuesWithLocation.length} inline comment(s)...`)
 
@@ -114,7 +121,12 @@ export async function postReviewToPR(
         : await getGitLabMRContext(identifier)
 
       if (!ctxResult.success) {
-        logger.debug(`Failed to fetch PR/MR context for inline comments: ${ctxResult.error}`)
+        // Context fetch failed — every intended inline comment is a failure.
+        // Callers need this surfaced; debug-level logging is invisible at default verbosity.
+        result.inlineCommentsFailed = issuesWithLocation.length
+        const msg = `Failed to fetch PR/MR context for inline comments: ${ctxResult.error}`
+        result.errors.push(msg)
+        logger.warn(msg)
       } else {
         const ctx = ctxResult.context
         for (const issue of issuesWithLocation) {
@@ -126,28 +138,39 @@ export async function postReviewToPR(
           if (inlineResult.success) {
             result.inlineCommentsPosted++
           } else {
-            logger.debug(`Failed to post inline comment: ${inlineResult.error}`)
+            result.inlineCommentsFailed++
+            const msg = `Inline comment failed (${issue.file}:${issue.line}): ${inlineResult.error}`
+            result.errors.push(msg)
+            logger.warn(msg)
           }
         }
       }
 
       if (result.inlineCommentsPosted > 0) {
-        logger.success(`Posted ${result.inlineCommentsPosted} inline comment(s)`)
+        logger.success(`Posted ${result.inlineCommentsPosted}/${result.inlineCommentsAttempted} inline comment(s)`)
+      }
+      if (result.inlineCommentsFailed > 0) {
+        logger.warn(`${result.inlineCommentsFailed} inline comment(s) failed`)
       }
     }
   }
 
-  // Set approval status based on verdict
+  // Set approval status based on verdict, with severity-count ground-truth gate
   if (setApprovalStatus) {
+    const effective = effectiveVerdictForApproval(review)
+    if (effective.downgraded) {
+      result.errors.push(effective.reason!)
+      logger.warn(effective.reason!)
+    }
     const approvalResult = await setApprovalStatusForReview(
       identifier,
       platform,
-      review.verdict.recommendation
+      effective.verdict,
     )
 
     if (approvalResult.success) {
       result.approvalStatusSet = true
-      logger.success(`Review status set: ${review.verdict.recommendation}`)
+      logger.success(`Review status set: ${effective.verdict}`)
     } else if (approvalResult.error) {
       result.errors.push(`Failed to set approval status: ${approvalResult.error}`)
     }
@@ -156,6 +179,32 @@ export async function postReviewToPR(
   // Overall success if at least the main comment was posted
   result.success = result.commentPosted
   return result
+}
+
+/**
+ * The `setApprovalStatusForReview` call publishes a verdict to GitHub/GitLab.
+ * Mirror the same severity-count ground truth that `resolveCiExitCode`
+ * applies to the CI exit code: if there is any CRITICAL or HIGH issue in
+ * the review, an APPROVE verdict from the model is downgraded to
+ * NEEDS_DISCUSSION (becomes COMMENT on GitHub / no-op on GitLab).
+ * The model's recommendation is advisory; the count axis is the ground truth.
+ */
+function effectiveVerdictForApproval(
+  review: { verdict: { recommendation: Verdict }; issues: { severity: string }[] },
+): { verdict: Verdict; downgraded: boolean; reason?: string } {
+  const declared = review.verdict.recommendation
+  if (declared !== 'APPROVE') return { verdict: declared, downgraded: false }
+
+  const critical = review.issues.filter(i => i.severity === 'CRITICAL').length
+  const high = review.issues.filter(i => i.severity === 'HIGH').length
+  if (critical > 0 || high > 0) {
+    return {
+      verdict: 'NEEDS_DISCUSSION', // becomes COMMENT on GitHub / no-op on GitLab
+      downgraded: true,
+      reason: `APPROVE downgraded: ${critical} critical, ${high} high issue(s) present`,
+    }
+  }
+  return { verdict: declared, downgraded: false }
 }
 
 /**
@@ -206,16 +255,16 @@ async function setApprovalStatusForReview(
 
     return submitGitHubPRReview(identifier, '', event)
   } else {
-    // GitLab: approve or don't approve based on verdict
     if (verdict === 'APPROVE') {
       return setGitLabMRApproval(identifier, true)
-    } else if (verdict === 'REQUEST_CHANGES') {
-      // GitLab doesn't have "request changes" - we just don't approve
-      // The comment with issues serves as the feedback
-      return { success: true }
     } else {
-      // NEEDS_DISCUSSION - no approval action needed
-      return { success: true }
+      // GitLab has no native "request changes" verb, and the severity gate
+      // can downgrade an APPROVE verdict to NEEDS_DISCUSSION when CRITICAL/HIGH
+      // issues are present. In both cases the desired postcondition is the same:
+      // the MR must NOT be approved. Revoke any prior bot approval idempotently
+      // (succeeds if there was no prior approval) so a stale APPROVE never
+      // contradicts the current review verdict.
+      return unapproveGitLabMR(identifier)
     }
   }
 }

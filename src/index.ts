@@ -1396,10 +1396,14 @@ async function processReviewOutput(
     if (postResult.success) {
       logger.success('Review posted to PR/MR')
       if (postResult.inlineCommentsPosted > 0) {
-        logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+        logger.success(`Posted ${postResult.inlineCommentsPosted}/${postResult.inlineCommentsAttempted} inline comment(s)`)
       }
       if (postResult.approvalStatusSet) {
         logger.success(`Review status: ${reviewOutput.structured.verdict.recommendation}`)
+      }
+      // Inline-comment failures don't flip overall success but must still be visible
+      if (postResult.inlineCommentsFailed > 0) {
+        logger.warn(`${postResult.inlineCommentsFailed} inline comment(s) failed to post`)
       }
     } else {
       for (const error of postResult.errors) {
@@ -1578,7 +1582,11 @@ async function processMultiReviewerOutput(
       if (postResult.success) {
         logger.success(`Posted ${r.reviewer.name} review to PR/MR`)
         if (postResult.inlineCommentsPosted > 0) {
-          logger.success(`Posted ${postResult.inlineCommentsPosted} inline comment(s)`)
+          logger.success(`Posted ${postResult.inlineCommentsPosted}/${postResult.inlineCommentsAttempted} inline comment(s)`)
+        }
+        // Inline-comment failures don't flip overall success but must still be visible
+        if (postResult.inlineCommentsFailed > 0) {
+          logger.warn(`${postResult.inlineCommentsFailed} inline comment(s) failed to post`)
         }
       } else {
         for (const error of postResult.errors) {
@@ -1617,11 +1625,12 @@ async function main(): Promise<void> {
   setDebugMode(process.env.DEBUG === '1')
 
   try {
-    // v1.0 clean-break migration gate. Doctor and version-style commands
-    // (handled by Commander before parseArgs returns) must remain reachable
-    // even on a legacy install — those don't trigger this branch because
-    // they exit during arg parsing.
-    if (needsMigration() && !options.doctor) {
+    // v1.0 clean-break migration gate. --doctor must remain reachable even on
+    // a corrupt or legacy install so it can surface config problems as a
+    // structured diagnostic row. needsMigration() reads the config file and
+    // will throw a SyntaxError on corruption, so we gate the entire call on
+    // !options.doctor rather than only gating the runMigration() branch.
+    if (!options.doctor && needsMigration()) {
       const result = await runMigration({ skipConfirm: options.migrateYes })
       // Always exit after migration (or abort): re-running puts the user in
       // the post-migration state, which is what setup expects.
