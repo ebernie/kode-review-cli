@@ -81,9 +81,38 @@ describe('parseArgs: --scope repo', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--report-only', '--revalidate'))).toThrow(/contradictory intent|cannot be combined/)
   })
 
+  it('refuses --revalidate combined with --engine clawpatch (clawpatch has no equivalent re-check)', () => {
+    expect(() => parseArgs(args('--scope', 'repo', '--revalidate', '--engine', 'clawpatch'))).toThrow(
+      /not supported with --engine clawpatch/,
+    )
+  })
+
   it('rejects --scope repo + --watch at parse time (periodic repo-audit not yet supported)', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--watch'))).toThrow(
       /--watch with --scope repo is not yet supported/,
+    )
+  })
+})
+
+describe('parseArgs: --scope validation', () => {
+  it.each(['local', 'pr', 'both', 'auto', 'repo'])(
+    'accepts the documented scope value: %s',
+    (scope) => {
+      expect(() => parseArgs(args('--scope', scope))).not.toThrow()
+    },
+  )
+
+  it('rejects an unknown scope value with a clear error', () => {
+    expect(() => parseArgs(args('--scope', 'pull'))).toThrow(/Invalid --scope/)
+  })
+
+  it('rejects an empty-string scope value', () => {
+    expect(() => parseArgs(args('--scope', ''))).toThrow(/Invalid --scope/)
+  })
+
+  it('lists the allowed values in the error message', () => {
+    expect(() => parseArgs(args('--scope', 'nonsense'))).toThrow(
+      /local.*pr.*both.*auto.*repo/,
     )
   })
 })

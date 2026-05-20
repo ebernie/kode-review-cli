@@ -45,6 +45,7 @@ import {
   listAvailableReviewers,
   resolveReviewerNames,
   runReviewers,
+  runAgenticReviewers,
   type ReviewerRunResult,
 } from './reviewers/index.js'
 import {
@@ -613,13 +614,23 @@ export async function runRepoScopeAudit(
   }
 
   // CI mode: fail on CRITICAL (or HIGH if --fail-on=high).
+  // `uncertain` status (set by --revalidate when the agent couldn't determine
+  // whether the finding is fixed) is treated the same as `open` — the agent
+  // gave up, so a human still needs to look. Letting CI silently pass on
+  // uncertain CRITICAL findings would defeat the purpose of the gate.
   if (options.ci) {
     const triggerSev = options.failOn === 'high' ? ['CRITICAL', 'HIGH'] : ['CRITICAL']
     const blockers = allFindings.filter(
-      (r) => r.status === 'open' && triggerSev.includes(r.finding.severity),
+      (r) =>
+        (r.status === 'open' || r.status === 'uncertain') &&
+        triggerSev.includes(r.finding.severity),
     )
     if (options.failOn !== 'none' && blockers.length > 0) {
-      logger.error(`CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s); failing.`)
+      const uncertainCount = blockers.filter((r) => r.status === 'uncertain').length
+      const uncertainSuffix = uncertainCount > 0 ? ` (${uncertainCount} uncertain)` : ''
+      logger.error(
+        `CI mode: ${blockers.length} ${options.failOn.toUpperCase()}+ finding(s)${uncertainSuffix}; failing.`,
+      )
       process.exit(1)
     }
   }
@@ -980,32 +991,114 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         onProgress,
       }
 
-      const result = await runAgenticReview(agenticOptions)
+      // Resolve --reviewer tokens. When the user did not pass --reviewer,
+      // args.ts defaults `options.reviewers` to ['general'] — we detect this
+      // single-default case and preserve the original single-shot agentic
+      // path byte-for-byte. Anything else routes through the multi-reviewer
+      // agentic path so each requested persona's system prompt is honored.
+      const agenticReviewerInfos = resolveReviewerNames(options.reviewers)
+      const isDefaultGeneralAgentic =
+        agenticReviewerInfos.length === 1 &&
+        agenticReviewerInfos[0].name === 'general'
 
-      progressUpdater?.dispose()
-      spinner?.stop()
+      if (isDefaultGeneralAgentic) {
+        const result = await runAgenticReview(agenticOptions)
 
-      // Apply CI / suppression handling on the agentic output. The filtered
-      // content is what we both render to the user AND post to the PR.
-      const { content: reviewContent, ciExitCode } = await applyCiAndSuppressions(
-        result.content,
-        options,
-        repoRoot!,
-        result.usage,
-      )
+        progressUpdater?.dispose()
+        spinner?.stop()
 
-      // Process review output. When --ci posted a sticky comment we suppress
-      // the legacy `--post-to-pr` path so we don't double-post.
-      await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
-        agentic: true,
-        toolCallCount: result.toolCallCount,
-        truncated: result.truncated,
-        truncationReason: result.truncationReason,
-        usage: result.usage,
-      })
+        // Apply CI / suppression handling on the agentic output. The filtered
+        // content is what we both render to the user AND post to the PR.
+        const { content: reviewContent, ciExitCode } = await applyCiAndSuppressions(
+          result.content,
+          options,
+          repoRoot!,
+          result.usage,
+        )
 
-      if (ciExitCode !== undefined) {
-        process.exit(ciExitCode)
+        // Process review output. When --ci posted a sticky comment we suppress
+        // the legacy `--post-to-pr` path so we don't double-post.
+        await processReviewOutput(reviewContent, options, ctx, prMr, branch, {
+          agentic: true,
+          toolCallCount: result.toolCallCount,
+          truncated: result.truncated,
+          truncationReason: result.truncationReason,
+          usage: result.usage,
+        })
+
+        if (ciExitCode !== undefined) {
+          process.exit(ciExitCode)
+        }
+      } else {
+        // Multi-reviewer agentic path — mirrors the non-agentic branch's
+        // plumbing (per-reviewer suppressions, worst-exit-code aggregation,
+        // composite CI sticky comment, multi-reviewer output rendering).
+        if (!ctx.quiet) {
+          const names = agenticReviewerInfos.map((r) => r.name).join(', ')
+          logger.info(`Dispatching ${agenticReviewerInfos.length} agentic reviewer(s) in parallel: ${names}`)
+        }
+
+        // Strip `onProgress` for the parallel path: a single spinner being
+        // driven by N reviewers in parallel produces incoherent flicker. The
+        // per-reviewer completion line below is the right granularity here.
+        const { onProgress: _drop, ...agenticBaseForMulti } = agenticOptions
+        const results = await runAgenticReviewers({
+          reviewers: agenticReviewerInfos,
+          agenticBase: agenticBaseForMulti,
+          onReviewerComplete: (r) => {
+            if (ctx.quiet) return
+            if (r.ok) {
+              logger.success(`Reviewer ${r.reviewer.name} completed in ${Math.round(r.durationMs / 100) / 10}s`)
+            } else {
+              logger.warn(`Reviewer ${r.reviewer.name} failed: ${r.error}`)
+            }
+          },
+        })
+
+        progressUpdater?.dispose()
+        spinner?.stop()
+
+        // Mirror the non-agentic branch: per-reviewer suppression filtering
+        // and worst-exit-code aggregation. The CI sticky comment is posted
+        // ONCE after the loop with one section per reviewer. The composite
+        // body doesn't depend on agentic-specific fields, so the same helper
+        // works for both modes.
+        // TODO: unify with the non-agentic branch's identical loop in a
+        // follow-up — copy-paste is acceptable here to keep the single-mode
+        // fast path's behavior byte-for-byte identical.
+        let aggregateCiExitCode: number | undefined
+        for (const r of results) {
+          if (!r.ok || r.content === undefined) continue
+          const { content: filtered, ciExitCode } = await applyCiAndSuppressions(
+            r.content,
+            options,
+            repoRoot!,
+            r.usage,
+            { postComment: false },
+          )
+          r.content = filtered
+          if (ciExitCode !== undefined) {
+            aggregateCiExitCode =
+              aggregateCiExitCode === undefined
+                ? ciExitCode
+                : Math.max(aggregateCiExitCode, ciExitCode)
+          }
+        }
+
+        if (options.ci) {
+          const successful = results
+            .filter((r) => r.ok && r.content !== undefined)
+            .map((r) => ({ reviewer: r.reviewer, content: r.content!, usage: r.usage }))
+          if (successful.length > 0) {
+            await postCiStickyComment(buildCompositeCiCommentBody(successful), options, repoRoot!)
+          }
+        }
+
+        await processMultiReviewerOutput(results, options, ctx, prMr, branch, true)
+
+        if (aggregateCiExitCode !== undefined) {
+          process.exit(aggregateCiExitCode)
+        }
       }
     } else {
       // Standard (non-agentic) review mode — dispatch to one or more reviewer
@@ -1383,6 +1476,7 @@ async function processMultiReviewerOutput(
   ctx: CliContext,
   prMr: { id: number; platform: VcsPlatform } | null,
   branch: string,
+  agentic: boolean = false,
 ): Promise<void> {
   const okResults = results.filter((r) => r.ok && r.content !== undefined)
   const failed = results.filter((r) => !r.ok)
@@ -1418,7 +1512,10 @@ async function processMultiReviewerOutput(
       reviewOutput.structured.metadata = {
         timestamp: new Date().toISOString(),
         scope: scope as 'local' | 'pr' | 'both',
-        agentic: false,
+        agentic,
+        toolCalls: r.toolCallCount,
+        truncated: r.truncated,
+        truncationReason: r.truncationReason,
         prNumber: prMr?.platform === 'github' ? prMr.id : undefined,
         mrIid: prMr?.platform === 'gitlab' ? prMr.id : undefined,
         branch,
@@ -1438,6 +1535,18 @@ async function processMultiReviewerOutput(
       console.log(cyan(` Reviewer: ${r.reviewer.name} ${tag}`))
       console.log(cyan('────────────────────────────────────────'))
       console.log('')
+    }
+
+    // Agentic-mode signals: surface truncation + tool-call counts per reviewer
+    // so an iteration-cap truncation in --reviewer X,Y is visible instead of
+    // silently dropped. Mirrors the single-shot agentic path's wording.
+    if (!ctx.quiet && agentic) {
+      if (r.truncated && r.truncationReason) {
+        logger.warn(`  Note: ${r.reviewer.name} review was truncated (${r.truncationReason})`)
+      }
+      if (typeof r.toolCallCount === 'number' && r.toolCallCount > 0) {
+        logger.info(`  Tool calls (${r.reviewer.name}): ${r.toolCallCount}`)
+      }
     }
 
     await writeReviewOutput(reviewOutput, {

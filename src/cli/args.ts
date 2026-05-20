@@ -5,6 +5,13 @@ declare const PKG_VERSION: string
 
 export type ReviewScope = 'local' | 'pr' | 'both' | 'auto' | 'repo'
 
+/**
+ * Runtime list of accepted `--scope` values. `as const satisfies readonly
+ * ReviewScope[]` keeps this aligned with the `ReviewScope` union: if either
+ * side drifts, TypeScript flags the mismatch at compile time.
+ */
+const ALLOWED_SCOPES = ['local', 'pr', 'both', 'auto', 'repo'] as const satisfies readonly ReviewScope[]
+
 export type RepoEngine = 'kode-agent' | 'clawpatch'
 
 /**
@@ -131,7 +138,7 @@ export function createProgram(): Command {
 
   // ── Agent / CI tuning ──────────────────────────────────────────────────────
   program
-    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 10)', '10')
+    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 20)', '20')
     .option('--agentic-timeout <s>', 'Timeout in seconds for agent mode (default: 600)', '600')
     .option('--fail-on <level>', 'In --ci mode, exit non-zero on findings of this severity (critical|high|none)', 'critical')
     .option('--no-suppressions', 'Disable kode-review: ignore markers in source — report every finding')
@@ -236,7 +243,7 @@ export function parseArgs(argv: string[]): CliOptions {
   }
 
   // Validate max iterations for agentic mode
-  const maxIterationsRaw = opts.maxIterations ?? '10'
+  const maxIterationsRaw = opts.maxIterations ?? '20'
   const maxIterations = parseInt(maxIterationsRaw, 10)
   if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 50) {
     throw new Error(`Invalid max-iterations: "${maxIterationsRaw}". Must be a number between 1 and 50.`)
@@ -281,6 +288,18 @@ export function parseArgs(argv: string[]): CliOptions {
   // Commander auto-inverts --no-suppressions into opts.suppressions=false.
   const noSuppressions = opts.suppressions === false
 
+  // Validate --scope against the documented union. Without this guard, typos
+  // like `--scope pull` parse silently and fall through every downstream
+  // comparison against the documented values, running default behavior
+  // instead of the user's intent. Run BEFORE engine/jobs/cross-flag checks
+  // so a user passing both a bad scope and a bad engine sees the scope error
+  // first (deterministic ordering).
+  if (opts.scope !== undefined && !ALLOWED_SCOPES.includes(opts.scope as ReviewScope)) {
+    throw new Error(
+      `Invalid --scope: "${opts.scope}". Must be one of: ${ALLOWED_SCOPES.join(', ')}.`,
+    )
+  }
+
   // Repo-scope options (only meaningful when --scope repo).
   const engineRaw = String(opts.engine ?? 'kode-agent')
   if (!['kode-agent', 'clawpatch'].includes(engineRaw)) {
@@ -311,6 +330,13 @@ export function parseArgs(argv: string[]): CliOptions {
   // --report-only and --revalidate have contradictory intent.
   if (opts.reportOnly && opts.revalidate) {
     throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
+  }
+
+  // --revalidate is implemented only for the kode-agent engine. The clawpatch
+  // engine has its own pipeline for emitting findings and there is no
+  // equivalent re-check operation, so mixing the two is incoherent.
+  if (opts.revalidate && engine === 'clawpatch') {
+    throw new Error(`--revalidate is not supported with --engine clawpatch. Run with --engine kode-agent (the default).`)
   }
 
   return {

@@ -130,6 +130,47 @@ describe('writeFinding / readFinding round-trip', () => {
     expect(back?.updatedAt).toBe('2026-05-20T10:00:00.000Z')
   })
 
+  it('parses pre-revalidate records (no lastRevalidatedAt / revalidationVerdict fields)', async () => {
+    // Backwards compat: any record written before --revalidate landed must
+    // still round-trip cleanly through the schema. We write a JSON blob
+    // missing the new fields and verify readFinding deserializes it.
+    const record = makeRecord()
+    // Serialize WITHOUT the optional fields (they are simply absent in
+    // pre-revalidate records on disk).
+    await ensureStateDirs(tmp)
+    await writeFile(
+      join(findingsDir(tmp), `${record.findingId}.json`),
+      JSON.stringify({
+        schemaVersion: record.schemaVersion,
+        findingId: record.findingId,
+        featureId: record.featureId,
+        persona: record.persona,
+        status: record.status,
+        finding: record.finding,
+        createdByRunId: record.createdByRunId,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+      }),
+    )
+    const back = await readFinding(tmp, record.findingId)
+    expect(back).not.toBeNull()
+    expect(back?.lastRevalidatedAt).toBeUndefined()
+    expect(back?.revalidationVerdict).toBeUndefined()
+    expect(back?.revalidationRunId).toBeUndefined()
+  })
+
+  it('round-trips a record with revalidation fields populated', async () => {
+    const record = makeRecord({
+      status: 'fixed',
+      lastRevalidatedAt: '2026-05-20T10:00:00.000Z',
+      revalidationVerdict: 'fixed',
+      revalidationRunId: 'run-revalidate-1',
+    })
+    await writeFinding(tmp, record)
+    const back = await readFinding(tmp, record.findingId)
+    expect(back).toEqual(record)
+  })
+
   it('removes tmp files after a successful write', async () => {
     // The atomic write contract (no observer ever sees a partial file) is
     // not directly assertable in-process without injecting a crash between

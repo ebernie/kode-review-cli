@@ -14,6 +14,7 @@ import { reviewFeatureWithAgent } from './engines/kode-agent.js'
 import { isRateLimitError, isTransientModelError } from './error-classify.js'
 import { filterFeaturesBySince } from './feature-filter.js'
 import { pendingFeatures, readFeatures } from './features.js'
+import { runRevalidate } from './orchestrator-revalidate.js'
 import {
   buildInstallHint,
   buildNodeUpgradeHint,
@@ -60,25 +61,21 @@ export interface RunRepoAuditResult {
  *
  * Behavior gates:
  *   --report-only  → skip map + review; just render what's on disk
- *   --revalidate   → handled by a sibling path (orchestrator-revalidate.ts; task #12)
+ *   --revalidate   → delegate to orchestrator-revalidate.ts (no new findings)
  *   --remap        → pass --force to `clawpatch map`
- *   --since <ref>  → filter features (task #7)
- *   --engine clawpatch → escape hatch (task #10)
+ *   --since <ref>  → filter features
+ *   --engine clawpatch → escape hatch
  */
 export async function runRepoAudit(
   opts: RunRepoAuditOptions,
 ): Promise<RunRepoAuditResult> {
   const { cli, repoRoot } = opts
 
-  // --revalidate is reserved for a future PR but the CLI flag is accepted.
-  // Without an explicit error, a user passing --revalidate would silently
-  // run a full audit (the wrong operation).
+  // --revalidate runs a parallel orchestration path that re-checks open
+  // findings against current code instead of producing new findings. It
+  // shares the same options shape so callers (src/index.ts) don't branch.
   if (cli.revalidate) {
-    throw new Error(
-      '--revalidate is not yet implemented in this build. ' +
-        'Use --remap to force re-review against current code; ' +
-        'or remove `.kode-review/findings/<id>.json` files individually to re-review specific findings.',
-    )
+    return runRevalidate(opts)
   }
 
   // Report-only short-circuit runs BEFORE any environment gate: this path

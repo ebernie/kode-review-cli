@@ -258,9 +258,17 @@ async function promptSelectRequests(requests: ReviewRequest[]): Promise<ReviewRe
 }
 
 /**
- * Review a single PR/MR
+ * Review a single PR/MR.
+ *
+ * Exported for tests — production callers go through `runPollCycle`. Three
+ * outcomes are possible per call:
+ *
+ *  - Head unchanged → skip (no model call, no state write).
+ *  - Head moved + prior findings → revalidate AND fresh-review, merge by title,
+ *    persist once under the new head ref.
+ *  - First review or head moved + no priors → fresh review only.
  */
-async function reviewRequest(
+export async function reviewRequest(
   request: ReviewRequest,
   cliOptions: CliOptions,
   ctx: CliContext,
@@ -326,7 +334,12 @@ async function reviewRequest(
       return
     }
 
-    // Head moved AND we have prior findings → triage them instead of a full review.
+    // Head moved AND we have prior findings → revalidate prior findings against
+    // the new diff, then fall through to a fresh review on the same diff. The
+    // revalidation step triages stale priors; the fresh review catches new
+    // issues introduced by the newly-pushed commits. Both result sets are
+    // merged and persisted in a single write at the bottom of this function.
+    let revalidatedSurvivors: Finding[] = []
     if (
       prior?.headRef &&
       prior.findings &&
@@ -334,7 +347,7 @@ async function reviewRequest(
       headRef &&
       prior.headRef !== headRef
     ) {
-      await revalidateRequest(
+      const revalidation = await revalidateRequest(
         request,
         prior.findings,
         diffContent,
@@ -342,9 +355,15 @@ async function reviewRequest(
         headRef,
         cliOptions,
         ctx,
-        stateManager,
       )
-      return
+      revalidatedSurvivors = revalidation.survivingFindings
+      if (!revalidation.ok) {
+        logger.warn(
+          `Revalidation failed (${revalidation.error ?? 'unknown error'}). Proceeding with fresh review on the new diff; ` +
+            `prior findings retained as-is in the persisted outcome.`,
+        )
+      }
+      // Do NOT return — fall through to the fresh-review block below.
     }
 
     // Build review options
@@ -380,13 +399,19 @@ async function reviewRequest(
 
     logger.success(`Review complete: ${label}`)
 
+    // Merge any revalidated survivors with the fresh review's findings. Fresh
+    // wins on title collision (most current line numbers / phrasing against
+    // the new code). On the no-revalidation path, `revalidatedSurvivors` is []
+    // so merging is a no-op and the fresh findings are persisted as-is.
+    const mergedFindings = mergeFindingsByTitle(revalidatedSurvivors, result.findings)
+
     // Mark as reviewed
     const outcome: ReviewOutcome = {
       key,
       success: true,
       reviewedAt: new Date().toISOString(),
       headRef,
-      findings: result.findings,
+      findings: mergedFindings,
     }
     stateManager.markReviewed(outcome)
   } catch (error) {
@@ -414,13 +439,38 @@ async function reviewRequest(
 }
 
 /**
+ * Result of a revalidation pass.
+ *
+ * `survivingFindings` is the prior-findings subset that should be carried
+ * forward into the next persisted outcome. When `ok` is false, the caller
+ * still receives `priorFindings` here so a downstream fresh review can layer
+ * its results on top of an unchanged baseline.
+ */
+export interface RevalidationResult {
+  /** The findings that survived revalidation (still-present + omitted-for-safety). */
+  survivingFindings: Finding[]
+  /** Whether revalidation completed end-to-end. false → caller retains priors as-is. */
+  ok: boolean
+  /** Error message when ok=false (caller decides retry vs proceed). */
+  error?: string
+}
+
+/**
  * Triage prior findings against a new diff after the PR/MR head has moved.
  *
- * Persists only the still-present findings as the new baseline. Resolved and
- * unverifiable findings drop off so a future head-move revalidation only
- * checks the issues that still matter.
+ * Pure: never persists state itself. Returns the surviving findings so the
+ * caller can merge them with a fresh-review pass and persist a single outcome
+ * under the new head ref.
+ *
+ * `survivingFindings` contains the LLM-confirmed still-present findings plus
+ * any priors the LLM omitted entirely (retained for safety to avoid silent
+ * loss). Resolved and unverifiable findings drop off.
+ *
+ * On any thrown error the function returns `{ ok: false, survivingFindings: priorFindings }`
+ * — it does not re-throw. This lets the caller always proceed to the fresh-review
+ * step, which is the whole point of the new head-move flow.
  */
-async function revalidateRequest(
+export async function revalidateRequest(
   request: ReviewRequest,
   priorFindings: Finding[],
   newDiff: string,
@@ -428,15 +478,14 @@ async function revalidateRequest(
   headRef: string,
   cliOptions: CliOptions,
   ctx: CliContext,
-  stateManager: WatchStateManager,
-): Promise<void> {
-  const key = makeReviewRequestKey(request)
+): Promise<RevalidationResult> {
   const label = formatReviewRequest(request)
 
   console.log('')
   console.log(cyan('========================================'))
   console.log(cyan(`Revalidating: ${request.repository} #${request.id}`))
   console.log(cyan(`Prior findings: ${priorFindings.length}`))
+  console.log(cyan(`Head: ${headRef.slice(0, 7)}`))
   console.log(cyan('========================================'))
 
   const userPrompt = buildRevalidatePrompt({ priorFindings, newDiff, prMrInfo })
@@ -457,14 +506,7 @@ async function revalidateRequest(
       logger.warn(
         `Revalidation output failed to parse (${parsed.error}): ${parsed.detail ?? ''}. Keeping prior findings as-is.`,
       )
-      stateManager.markReviewed({
-        key,
-        success: true,
-        reviewedAt: new Date().toISOString(),
-        headRef,
-        findings: priorFindings,
-      })
-      return
+      return { survivingFindings: priorFindings, ok: true }
     }
 
     const resolved = parsed.outcomes.filter((o) => o.status === 'resolved')
@@ -507,36 +549,36 @@ async function revalidateRequest(
 
     const survivingFindings = priorFindings.filter((f) => survivingTitles.has(f.title))
 
-    stateManager.markReviewed({
-      key,
-      success: true,
-      reviewedAt: new Date().toISOString(),
-      headRef,
-      findings: survivingFindings,
-    })
-
     logger.success(
       `Revalidation complete: ${label} (${resolved.length} resolved, ${still.length} remaining)`,
     )
+
+    return { survivingFindings, ok: true }
   } catch (error) {
     spinner?.fail('Revalidation failed')
     const errorMessage = error instanceof Error ? error.message : String(error)
     logger.error(`Failed to revalidate ${label}: ${errorMessage}`)
-
-    const isRetryable = isRetryableError(errorMessage)
-    if (isRetryable) {
-      logger.info('Error appears transient - will retry in next poll cycle')
-      // Don't mark as reviewed, so it will be retried
-    } else {
-      const outcome: ReviewOutcome = {
-        key,
-        success: false,
-        reviewedAt: new Date().toISOString(),
-        error: errorMessage,
-      }
-      stateManager.markReviewed(outcome)
-    }
+    // Return rather than throw: the caller will proceed to a fresh review,
+    // and we retain priors as-is so they aren't silently dropped on the way.
+    return { survivingFindings: priorFindings, ok: false, error: errorMessage }
   }
+}
+
+/**
+ * Merge two finding lists, dedup by title. Findings from `later` win on
+ * collision — used in watch mode when fresh-review findings (later) should
+ * supersede revalidated prior findings (earlier) that name the same issue.
+ *
+ * Title is used as the identity surrogate. Two distinct issues from the same
+ * model rarely produce identical titles in practice, and the alternative
+ * (full structural dedup on file+line+evidence) would silently retain
+ * near-duplicates after small phrasing changes.
+ */
+export function mergeFindingsByTitle(earlier: Finding[], later: Finding[]): Finding[] {
+  const byTitle = new Map<string, Finding>()
+  for (const f of earlier) byTitle.set(f.title, f)
+  for (const f of later) byTitle.set(f.title, f)
+  return Array.from(byTitle.values())
 }
 
 /**

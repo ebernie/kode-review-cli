@@ -101,13 +101,14 @@ async function seedFinding(
   repoRoot: string,
   id: string,
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
+  status: 'open' | 'uncertain' | 'fixed' | 'wont-fix' | 'false-positive' = 'open',
 ): Promise<void> {
   await writeFinding(repoRoot, {
     schemaVersion: 1,
     findingId: id,
     featureId: 'feat_test',
     persona: 'general',
-    status: 'open',
+    status,
     finding: {
       severity,
       category: 'correctness',
@@ -266,6 +267,67 @@ describe('runRepoScopeAudit', () => {
     // Even with failOn=none, rendering must still happen — otherwise a silent
     // early-return regression would pass this test undetected.
     expect(writeRepoReport).toHaveBeenCalledOnce()
+  })
+
+  // ── CI fail-on gate vs `uncertain` status ─────────────────────────────────
+  //
+  // Regression: an `uncertain` CRITICAL finding (set by --revalidate when the
+  // agent can't determine whether the issue is fixed) must STILL trigger the
+  // CI fail-on gate. The agent gave up, so a human must look — letting CI
+  // pass would silently bypass --fail-on critical.
+
+  it('CI mode: exits 1 when an UNCERTAIN CRITICAL finding exists and failOn=critical', async () => {
+    await seedFinding(repoRoot, 'u'.repeat(24), 'CRITICAL', 'uncertain')
+    vi.mocked(runRepoAudit).mockResolvedValue({
+      featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 1,
+    })
+    await expect(
+      runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'critical' }, BASE_CTX, 'main'),
+    ).rejects.toThrow(/process\.exit\(1\)/)
+    expect(writeRepoReport).toHaveBeenCalledOnce()
+  })
+
+  it('CI mode: exits 1 when an UNCERTAIN HIGH finding exists and failOn=high', async () => {
+    await seedFinding(repoRoot, 'v'.repeat(24), 'HIGH', 'uncertain')
+    vi.mocked(runRepoAudit).mockResolvedValue({
+      featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 1,
+    })
+    await expect(
+      runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'high' }, BASE_CTX, 'main'),
+    ).rejects.toThrow(/process\.exit\(1\)/)
+  })
+
+  it('CI mode: does NOT exit on a FIXED CRITICAL finding with failOn=critical (true closed state)', async () => {
+    await seedFinding(repoRoot, 'w'.repeat(24), 'CRITICAL', 'fixed')
+    vi.mocked(runRepoAudit).mockResolvedValue({
+      featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 1,
+    })
+    await expect(
+      runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'critical' }, BASE_CTX, 'main'),
+    ).resolves.toBeUndefined()
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it('CI mode: does NOT exit on an UNCERTAIN MEDIUM finding with failOn=critical (severity below threshold)', async () => {
+    await seedFinding(repoRoot, 'x'.repeat(24), 'MEDIUM', 'uncertain')
+    vi.mocked(runRepoAudit).mockResolvedValue({
+      featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 1,
+    })
+    await expect(
+      runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'critical' }, BASE_CTX, 'main'),
+    ).resolves.toBeUndefined()
+    expect(exitSpy).not.toHaveBeenCalled()
+  })
+
+  it('CI mode with failOn=none: does NOT exit even on an UNCERTAIN CRITICAL', async () => {
+    await seedFinding(repoRoot, 'y'.repeat(24), 'CRITICAL', 'uncertain')
+    vi.mocked(runRepoAudit).mockResolvedValue({
+      featuresReviewed: 1, featuresSkipped: 0, findingsEmitted: 0, findingsSuppressed: 0, findingsOnDisk: 1,
+    })
+    await expect(
+      runRepoScopeAudit({ ...BASE_CLI, ci: true, failOn: 'none' }, BASE_CTX, 'main'),
+    ).resolves.toBeUndefined()
+    expect(exitSpy).not.toHaveBeenCalled()
   })
 
   it('aborted result still renders the on-disk finding and does not throw', async () => {

@@ -237,7 +237,7 @@ describe('renderRepoReport — markdown', () => {
     expect(out).toContain('**Recommendation:**')
   })
 
-  it('emits a "no open findings" placeholder and no feature table rows when all findings are closed', () => {
+  it('emits a "no unresolved findings" placeholder and no feature table rows when all findings are closed', () => {
     const out = renderRepoReport({
       records: [makeRecord({ status: 'fixed' })],
       format: 'markdown',
@@ -245,6 +245,240 @@ describe('renderRepoReport — markdown', () => {
     // No table data rows (each starts with `| `<featureId>...).
     expect(out).not.toMatch(/^\| `feat-/m)
     // Explicit placeholder is present.
-    expect(out).toContain('_(no open findings)_')
+    expect(out).toContain('_(no unresolved findings)_')
+  })
+})
+
+// ── Uncertain status handling ───────────────────────────────────────────────
+//
+// `uncertain` is set by `--revalidate` when the agent can't determine whether
+// a finding has been fixed. The bug being guarded against: an `uncertain`
+// CRITICAL finding silently disappearing from the "Open" view because the
+// renderer was filtering on `status === 'open'` exclusively. That bug let CI
+// gates pass on findings the agent literally said it couldn't verify.
+
+describe('renderRepoReport — uncertain status (text)', () => {
+  it('counts uncertain findings under "Uncertain" (separate from Open and Closed)', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({ findingId: 'open-1', status: 'open' }),
+        makeRecord({ findingId: 'unc-1', status: 'uncertain' }),
+        makeRecord({ findingId: 'unc-2', status: 'uncertain' }),
+        makeRecord({ findingId: 'fix-1', status: 'fixed' }),
+      ],
+      format: 'text',
+    })
+    expect(out).toContain('Total findings:  4')
+    expect(out).toContain('Open:            1')
+    expect(out).toContain('Uncertain:       2  (revalidation could not determine)')
+    // Closed = total - open - uncertain = 4 - 1 - 2 = 1 (only the `fixed` one).
+    expect(out).toContain('Closed:          1  (fixed / wont-fix / false-positive)')
+  })
+
+  it('renders an uncertain CRITICAL finding in the per-finding detail with an [UNCERTAIN] tag', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({
+          findingId: 'crit-unc',
+          status: 'uncertain',
+          finding: {
+            severity: 'CRITICAL',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 'SQL injection in auth handler',
+            file: 'src/auth.ts',
+            lineStart: 10,
+            lineEnd: 10,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+      ],
+      format: 'text',
+    })
+    // The finding MUST appear in the per-severity detail, not vanish.
+    expect(out).toContain('[CRITICAL]')
+    expect(out).toContain('SQL injection in auth handler')
+    expect(out).toContain('[UNCERTAIN]')
+    // And it MUST contribute to the severity rollup.
+    expect(out).toMatch(/CRITICAL\s+1/)
+  })
+
+  it('includes uncertain findings in the Feature × Severity matrix', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({
+          findingId: 'unc-feat',
+          featureId: 'feat-unc',
+          status: 'uncertain',
+          finding: {
+            severity: 'HIGH',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 't',
+            file: 'f.ts',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+      ],
+      format: 'text',
+    })
+    expect(out).toContain('feat-unc')
+  })
+
+  it('does NOT tag open findings with [UNCERTAIN]', () => {
+    const out = renderRepoReport({
+      records: [makeRecord({ status: 'open' })],
+      format: 'text',
+    })
+    expect(out).not.toContain('[UNCERTAIN]')
+  })
+
+  it('Closed count is records minus open minus uncertain (only true terminal states count as closed)', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({ findingId: '1', status: 'open' }),
+        makeRecord({ findingId: '2', status: 'uncertain' }),
+        makeRecord({ findingId: '3', status: 'fixed' }),
+        makeRecord({ findingId: '4', status: 'wont-fix' }),
+        makeRecord({ findingId: '5', status: 'false-positive' }),
+      ],
+      format: 'text',
+    })
+    expect(out).toContain('Open:            1')
+    expect(out).toContain('Uncertain:       1')
+    // fixed + wont-fix + false-positive = 3
+    expect(out).toContain('Closed:          3')
+  })
+})
+
+describe('renderRepoReport — uncertain status (markdown)', () => {
+  it('emits a separate **Uncertain** summary bullet', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({ findingId: 'open-1', status: 'open' }),
+        makeRecord({ findingId: 'unc-1', status: 'uncertain' }),
+      ],
+      format: 'markdown',
+    })
+    expect(out).toContain('- **Open:** 1')
+    expect(out).toContain('- **Uncertain:** 1 _(revalidation could not determine)_')
+  })
+
+  it('includes uncertain finding in the severity-summary table count', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({
+          findingId: 'unc-1',
+          status: 'uncertain',
+          finding: {
+            severity: 'CRITICAL',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 't',
+            file: 'f',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+      ],
+      format: 'markdown',
+    })
+    expect(out).toContain('| CRITICAL | 1 |')
+  })
+
+  it('marks uncertain findings with [UNCERTAIN] in the per-finding heading', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({
+          findingId: 'unc-1',
+          status: 'uncertain',
+          finding: {
+            severity: 'HIGH',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 'Possibly fixed thing',
+            file: 'f.ts',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+      ],
+      format: 'markdown',
+    })
+    expect(out).toContain('### Possibly fixed thing [UNCERTAIN]')
+    expect(out).toContain('- **Status:** uncertain')
+  })
+})
+
+describe('renderRepoReport — uncertain status (JSON)', () => {
+  it('exposes separate openCount / uncertainCount / closedCount fields', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({ findingId: '1', status: 'open' }),
+        makeRecord({ findingId: '2', status: 'uncertain' }),
+        makeRecord({ findingId: '3', status: 'fixed' }),
+        makeRecord({ findingId: '4', status: 'wont-fix' }),
+      ],
+      format: 'json',
+    })
+    const parsed = JSON.parse(out)
+    expect(parsed.openCount).toBe(1)
+    expect(parsed.uncertainCount).toBe(1)
+    expect(parsed.closedCount).toBe(2)
+  })
+
+  it('counts uncertain findings in bySeverity (unresolved rollup includes uncertain)', () => {
+    const out = renderRepoReport({
+      records: [
+        makeRecord({
+          findingId: '1',
+          status: 'uncertain',
+          finding: {
+            severity: 'CRITICAL',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 't',
+            file: 'f',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+        makeRecord({
+          findingId: '2',
+          status: 'fixed',
+          finding: {
+            severity: 'CRITICAL',
+            category: 'security',
+            confidence: 'HIGH',
+            title: 't2',
+            file: 'f',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'x',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        }),
+      ],
+      format: 'json',
+    })
+    const parsed = JSON.parse(out)
+    // The uncertain CRITICAL must be in bySeverity. The fixed CRITICAL must NOT.
+    expect(parsed.bySeverity.CRITICAL).toBe(1)
   })
 })

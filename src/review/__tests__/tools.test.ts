@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { join } from 'node:path'
-import { writeFile, mkdir, rm } from 'node:fs/promises'
+import { writeFile, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import ignore from 'ignore'
 
@@ -308,6 +308,65 @@ describe('MCP Tools', () => {
 
         const input: ReadFileInput = { path: 'application-local-test.properties' }
         await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should block access via symlink pointing to in-repo .env', async () => {
+        // Create .env with a secret and a symlink named notes.md pointing to it.
+        // The path check on "notes.md" looks safe, but after realpath the
+        // canonical target is .env — must still be blocked.
+        const envFile = join(testDir, '.env')
+        await writeFile(envFile, 'SECRET_KEY=supersecret')
+        const linkPath = join(testDir, 'notes.md')
+        await symlink(envFile, linkPath)
+
+        const input: ReadFileInput = { path: 'notes.md' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(
+          /is a symlink to a sensitive file/i,
+        )
+      })
+
+      it('should block access to prod.pem (private key by extension)', async () => {
+        const pemFile = join(testDir, 'prod.pem')
+        await writeFile(pemFile, '-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----')
+
+        const input: ReadFileInput = { path: 'prod.pem' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should block access to id_rsa (SSH private key basename)', async () => {
+        const sshKey = join(testDir, 'id_rsa')
+        await writeFile(sshKey, '-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----')
+
+        const input: ReadFileInput = { path: 'id_rsa' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should block uppercase SSH key basenames (case-insensitive filesystems)', async () => {
+        // Regression guard: on macOS APFS / Windows, an SSH key created as
+        // ID_RSA is the same file as id_rsa. The basename check must compare
+        // lowercase so requests for ID_RSA / Id_Rsa are still blocked.
+        const sshKey = join(testDir, 'ID_RSA')
+        await writeFile(sshKey, '-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----')
+
+        const input: ReadFileInput = { path: 'ID_RSA' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should block access to service-account.json (GCP service account credentials)', async () => {
+        const saFile = join(testDir, 'service-account.json')
+        await writeFile(saFile, '{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----..."}')
+
+        const input: ReadFileInput = { path: 'service-account.json' }
+        await expect(readFileHandler(input, testDir)).rejects.toThrow(/access denied.*sensitive/i)
+      })
+
+      it('should still allow access to .env.example file (regression guard for SAFE_PATTERNS)', async () => {
+        const envFile = join(testDir, '.env.example')
+        await writeFile(envFile, 'SECRET_KEY=your_secret_here')
+
+        const input: ReadFileInput = { path: '.env.example' }
+        const result = await readFileHandler(input, testDir)
+        expect(result.content).toContain('SECRET_KEY')
       })
 
       it('should allow access to regular files', async () => {

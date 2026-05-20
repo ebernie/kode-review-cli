@@ -46,3 +46,4 @@ config.json
 
 # Claude Code scratch state
 .claude/scheduled_tasks.lock
+.claude/worktrees/
