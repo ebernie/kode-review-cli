@@ -132,13 +132,36 @@ describe('MCP Tools', () => {
       )
     })
 
-    it('should prevent encoded path traversal', async () => {
-      // Note: URL encoding may or may not be decoded by the path functions,
-      // but we should handle both cases
-      const input: ReadFileInput = { path: '..%2F..%2Fetc%2Fpasswd' }
+    it('treats URL-encoded traversal sequences as literal filenames (no silent decode)', async () => {
+      // Contract: readFileHandler does NOT URL-decode its input. The
+      // input below is the fully-encoded form of '../../etc/passwd'
+      // ('%2E%2E%2F%2E%2E%2Fetc%2Fpasswd'). The leading character is '%',
+      // not '.', so the SUT's "literal filename starts with .." early
+      // guard does NOT fire on the non-decoded form. The two failure
+      // modes are then cleanly distinguishable:
+      //   - No decode: filename '%2E%2E%2F...passwd' is treated as a
+      //     literal name inside testDir → ENOENT.
+      //   - Silent decode: filename becomes '../../etc/passwd', resolves
+      //     above testDir → "Path traversal detected" error.
+      // The previous form of this test asserted only rejects.toThrow(),
+      // which accepted both failure modes as success — the original
+      // false-positive the auditor flagged.
+      const input: ReadFileInput = { path: '%2E%2E%2F%2E%2E%2Fetc%2Fpasswd' }
 
-      // Either it gets decoded and caught, or it fails as file not found
-      await expect(readFileHandler(input, testDir)).rejects.toThrow()
+      let caught: unknown
+      try {
+        await readFileHandler(input, testDir)
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toBeInstanceOf(Error)
+      const msg = caught instanceof Error ? caught.message : ''
+      // Expected: plain ENOENT against the literal encoded filename.
+      expect(msg).toMatch(/ENOENT|no such file/i)
+      // Forbidden: any sign that the SUT decoded the %2E/%2F sequences
+      // and tried to walk out of testDir.
+      expect(msg).not.toMatch(/path traversal/i)
+      expect(msg).not.toContain('/etc/passwd')
     })
 
     it('should handle paths that start with repo prefix but escape', async () => {

@@ -94,6 +94,52 @@ Issues Summary: 1 CRITICAL, 1 HIGH, 0 MEDIUM, 1 LOW
     expect(criticalIssue!.title).toContain('SQL injection')
   })
 
+  it('extracts the Problematic Code and Suggested Fix code blocks for the critical issue', () => {
+    // The auditor flagged the suite for asserting only severity/category
+    // shape; if the Problematic Code / Suggested Fix regex in the parser
+    // ever silently drops the trailing fence or the language tag,
+    // downstream reports would lose remediation context and the suite
+    // would still pass. Pin both fields against load-bearing substrings
+    // from the SAMPLE_REVIEW fixture.
+    const result = parseReviewContent(SAMPLE_REVIEW)
+    const critical = result!.issues.find(i => i.severity === 'CRITICAL')
+    expect(critical).toBeDefined()
+
+    // codeSnippet: should be the offending interpolated SQL, with the
+    // language tag and fences stripped.
+    expect(critical!.codeSnippet).toBeDefined()
+    expect(critical!.codeSnippet).toContain('SELECT * FROM users')
+    expect(critical!.codeSnippet).toContain("'${email}'")
+    // The parser regex is structured to capture *between* fences, so an
+    // unstripped opening/closing ``` would only appear if the regex itself
+    // regressed (e.g. dropped the `[\w]*` language eater). Pin the
+    // language-tag form, which is the realistic regression class.
+    expect(critical!.codeSnippet).not.toContain('```typescript')
+    expect(critical!.codeSnippet).not.toContain('```')
+
+    // suggestion: should be the parameterized fix + db.query call.
+    expect(critical!.suggestion).toBeDefined()
+    expect(critical!.suggestion).toContain('$1')
+    expect(critical!.suggestion).toContain('db.query(query, [email])')
+    expect(critical!.suggestion).not.toContain('```typescript')
+    expect(critical!.suggestion).not.toContain('```')
+
+    // The two should not be the same string — a regex bug that captured
+    // the wrong code fence (e.g. always matched the first ``` block) would
+    // make snippet === suggestion.
+    expect(critical!.codeSnippet).not.toBe(critical!.suggestion)
+  })
+
+  it('leaves codeSnippet/suggestion undefined for issues that omit those sections', () => {
+    // Pins the negative case so a future regex regression that captures
+    // a stray fence from a neighboring issue doesn't quietly cross-pollinate.
+    const result = parseReviewContent(SAMPLE_REVIEW)
+    const high = result!.issues.find(i => i.severity === 'HIGH')
+    expect(high).toBeDefined()
+    expect(high!.codeSnippet).toBeUndefined()
+    expect(high!.suggestion).toBeUndefined()
+  })
+
   it('returns null for empty or invalid input', () => {
     expect(parseReviewContent('')).toBeNull()
     expect(parseReviewContent('  ')).toBeNull()

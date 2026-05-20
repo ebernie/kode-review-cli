@@ -51,6 +51,24 @@ describe('piHasUsableModel', () => {
     expect(await piHasUsableModel()).toBe(true)
   })
 
+  it('invokes the external boundary as `pi --list-models` (command contract)', async () => {
+    // The auditor flagged the rest of this describe block for asserting
+    // only the boolean result against arranged mock output. A regression
+    // that called the wrong binary (`pip`, `pii`, `python`) or the wrong
+    // subcommand (`--show-models`, `models list`) would silently pass
+    // every other test in this file because the mock returns the arranged
+    // stdout regardless of argv. Pin the contract here so a single
+    // failure surfaces the wiring break.
+    mockExec.mockResolvedValue({
+      stdout: 'anthropic/claude-sonnet-4-6\n',
+      stderr: '',
+      exitCode: 0,
+    })
+    await piHasUsableModel()
+    expect(mockExec).toHaveBeenCalledTimes(1)
+    expect(mockExec).toHaveBeenCalledWith('pi', ['--list-models'])
+  })
+
   it('returns true when pi writes the model table to stderr instead of stdout', async () => {
     // Real-world pi behavior: the human-readable model table is emitted on
     // stderr with stdout empty. Treat the combined stream as the signal.
