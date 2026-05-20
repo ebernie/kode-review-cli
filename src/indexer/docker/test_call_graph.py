@@ -13,7 +13,28 @@ tree-sitter is installed.
 
 import unittest
 
-# Import only what we need for testing - these don't require psycopg
+# External dependencies that legitimately may be absent on a dev machine
+# without the indexer Docker stack. ImportError on any of these → graceful
+# skip. ImportError on anything else (e.g., a missing symbol in call_graph
+# itself because it was renamed or deleted) → re-raise so the whole suite
+# fails loudly. A blanket `except ImportError` previously meant any breakage
+# inside call_graph.py silently turned every test in this file into a skip.
+#
+# Maintenance: this set MUST mirror every top-level `import` in call_graph.py
+# that is an external (third-party) package. When new tree-sitter language
+# bindings are added there, add them here too — otherwise a missing binding
+# on a dev machine crashes the whole test session instead of skipping.
+_EXTERNAL_DEPS = {
+    'psycopg',
+    'tree_sitter',
+    'tree_sitter_go',
+    'tree_sitter_java',
+    'tree_sitter_javascript',
+    'tree_sitter_python',
+    'tree_sitter_rust',
+    'tree_sitter_typescript',
+}
+
 try:
     from call_graph import (
         extract_calls_from_code,
@@ -25,10 +46,17 @@ try:
     )
     IMPORTS_AVAILABLE = True
 except ImportError as e:
-    # For environments without all dependencies
+    if e.name not in _EXTERNAL_DEPS:
+        # For a `from call_graph import nonexistent_symbol` regression,
+        # CPython sets `e.name` to the *containing module* (`'call_graph'`)
+        # rather than the missing symbol name — so both "call_graph module
+        # missing" and "symbol renamed/removed inside call_graph" land here
+        # and are correctly re-raised. Anything else outside the whitelist is
+        # also unexpected — bubble it up.
+        raise
     IMPORTS_AVAILABLE = False
     import sys
-    print(f"Warning: Some imports not available: {e}", file=sys.stderr)
+    print(f"Warning: External dependency not available: {e}", file=sys.stderr)
     print("Run tests inside Docker or install dependencies.", file=sys.stderr)
 
 
@@ -429,10 +457,17 @@ end
 function broken() {
     foo();
 '''
-        # Should still extract what it can or return empty
+        # tree-sitter's error recovery should still recover the `foo()`
+        # callsite even with a missing closing brace. Pin that behavior:
+        # if a future tree-sitter / call_graph change regresses recovery to
+        # "returns nothing on any error", this catches it.
+        #
+        # Note: this assertion is coupled to the tree-sitter grammar version
+        # pinned in the indexer Docker image. A grammar upgrade that
+        # legitimately changes error recovery may require re-verifying this
+        # expectation.
         calls = extract_calls_from_code(code, "test.ts")
-        # Even with syntax errors, tree-sitter should parse partially
-        # The result depends on tree-sitter's error recovery
+        self.assertIn("foo", [c.callee_name for c in calls])
 
     def test_anonymous_function_call(self):
         code = '''
@@ -441,9 +476,17 @@ function broken() {
 })();
 '''
         calls = extract_calls_from_code(code, "test.ts")
-        # Should detect this as a dynamic/anonymous call
-        anonymous_calls = [c for c in calls if c.callee_name == "<anonymous>"]
-        # IIFE detection may vary based on implementation
+        call_names = [c.callee_name for c in calls]
+        # An IIFE exercises two independent paths of the call extractor:
+        # (1) the outer invocation should be captured as "<anonymous>" — the
+        #     sentinel string is set in call_graph.py where unnamed callee
+        #     expressions are normalized (search for the literal there if it
+        #     ever changes), and
+        # (2) the inner console.log should produce a "log" callsite.
+        # Split assertions so a single-axis regression produces an
+        # unambiguous failure message.
+        self.assertIn("<anonymous>", call_names, "IIFE outer invocation should be captured as <anonymous>")
+        self.assertIn("log", call_names, "interior console.log should be extracted independently")
 
 
 @unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")
@@ -499,8 +542,11 @@ function safeCall(obj?: Service) {
 }
 '''
         calls = extract_calls_from_code(code, "test.ts")
-        # Optional chaining may or may not be captured as calls
-        # depending on tree-sitter's handling
+        # Optional-chained calls (`obj?.getData?.()`) are captured under the
+        # method name `getData`. Pin this so a regression that drops optional
+        # chaining from the call-extraction queries (or routes it to a
+        # different callee_name like "<optional>") fails the test.
+        self.assertIn("getData", [c.callee_name for c in calls])
 
 
 @unittest.skipUnless(IMPORTS_AVAILABLE, "Dependencies not available")

@@ -293,9 +293,13 @@ def bar():
         foo_chunk = next((c for c in chunks if c.symbol_name == "foo"), None)
         bar_chunk = next((c for c in chunks if c.symbol_name == "bar"), None)
 
-        if foo_chunk and bar_chunk:
-            # bar should start after foo ends
-            self.assertGreater(bar_chunk.start_line, foo_chunk.end_line)
+        # Both functions must be chunked — wrapping the line-ordering assert in
+        # `if foo_chunk and bar_chunk:` (the old shape) made the test pass
+        # silently when chunking dropped a symbol. Pin presence first.
+        self.assertIsNotNone(foo_chunk, "expected a chunk for `foo`")
+        self.assertIsNotNone(bar_chunk, "expected a chunk for `bar`")
+        # bar should start after foo ends
+        self.assertGreater(bar_chunk.start_line, foo_chunk.end_line)
 
 
 class TestGoChunking(unittest.TestCase):
@@ -515,10 +519,12 @@ export const VERSION = "1.0.0";
 '''
         chunks = chunk_code_ast(code, "test.ts")
         function_chunks = [c for c in chunks if c.chunk_type == "function"]
-        # The function should be marked as exported
+        # Pin chunk presence before asserting the export — guarding with
+        # `if greet_chunk:` would let a regression that drops the function
+        # chunk entirely pass silently.
         greet_chunk = next((c for c in function_chunks if c.symbol_name == "greet"), None)
-        if greet_chunk:
-            self.assertIn("greet", greet_chunk.exports)
+        self.assertIsNotNone(greet_chunk, "expected a function chunk for `greet`")
+        self.assertIn("greet", greet_chunk.exports)
 
     def test_typescript_export_statement(self):
         code = '''const foo = 1;
@@ -527,11 +533,15 @@ const bar = 2;
 export { foo, bar };
 '''
         chunks = chunk_code_ast(code, "test.ts")
-        # Check that exports are tracked
+        # An `export { foo, bar }` re-export statement attributes both names
+        # to the module-level chunk; aggregate across all chunks rather than
+        # picking a specific chunk_type, since the producer's classification
+        # of that chunk has shifted historically.
         all_exports = []
         for c in chunks:
             all_exports.extend(c.exports)
-        # The export statement is in module-level code
+        self.assertIn("foo", all_exports)
+        self.assertIn("bar", all_exports)
 
     def test_python_all_export(self):
         code = '''__all__ = ["foo", "bar", "Baz"]
@@ -546,13 +556,17 @@ class Baz:
     pass
 '''
         chunks = chunk_code_ast(code, "test.py")
-        # Python uses __all__ for exports
-        other_chunks = [c for c in chunks if c.chunk_type == "other"]
+        # Python's __all__ contents are distributed to each named symbol's
+        # own chunk (rather than being concentrated on the module-level
+        # `other` chunk that contains the __all__ literal). Aggregate across
+        # all chunks so the test remains stable if the distribution boundary
+        # shifts inside the chunker.
         all_exports = []
-        for c in other_chunks:
+        for c in chunks:
             all_exports.extend(c.exports)
-        # Should detect __all__ contents
-        # Note: This test may vary based on implementation
+        self.assertIn("foo", all_exports)
+        self.assertIn("bar", all_exports)
+        self.assertIn("Baz", all_exports)
 
 
 class TestChunkMetadataIntegration(unittest.TestCase):
@@ -659,10 +673,12 @@ export default UserService;
         fetch_chunk = next((c for c in function_chunks if c.symbol_name == "fetchUser"), None)
         self.assertIsNotNone(fetch_chunk)
 
-        # Class with methods
-        if class_chunks:
-            service_chunk = class_chunks[0]
-            self.assertIn("UserService", service_chunk.symbol_names)
+        # Class with methods. Pin presence — guarding with `if class_chunks:`
+        # would let a regression that drops the class chunk entirely pass
+        # silently (same anti-pattern the audit closed elsewhere).
+        self.assertGreater(len(class_chunks), 0, "expected a class chunk for `UserService`")
+        service_chunk = class_chunks[0]
+        self.assertIn("UserService", service_chunk.symbol_names)
 
 
 if __name__ == "__main__":
