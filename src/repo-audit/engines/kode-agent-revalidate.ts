@@ -93,6 +93,10 @@ export async function revalidateFeatureGroupWithAgent(
     indexerUrl: options.indexerUrl,
     maxIterations: options.maxIterations,
     timeout: options.timeoutSec,
+    // Revalidate mode emits `kode-revalidations`, not `kode-findings`; we parse
+    // that body ourselves below via parseRevalidationBlock. Without this flag
+    // the engine would warn "missing kode-findings block" on every group.
+    parseFindings: false,
   })
 
   const parsed = parseRevalidationBlock(result.content)

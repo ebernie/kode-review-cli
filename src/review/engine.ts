@@ -87,6 +87,17 @@ export interface AgenticReviewOptions extends ReviewOptions {
   maxIterations?: number
   /** Hard ceiling in seconds for the whole review. Default: 600. */
   timeout?: number
+  /**
+   * When `false`, skip parsing the assistant's output for a `kode-findings`
+   * block — `findings` will always be `[]` and no missing/invalid-block
+   * warning is emitted. Default `true` (legacy behavior).
+   *
+   * Set by callers that drive the agent into a different output format
+   * (e.g. `--revalidate` emits a `kode-revalidations` block instead) and
+   * parse that body themselves; without this flag, those runs spuriously
+   * warn "Review output missing kode-findings block" on every group.
+   */
+  parseFindings?: boolean
 }
 
 export interface ReviewResult {
@@ -390,6 +401,17 @@ export async function runAgenticReview(
     onProgress: options.onProgress,
   })
 
+  let findings: Finding[]
+  if (options.parseFindings === false) {
+    // Debug breadcrumb so an accidental opt-out (e.g., wrong caller wires
+    // parseFindings:false) is traceable at debug verbosity without polluting
+    // normal runs. Default-path callers never reach this branch.
+    logger.debug('runAgenticReview: parseFindings=false — skipping kode-findings extraction.')
+    findings = []
+  } else {
+    findings = extractFindings(outcome.content)
+  }
+
   return {
     content: outcome.content,
     toolCallCount: outcome.toolCallCount,
@@ -398,7 +420,7 @@ export async function runAgenticReview(
       ? `Maximum iteration limit (${maxIterations}) reached`
       : undefined,
     usage: outcome.usage,
-    findings: extractFindings(outcome.content),
+    findings,
   }
 }
 

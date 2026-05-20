@@ -88,6 +88,7 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
 import { runReview, runAgenticReview } from '../engine.js'
 import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
 import { AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
+import { logger } from '../../utils/logger.js'
 
 beforeEach(() => {
   captured.options = null
@@ -409,6 +410,105 @@ describe('runAgenticReview', () => {
     // Defensive: explicitly assert it is NOT 'all' — the security distinction
     // matters (extension tools must remain enabled in agentic mode).
     expect(captured.options.noTools).not.toBe('all')
+  })
+
+  // parseFindings opt-out: --revalidate emits a `kode-revalidations` block,
+  // not `kode-findings`. Without the opt-out, the engine warned "missing
+  // kode-findings block" on every revalidated (feature, persona) group,
+  // misleading operators into thinking the agent had failed.
+  //
+  // Tests spy on `logger.warn` directly (the abstraction `runAgenticReview`
+  // calls) rather than on `console.log` (the channel the logger happens to
+  // route through today) — so a future logger refactor that changes the
+  // output channel does not silently invalidate these tests.
+  describe('parseFindings option', () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>
+    beforeEach(() => {
+      warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {})
+    })
+
+    function warnedMissingFindingsBlock(): boolean {
+      return warnSpy.mock.calls.some((args) =>
+        typeof args[0] === 'string' && args[0].includes('missing kode-findings block'),
+      )
+    }
+
+    it('parseFindings defaults to true: warns when kode-findings block is absent', async () => {
+      const promise = runAgenticReview({
+        diffContent: 'd',
+        context: 'c',
+        repoRoot: '/repo',
+        repoUrl: 'https://github.com/x/y',
+      })
+      await new Promise((resolve) => setImmediate(resolve))
+      pushAssistantText('### Summary\nno block here')
+      captured.resolvePrompt()
+      const result = await promise
+
+      expect(result.findings).toEqual([])
+      expect(warnedMissingFindingsBlock()).toBe(true)
+    })
+
+    it('parseFindings:false suppresses the missing-block warning and returns no findings', async () => {
+      const promise = runAgenticReview({
+        diffContent: 'd',
+        context: 'c',
+        repoRoot: '/repo',
+        repoUrl: 'https://github.com/x/y',
+        parseFindings: false,
+      })
+      await new Promise((resolve) => setImmediate(resolve))
+      // Body shaped like a revalidation output (no kode-findings fence).
+      pushAssistantText('```kode-revalidations\n{"revalidations":[]}\n```')
+      captured.resolvePrompt()
+      const result = await promise
+
+      expect(result.findings).toEqual([])
+      // Stronger than "missing-block warning absent": no warn calls at all
+      // about this concern — covers a regression where the opt-out is changed
+      // to emit a different warning (e.g., "skipping findings parse").
+      expect(warnedMissingFindingsBlock()).toBe(false)
+    })
+
+    it('parseFindings:false ignores a present kode-findings block (no parsing attempted, no warning)', async () => {
+      // Even if a well-formed block somehow ends up in the body, the opt-out
+      // means the engine does not parse it. This guarantees revalidate-mode
+      // callers cannot accidentally receive diff-mode findings as a side
+      // channel — they must parse the body themselves.
+      const fenced = [
+        '```' + FINDINGS_FENCE_TAG,
+        JSON.stringify({
+          findings: [{
+            severity: 'HIGH', category: 'security', confidence: 'HIGH',
+            title: 't', file: 'a.ts', lineStart: 1, lineEnd: 2,
+            evidence: 'e', problem: 'p', recommendation: 'r',
+          }],
+        }),
+        '```',
+      ].join('\n')
+
+      const promise = runAgenticReview({
+        diffContent: 'd',
+        context: 'c',
+        repoRoot: '/repo',
+        repoUrl: 'https://github.com/x/y',
+        parseFindings: false,
+      })
+      await new Promise((resolve) => setImmediate(resolve))
+      pushAssistantText(fenced)
+      captured.resolvePrompt()
+      const result = await promise
+
+      expect(result.findings).toEqual([])
+      // Content is still surfaced verbatim — callers can parse it themselves.
+      // Guard against extractReviewContent regressing to '' (which would make
+      // the .toContain assertion below pass vacuously with a confusing error).
+      expect(result.content.length).toBeGreaterThan(0)
+      expect(result.content).toContain(FINDINGS_FENCE_TAG)
+      // And no missing-block warning fired, distinguishing "skip parsing"
+      // from a silent-parse-and-discard implementation.
+      expect(warnedMissingFindingsBlock()).toBe(false)
+    })
   })
 })
 
