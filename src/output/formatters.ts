@@ -401,10 +401,18 @@ export function formatForPRComment(
 
   let result = parts.join('\n')
 
-  // Truncate if needed
+  // Truncate if needed. The maxLength constraint must be honored as a HARD
+  // upper bound — VCS comment APIs reject oversized payloads.
   if (result.length > maxLength) {
     const truncateNote = '\n\n... (truncated - see full report in CI logs)'
-    result = result.substring(0, maxLength - truncateNote.length) + truncateNote
+    if (maxLength <= truncateNote.length) {
+      // No room to attach the note alongside content; return as much of the
+      // note as fits. The old shape did `substring(0, negative) + note`,
+      // which returned the full note verbatim — overshooting maxLength.
+      result = truncateNote.substring(0, maxLength)
+    } else {
+      result = result.substring(0, maxLength - truncateNote.length) + truncateNote
+    }
   }
 
   return result

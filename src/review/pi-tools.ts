@@ -95,11 +95,20 @@ async function loadGitignore(repoRoot: string): Promise<Ignore> {
 }
 
 /**
- * Resolve the default base ref for `get_commits`. Tries origin/HEAD, origin/main,
- * origin/master in order; falls back to `HEAD~20` so the tool still returns
- * something useful in shallow / detached-head CI checkouts.
+ * Resolve the default base ref for `get_commits`. Tries origin/HEAD,
+ * origin/main, origin/master in order; falls back to `HEAD~20` so the tool
+ * still returns something useful in shallow / detached-head CI checkouts.
+ *
+ * Final fallback: if HEAD~20 doesn't exist (repo has fewer than 20 commits),
+ * resolve to the repo's root commit so `get_commits` returns the full history
+ * instead of failing on an invalid ref. `--max-parents=0` filters to commits
+ * with no parent — there's always exactly one in a linear repo, and in repos
+ * with merged orphans we pick the first emitted (HEAD's lineage root).
+ *
+ * Exported for testing. Production callers reach this through
+ * createKodeReviewToolsExtension.
  */
-async function resolveDefaultBase(repoRoot: string): Promise<string> {
+export async function resolveDefaultBase(repoRoot: string): Promise<string> {
   for (const candidate of ['origin/HEAD', 'origin/main', 'origin/master']) {
     const verify = await runProcess('git', ['rev-parse', '--verify', candidate], { cwd: repoRoot })
     if (verify.exitCode === 0) {
@@ -107,7 +116,29 @@ async function resolveDefaultBase(repoRoot: string): Promise<string> {
       if (mb.exitCode === 0) return mb.stdout.trim()
     }
   }
-  return 'HEAD~20'
+
+  // Probe HEAD~20 before returning it. In a 5-commit repo, `HEAD~20` is an
+  // invalid ref and downstream `git log HEAD~20..HEAD` would fail with
+  // "unknown revision".
+  const headTwenty = await runProcess('git', ['rev-parse', '--verify', 'HEAD~20'], { cwd: repoRoot })
+  if (headTwenty.exitCode === 0) return 'HEAD~20'
+
+  // Repo has < 20 commits — fall back to the root commit so the consumer
+  // gets the full history. The `^!` form would also work for log ranges,
+  // but a plain SHA is the safest shape across consumers.
+  const root = await runProcess(
+    'git',
+    ['rev-list', '--max-parents=0', '--reverse', 'HEAD'],
+    { cwd: repoRoot },
+  )
+  if (root.exitCode === 0) {
+    const firstSha = root.stdout.trim().split('\n')[0]
+    if (firstSha) return firstSha
+  }
+
+  // Last-ditch: HEAD itself (empty range, but a valid one). Keeps callers
+  // from crashing on a misconfigured repo.
+  return 'HEAD'
 }
 
 /**
@@ -130,8 +161,13 @@ export function createKodeReviewToolsExtension(
       }),
       isRipgrepAvailable().catch(() => false),
       resolveDefaultBase(ctx.repoRoot).catch((err: unknown) => {
-        logger.warn(`Could not resolve default git base — falling back to HEAD~20: ${(err as Error).message}`)
-        return 'HEAD~20'
+        // resolveDefaultBase already handles "<20 commits" internally — this
+        // catch fires only when runProcess itself throws (e.g., git binary
+        // missing). Fall back to 'HEAD' (a valid empty range) rather than
+        // 'HEAD~20', which would re-introduce the small-repo bug the fix
+        // was designed to close.
+        logger.warn(`Could not resolve default git base — falling back to HEAD: ${(err as Error).message}`)
+        return 'HEAD'
       }),
     ])
 
