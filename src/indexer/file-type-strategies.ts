@@ -541,10 +541,42 @@ export function getFileType(filename: string): FileTypeStrategy {
 }
 
 /**
+ * File types the user has explicitly disabled via
+ * `applyStrategyOverrides({ disabledStrategies: [...] })`. Module-level state
+ * mirrors how priority-weight overrides are also persisted as in-place
+ * mutation of FILE_TYPE_STRATEGIES — a disabled strategy is a degenerate
+ * case of "set this type to generic for the lifetime of the process".
+ *
+ * `generic` is intentionally not disable-able: disabling it would leave
+ * unknown extensions with no strategy at all.
+ */
+const disabledFileTypes = new Set<FileTypeStrategy>()
+
+/**
+ * Reset the disabled set. Test-only — production code should rely on
+ * applyStrategyOverrides to manage this.
+ */
+export function clearDisabledStrategiesForTests(): void {
+  disabledFileTypes.clear()
+}
+
+/**
  * Get the strategy configuration for a file.
+ *
+ * Honors the `disabledStrategies` override: when a file's matched strategy
+ * has been disabled by the user, return the generic strategy. Note that
+ * downstream `applyFileTypeStrategy` short-circuits on `genericStrategy`
+ * (skipping pattern extraction and related-file search entirely), so the
+ * net effect of disabling a strategy is "no language-specific retrieval
+ * for files of this type" — not "fall through to a smaller set of queries".
+ * Without this hook, the `disabledStrategies` field of
+ * FileTypeStrategyOverrides had no observable effect.
  */
 export function getStrategyForFile(filename: string): FileTypeStrategyConfig {
   const fileType = getFileType(filename)
+  if (disabledFileTypes.has(fileType)) {
+    return FILE_TYPE_STRATEGIES.generic
+  }
   return FILE_TYPE_STRATEGIES[fileType]
 }
 
@@ -768,6 +800,16 @@ export function applyStrategyOverrides(overrides?: FileTypeStrategyOverrides): v
       if (strategy && !strategy.extensions.includes(ext)) {
         strategy.extensions.push(ext)
       }
+    }
+  }
+
+  // Apply disabled-strategies set. We never disable `generic` — files with
+  // unknown extensions already fall back to it, and disabling it would
+  // leave them with nothing.
+  if (overrides.disabledStrategies) {
+    for (const type of overrides.disabledStrategies) {
+      if (type === 'generic') continue
+      disabledFileTypes.add(type)
     }
   }
 }

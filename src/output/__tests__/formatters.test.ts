@@ -265,6 +265,26 @@ describe('formatForPRComment', () => {
     expect(result).toContain('truncated')
   })
 
+  it('respects maxLength as a hard cap even when it is shorter than the truncation note', () => {
+    // Regression: previously when `maxLength <= truncateNote.length` (~48
+    // chars), `substring(0, negative) + note` returned the full note verbatim
+    // — overshooting maxLength and breaking strict VCS comment limits.
+    const reviewWithManyIssues: StructuredReview = {
+      ...mockStructuredReview,
+      issues: Array(100).fill(mockStructuredReview.issues[0]),
+    }
+
+    // The truncateNote is 47 chars. Pin behavior across the boundary:
+    //  - well below: 10, 20, 40
+    //  - exact boundary (= note length): 47 — catches off-by-one (≤ vs <)
+    //  - just above (note fits + 1 char of content): 48
+    // Each must produce output of EXACTLY <= maxLength bytes.
+    for (const maxLength of [10, 20, 40, 47, 48]) {
+      const result = formatForPRComment(reviewWithManyIssues, { maxLength })
+      expect(result.length).toBeLessThanOrEqual(maxLength)
+    }
+  })
+
   it('shows APPROVE verdict with checkmark', () => {
     const approvedReview: StructuredReview = {
       ...mockStructuredReview,

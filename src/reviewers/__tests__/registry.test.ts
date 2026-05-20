@@ -3,6 +3,8 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { existsSync, statSync } from 'node:fs'
+
 import {
   BUILTIN_REVIEWER_NAMES,
   getBuiltinTemplatesDir,
@@ -12,14 +14,29 @@ import {
   listUserReviewerNames,
   resolveReviewer,
 } from '../registry.js'
+import {
+  clearReviewerPromptCacheForTests,
+  loadReviewerSystemPrompt,
+} from '../prompts.js'
 
 describe('registry — built-ins', () => {
   it('ships templates for every built-in reviewer', () => {
+    // Force fresh disk reads — otherwise a prior test could mask a missing
+    // file via the template cache.
+    clearReviewerPromptCacheForTests()
     const dir = getBuiltinTemplatesDir()
     for (const name of BUILTIN_REVIEWER_NAMES) {
       const info = resolveReviewer(name)
       expect(info.builtin).toBe(true)
       expect(info.templatePath).toBe(join(dir, `${name}.md`))
+      // Path construction is necessary but not sufficient — a built-in could
+      // be declared in BUILTIN_REVIEWER_NAMES yet not actually shipped as a
+      // file, or shipped empty. Pin both: the file is on disk, has non-zero
+      // size, and loads to non-empty trimmed content via the production path.
+      expect(existsSync(info.templatePath)).toBe(true)
+      expect(statSync(info.templatePath).size).toBeGreaterThan(0)
+      const prompt = loadReviewerSystemPrompt(info)
+      expect(prompt.length).toBeGreaterThan(0)
     }
   })
 

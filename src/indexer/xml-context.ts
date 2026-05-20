@@ -77,14 +77,21 @@ function escapeXmlAttribute(value: string): string {
 }
 
 /**
- * Determine the context type for a weighted code chunk
+ * Determine the context type for a weighted code chunk.
+ *
+ * Order matters: when a chunk is both a test file AND part of the
+ * modified-context set (i.e., the diff touches a test), it should be
+ * surfaced under `modified` so reviewers see it as part of the change
+ * under review — not buried under `test` as merely related context. This
+ * matches the relevance-level ordering below (which already prioritizes
+ * `isModifiedContext` for high-relevance classification).
  */
 export function getContextType(chunk: WeightedCodeChunk): ContextType {
-  if (chunk.isTestFile) {
-    return 'test'
-  }
   if (chunk.isModifiedContext) {
     return 'modified'
+  }
+  if (chunk.isTestFile) {
+    return 'test'
   }
   // TODO: In the future, we could detect config files and definitions
   // For now, default to 'similar' for semantically retrieved code

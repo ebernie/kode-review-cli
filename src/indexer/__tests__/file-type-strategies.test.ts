@@ -7,6 +7,7 @@ import {
   generateRelatedFilePaths,
   applyStrategyWeighting,
   applyStrategyOverrides,
+  clearDisabledStrategiesForTests,
   typescriptStrategy,
   javascriptStrategy,
   pythonStrategy,
@@ -491,9 +492,14 @@ describe('applyStrategyOverrides', () => {
   let originalTsExtensions: string[]
 
   afterEach(() => {
-    // Restore mutations from applyStrategyOverrides
+    // Restore mutations from applyStrategyOverrides — covers priorityWeight,
+    // extensions, AND the disabledFileTypes set. Without clearing the
+    // disabled set here, any future test added to this outer describe that
+    // calls applyStrategyOverrides({ disabledStrategies: [...] }) would
+    // pollute every subsequent test in the file.
     typescriptStrategy.priorityWeight = originalTsPriorityWeight
     typescriptStrategy.extensions = originalTsExtensions
+    clearDisabledStrategiesForTests()
   })
 
   // Capture originals before any test runs
@@ -520,5 +526,51 @@ describe('applyStrategyOverrides', () => {
     const lengthBefore = typescriptStrategy.extensions.length
     applyStrategyOverrides({ extensionMappings: { '.ts': 'typescript' } })
     expect(typescriptStrategy.extensions).toHaveLength(lengthBefore)
+  })
+
+  // disabledStrategies regression coverage: prior to the fix,
+  // applyStrategyOverrides accepted this field but never applied it —
+  // disabled types kept emitting their full priority/query patterns.
+  describe('disabledStrategies', () => {
+    afterEach(() => {
+      clearDisabledStrategiesForTests()
+    })
+
+    it('redirects a disabled strategy to the generic strategy at retrieval time', () => {
+      // Sanity: typescript files normally use the TS-specific strategy.
+      expect(getStrategyForFile('src/utils.ts')).toBe(typescriptStrategy)
+
+      applyStrategyOverrides({ disabledStrategies: ['typescript'] })
+
+      // After disable, TS files fall back to generic — no TS priority
+      // patterns, no TS related-file searches.
+      expect(getStrategyForFile('src/utils.ts')).toBe(genericStrategy)
+    })
+
+    it('only affects the disabled type; other types remain on their own strategy', () => {
+      applyStrategyOverrides({ disabledStrategies: ['typescript'] })
+
+      expect(getStrategyForFile('src/utils.ts')).toBe(genericStrategy)
+      expect(getStrategyForFile('src/main.py')).toBe(pythonStrategy)
+      expect(getStrategyForFile('src/main.go')).toBe(goStrategy)
+    })
+
+    it('silently ignores an attempt to disable the generic fallback', () => {
+      // Disabling generic would leave unknown extensions with no strategy.
+      // The override layer drops `generic` defensively.
+      applyStrategyOverrides({ disabledStrategies: ['generic'] })
+
+      // Unknown extension still resolves to generic (not undefined).
+      expect(getStrategyForFile('something.unknown')).toBe(genericStrategy)
+    })
+
+    it('is additive across calls (no implicit clear between overrides)', () => {
+      applyStrategyOverrides({ disabledStrategies: ['typescript'] })
+      applyStrategyOverrides({ disabledStrategies: ['python'] })
+
+      expect(getStrategyForFile('src/utils.ts')).toBe(genericStrategy)
+      expect(getStrategyForFile('src/main.py')).toBe(genericStrategy)
+      expect(getStrategyForFile('src/main.go')).toBe(goStrategy)
+    })
   })
 })

@@ -36,9 +36,13 @@ describe('getContextType', () => {
   it('returns "similar" by default', () => {
     expect(getContextType(chunk())).toBe('similar')
   })
-  it('prefers "test" over "modified" when both flags are set', () => {
+  it('prefers "modified" over "test" when both flags are set', () => {
+    // A test file that was touched by the diff is part of the change under
+    // review and should be surfaced under <modified>, not buried under
+    // <test>. This is also consistent with getRelevanceLevel below, which
+    // already treats `isModifiedContext` as the higher-relevance signal.
     expect(getContextType(chunk({ isTestFile: true, isModifiedContext: true })))
-      .toBe('test')
+      .toBe('modified')
   })
 })
 

@@ -245,8 +245,12 @@ export async function stopIndexer(): Promise<void> {
  * Check if the indexer is currently running
  */
 export async function isIndexerRunning(): Promise<boolean> {
-  const project = getComposeProject()
-  const result = await exec('docker', ['compose', '-p', project, 'ps', '-q'])
+  // Use the dockerCompose helper rather than calling docker directly: it
+  // injects `-f compose.yaml` and the config dir as cwd, so this status check
+  // works the same from any directory. Without it, `docker compose -p
+  // <project>` outside the indexer config dir cannot find the compose file
+  // and returns "not running" even when the containers are up.
+  const result = await dockerCompose(['ps', '-q'])
 
   if (result.exitCode !== 0) {
     return false
@@ -260,11 +264,11 @@ export async function isIndexerRunning(): Promise<boolean> {
  * Get the status of the indexer
  */
 export async function getIndexerStatus(): Promise<IndexerStatus> {
-  const project = getComposeProject()
   const apiUrl = getIndexerApiUrl()
 
-  // Check if containers exist
-  const psResult = await exec('docker', ['compose', '-p', project, 'ps', '--format', 'json'])
+  // Same rationale as isIndexerRunning — go through the helper so the
+  // compose file is found regardless of caller cwd.
+  const psResult = await dockerCompose(['ps', '--format', 'json'])
 
   if (psResult.exitCode !== 0 || !psResult.stdout.trim()) {
     return {
@@ -296,8 +300,9 @@ export async function getIndexerStatus(): Promise<IndexerStatus> {
       }
     }
   } catch {
-    // Failed to parse, check if any containers are running
-    const qResult = await exec('docker', ['compose', '-p', project, 'ps', '-q'])
+    // Failed to parse JSON output, fall back to the `-q` form. Same helper
+    // path — must include the compose file to work from any cwd.
+    const qResult = await dockerCompose(['ps', '-q'])
     if (qResult.stdout.trim()) {
       apiStatus = 'running'
       dbStatus = 'running'
