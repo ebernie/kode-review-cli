@@ -427,7 +427,12 @@ export function buildReviewPrompt(options: ReviewPromptOptions): string {
       parts.push('Context with `reason` mentioning "PR/MR description" was retrieved based on the author\'s stated intent.')
     }
     parts.push('')
-    parts.push('<related_code>')
+    // `untrusted="true"` mirrors the marker on <prior_findings>. The
+    // contents originate from the repository under review (potentially
+    // attacker-controlled comments/strings/filenames), so the model must
+    // treat them as evidence, not instructions. See
+    // `UNTRUSTED_CONTENT_BOUNDARY` in the system prompt for the rule.
+    parts.push('<related_code untrusted="true">')
     parts.push(sanitizeXmlContent(options.semanticContext, 'related_code'))
     parts.push('</related_code>')
     parts.push('')

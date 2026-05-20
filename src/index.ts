@@ -10,6 +10,7 @@ import { cyan, green } from './cli/colors.js'
 import { createThrottledProgressUpdater } from './cli/spinner-progress.js'
 import { logger, setQuietMode, setDebugMode } from './utils/logger.js'
 import { commandExists } from './utils/exec.js'
+import { sanitizeTerminalText } from './utils/terminal-safe.js'
 import { AppError, wrapError, formatError, categorizeError } from './utils/errors.js'
 import {
   isOnboardingComplete,
@@ -452,7 +453,9 @@ async function selectPrMr(
 
     const choices = [
       ...prs.map((pr) => ({
-        name: `PR #${pr.number}: ${pr.title}`,
+        // pr.title is attacker-controlled; sanitize before inquirer
+        // renders it to the terminal.
+        name: `PR #${pr.number}: ${sanitizeTerminalText(pr.title)}`,
         value: pr.number,
       })),
       { name: 'Skip PR review', value: 0 },
@@ -485,7 +488,9 @@ async function selectPrMr(
 
     const choices = [
       ...mrs.map((mr) => ({
-        name: `MR !${mr.iid}: ${mr.title}`,
+        // mr.title is attacker-controlled; sanitize before inquirer
+        // renders it to the terminal.
+        name: `MR !${mr.iid}: ${sanitizeTerminalText(mr.title)}`,
         value: mr.iid,
       })),
       { name: 'Skip MR review', value: 0 },

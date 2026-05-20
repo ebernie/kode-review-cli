@@ -1,4 +1,5 @@
 import type { Finding } from '../review/finding-schema.js'
+import { sanitizeTerminalText } from '../utils/terminal-safe.js'
 
 /**
  * Platform types
@@ -79,10 +80,18 @@ export function makeReviewRequestKey(request: ReviewRequest): ReviewRequestKey {
 }
 
 /**
- * Format a review request for display
+ * Format a review request for display.
+ *
+ * `request.title` and `request.repository` originate from external VCS
+ * metadata — both are sanitized through sanitizeTerminalText so a
+ * malicious PR title can't inject ANSI/OSC sequences (clearing the
+ * screen, manipulating the clipboard via OSC 52, etc.) when this label
+ * is rendered to the terminal or copied into log captures.
  */
 export function formatReviewRequest(request: ReviewRequest): string {
   const prefix = request.platform === 'github' ? 'PR' : 'MR'
   const symbol = request.platform === 'github' ? '#' : '!'
-  return `[${request.platform.toUpperCase()}] ${request.repository} ${prefix} ${symbol}${request.id}: ${request.title}`
+  const repository = sanitizeTerminalText(request.repository)
+  const title = sanitizeTerminalText(request.title)
+  return `[${request.platform.toUpperCase()}] ${repository} ${prefix} ${symbol}${request.id}: ${title}`
 }
