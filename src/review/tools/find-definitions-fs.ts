@@ -8,6 +8,7 @@
  */
 
 import { ripgrepSearch } from './ripgrep.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 import type {
   FindDefinitionsInput,
   FindDefinitionsOutput,
@@ -36,14 +37,16 @@ export async function findDefinitionsFsHandler(
     fixedString: false,
   })
 
+  const safeMatches = filterSensitivePaths(matches)
+
   return {
     symbol: input.symbol,
-    definitions: matches.map((m) => ({
+    definitions: safeMatches.map((m) => ({
       path: m.path,
       lines: `${m.line}-${m.line}`,
       content: m.text,
       isReexport: false,
     })),
-    totalCount: matches.length,
+    totalCount: safeMatches.length,
   }
 }

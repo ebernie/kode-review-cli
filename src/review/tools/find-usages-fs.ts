@@ -4,6 +4,7 @@
  */
 
 import { ripgrepSearch } from './ripgrep.js'
+import { filterSensitivePaths } from './sensitive-filter.js'
 import type { FindUsagesInput, FindUsagesOutput } from './find-usages-indexer.js'
 
 const DEFAULT_LIMIT = 15
@@ -22,7 +23,9 @@ export async function findUsagesFsHandler(
     wholeWord: true,
   })
 
-  const usages = matches
+  const safeMatches = filterSensitivePaths(matches)
+
+  const usages = safeMatches
     .filter((m) => !DEFINITION_RE.test(m.text))
     .slice(0, limit)
     .map((m) => ({

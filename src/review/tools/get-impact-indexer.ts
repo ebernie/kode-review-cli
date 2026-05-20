@@ -5,6 +5,7 @@
  */
 
 import type { IndexerClient } from '../../indexer/client.js'
+import { filterSensitivePathStrings } from './sensitive-filter.js'
 
 export interface GetImpactInput {
   filePath: string
@@ -37,14 +38,21 @@ export async function getImpactHandler(
     branch
   )
 
-  const totalDependents = result.directImporters.length + result.indirectImporters.length
+  // Filter sensitive paths out of every dependency list before they reach
+  // the model. `totalDependents` is recomputed from the filtered lists so
+  // the "high impact" threshold is also evaluated against the safe set.
+  const directImports = filterSensitivePathStrings(result.directImports)
+  const directImporters = filterSensitivePathStrings(result.directImporters)
+  const indirectImports = filterSensitivePathStrings(result.indirectImports)
+  const indirectImporters = filterSensitivePathStrings(result.indirectImporters)
+  const totalDependents = directImporters.length + indirectImporters.length
 
   return {
     targetFile: result.targetFile,
-    directImports: result.directImports,
-    directImporters: result.directImporters,
-    indirectImports: result.indirectImports,
-    indirectImporters: result.indirectImporters,
+    directImports,
+    directImporters,
+    indirectImports,
+    indirectImporters,
     totalDependents,
     isHighImpact: totalDependents >= HIGH_IMPACT_THRESHOLD,
   }

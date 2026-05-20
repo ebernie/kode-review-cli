@@ -84,38 +84,52 @@ const SERVICE_ACCOUNT_PATTERN = /(^|[-_.])service[-_]?account.*\.json$/i
 const GCP_CREDENTIAL_PATTERN = /(^|[-_.])credentials?\.json$/i
 
 /**
- * Check if a path matches sensitive file patterns
+ * Check if a path matches sensitive file patterns.
+ *
+ * Exported so other tool handlers (search_code, future read-only tools) can
+ * apply the same denylist before exposing file contents to the model.
  */
-function isSensitivePath(relativePath: string): boolean {
+export function isSensitivePath(relativePath: string): boolean {
   // Normalize path separators for consistent matching
   const normalizedPath = relativePath.split(sep).join('/')
   const pathParts = normalizedPath.split('/')
 
   for (const part of pathParts) {
+    // Lowercase the path component once. Case-insensitive matching is
+    // required because (a) macOS HFS+ is case-insensitive and an
+    // attacker-renamed `.ENV` resolves to `.env` on disk, and (b) an
+    // indexer running on a Linux container may store paths with original
+    // casing that still need to be denied on a case-insensitive client.
+    // The denylist patterns themselves are all-lowercase by convention.
+    const lowerPart = part.toLowerCase()
+
     // Check allowlist first - these are safe to read
-    if (SAFE_PATTERNS.includes(part)) {
+    if (SAFE_PATTERNS.includes(lowerPart)) {
       continue
     }
 
     // Check for exact matches with sensitive patterns
     for (const pattern of SENSITIVE_PATTERNS) {
-      if (part === pattern) {
+      if (lowerPart === pattern) {
         return true
       }
       // For .env, also block .env.* variants (except allowlisted ones)
-      if (pattern === '.env' && part.startsWith('.env.') && !SAFE_PATTERNS.includes(part)) {
+      if (
+        pattern === '.env' &&
+        lowerPart.startsWith('.env.') &&
+        !SAFE_PATTERNS.includes(lowerPart)
+      ) {
         return true
       }
     }
 
     // Check for Spring Boot profile-specific config files (application-{profile}.properties/yml/yaml)
-    if (SPRING_PROFILE_PATTERN.test(part)) {
+    if (SPRING_PROFILE_PATTERN.test(lowerPart)) {
       return true
     }
 
     // Extension-based check for cryptographic key / certificate files.
     // Public-key counterparts (*.pub) are safe to share, so exempt them.
-    const lowerPart = part.toLowerCase()
     if (!lowerPart.endsWith('.pub')) {
       for (const ext of SENSITIVE_EXTENSIONS) {
         if (lowerPart.endsWith(ext)) {

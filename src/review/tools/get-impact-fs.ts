@@ -6,6 +6,7 @@
 import { basename, extname } from 'node:path'
 import { ripgrepSearch } from './ripgrep.js'
 import { assertWithinRepo } from './path-guard.js'
+import { filterSensitivePathStrings } from './sensitive-filter.js'
 import type { GetImpactInput } from './get-impact-indexer.js'
 
 export interface GetImpactFsOutput {
@@ -57,7 +58,11 @@ export async function getImpactFsHandler(
       if (m.path !== safePath) seen.add(m.path)
     }
   }
-  const directImporters = Array.from(seen).sort()
+  // Mirror the indexer-backed handler's sensitive-path filtering so an
+  // import statement in a tracked secrets file (e.g. a .pem that happens
+  // to contain `from './utils'` in a comment) cannot leak its presence
+  // through the importer list.
+  const directImporters = filterSensitivePathStrings(Array.from(seen)).sort()
   return {
     targetFile: safePath,
     directImports: [],
