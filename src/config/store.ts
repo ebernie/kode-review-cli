@@ -1,5 +1,14 @@
 import Conf from 'conf'
-import { ConfigSchema, type Config, defaultConfig, isLegacyConfig, type LegacyConfigMarkers } from './schema.js'
+import {
+  ConfigSchema,
+  type Config,
+  defaultConfig,
+  isLegacyConfig,
+  type IndexerConfigType,
+  type LegacyConfigMarkers,
+  type UpdaterConfig,
+  type VcsConfig,
+} from './schema.js'
 
 const CONFIG_NAME = 'kode-review'
 
@@ -48,13 +57,56 @@ export function readLegacyComposeProject(): string {
 }
 
 /**
- * Update configuration (partial)
+ * Update configuration with a top-level shallow merge. Prefer the
+ * section-specific helpers below (`updateIndexerConfig`, `updateUpdaterConfig`,
+ * `updateGithubConfig`, `updateGitlabConfig`) when changing a field inside a
+ * nested section — they keep the merge knowledge inside the config module.
+ *
+ * Direct callers of this function are responsible for spreading nested
+ * sections themselves, so a `updates.indexer = { enabled: true }` call would
+ * replace the entire indexer block.
  */
 export function updateConfig(updates: Partial<Config>): Config {
   const current = getConfig()
   const updated = { ...current, ...updates }
   store.set(updated)
   return ConfigSchema.parse(store.store)
+}
+
+/**
+ * Update a subset of fields inside `config.indexer`, preserving any other
+ * fields in that section.
+ */
+export function updateIndexerConfig(updates: Partial<IndexerConfigType>): Config {
+  const current = getConfig()
+  return updateConfig({ indexer: { ...current.indexer, ...updates } })
+}
+
+/**
+ * Update a subset of fields inside `config.updater`, preserving any other
+ * fields in that section.
+ */
+export function updateUpdaterConfig(updates: Partial<UpdaterConfig>): Config {
+  const current = getConfig()
+  return updateConfig({ updater: { ...current.updater, ...updates } })
+}
+
+/**
+ * Update a subset of fields inside `config.github`, preserving any other
+ * fields in that section.
+ */
+export function updateGithubConfig(updates: Partial<VcsConfig>): Config {
+  const current = getConfig()
+  return updateConfig({ github: { ...current.github, ...updates } })
+}
+
+/**
+ * Update a subset of fields inside `config.gitlab`, preserving any other
+ * fields in that section.
+ */
+export function updateGitlabConfig(updates: Partial<VcsConfig>): Config {
+  const current = getConfig()
+  return updateConfig({ gitlab: { ...current.gitlab, ...updates } })
 }
 
 /**
@@ -100,5 +152,3 @@ export function resetConfig(): void {
 export function getConfigPath(): string {
   return store.path
 }
-
-export { store }

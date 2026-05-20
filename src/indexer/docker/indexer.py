@@ -34,6 +34,7 @@ from sentence_transformers import SentenceTransformer
 
 # Import AST-based chunking
 from ast_chunker import chunk_code_ast, CodeChunk
+from call_graph import build_and_store_call_graph
 from import_graph import build_and_store_import_graph
 
 
@@ -263,13 +264,33 @@ def ensure_table_exists(conn: psycopg.Connection) -> None:
 
 
 def delete_existing_index(conn: psycopg.Connection, repo_id: str, branch: str) -> int:
-    """Delete existing index for this repo/branch before re-indexing."""
+    """Delete existing index for this repo/branch before re-indexing.
+
+    The `chunks` INSERT below has no ON CONFLICT clause, so without clearing
+    canonical state first a full re-index would accumulate duplicate chunks.
+    Deleting the `files` row cascades through the composite FK to chunks
+    (and from chunks to relationships) and to file_imports. The legacy
+    `code_embeddings` table is not FK-linked so it gets its own DELETE.
+
+    Returns the number of `chunks` rows that were cleared (for parity with
+    the operator-facing message in `index_repository`).
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM code_embeddings WHERE repo_id = %s AND branch = %s",
-            (repo_id, branch)
+            "SELECT COUNT(*) FROM chunks WHERE repo_id = %s AND branch = %s",
+            (repo_id, branch),
         )
-        deleted = cur.rowcount
+        row = cur.fetchone()
+        deleted = int(row[0]) if row else 0
+
+        cur.execute(
+            "DELETE FROM files WHERE repo_id = %s AND branch = %s",
+            (repo_id, branch),
+        )
+        cur.execute(
+            "DELETE FROM code_embeddings WHERE repo_id = %s AND branch = %s",
+            (repo_id, branch),
+        )
         conn.commit()
         return deleted
 
@@ -448,10 +469,8 @@ def index_repository() -> dict:
                 """
                 INSERT INTO files (file_path, repo_id, repo_url, branch, language)
                 VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (file_path) DO UPDATE SET
-                    repo_id = EXCLUDED.repo_id,
+                ON CONFLICT (file_path, repo_id, branch) DO UPDATE SET
                     repo_url = EXCLUDED.repo_url,
-                    branch = EXCLUDED.branch,
                     language = EXCLUDED.language,
                     updated_at = NOW()
                 """,
@@ -500,8 +519,18 @@ def index_repository() -> dict:
         print(f"  Circular dependencies: {import_stats['circular_dependencies']}")
         print(f"  Hub files (>10 imports): {import_stats['hub_files']}")
     except Exception as e:
-        print(f"  Warning: Could not build import graph: {e}")
+        print(f"  Warning: Could not build import graph: {e}", file=sys.stderr)
         import_stats = {"edges": 0, "circular_dependencies": 0, "hub_files": 0}
+
+    # Build call graph after indexing. The /call-graph endpoint queries
+    # relationships with relationship_type='calls', which only this producer
+    # writes — so without this step the endpoint returns empty results.
+    print("Building call graph...")
+    try:
+        call_stats = build_and_store_call_graph(conn, REPO_URL, REPO_BRANCH)
+        print(f"  Call edges: {call_stats.get('edges_stored', 0)}")
+    except Exception as e:
+        print(f"  Warning: Could not build call graph: {e}", file=sys.stderr)
 
     conn.close()
 

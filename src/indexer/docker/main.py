@@ -838,38 +838,56 @@ async def get_stats(repo_url: str, branch: Optional[str] = None):
 
 @app.delete("/index/{repo_url:path}")
 async def delete_index(repo_url: str, branch: Optional[str] = None):
-    """Delete the index for a repository."""
+    """Delete the index for a repository.
+
+    Clears the canonical tables (`files`, which cascades to `chunks` and
+    `file_imports`; `chunks` in turn cascades to `relationships`) and the
+    legacy `code_embeddings` table that both indexer paths still dual-write.
+    """
     try:
         repo_id = generate_repo_id(repo_url)
 
+        # Build a (sql_suffix, params) pair that scopes by branch when provided.
+        if branch:
+            scope_clause = " AND branch = %s"
+            scope_params: tuple = (repo_id, branch)
+            target_label = f"{repo_url}@{branch}"
+        else:
+            scope_clause = ""
+            scope_params = (repo_id,)
+            target_label = f"{repo_url} (all branches)"
+
         with get_connection_pool().connection() as conn:
             with conn.cursor() as cur:
-                if branch:
-                    # Delete only specific branch
-                    cur.execute(
-                        "DELETE FROM code_embeddings WHERE repo_id = %s AND branch = %s",
-                        (repo_id, branch)
-                    )
-                    deleted_count = cur.rowcount
-                    conn.commit()
+                # Count chunks first so we can report what the user actually
+                # had before the DELETE wipes them.
+                cur.execute(
+                    f"SELECT COUNT(*) FROM chunks WHERE repo_id = %s{scope_clause}",
+                    scope_params,
+                )
+                row = cur.fetchone()
+                deleted_chunks = int(row[0]) if row else 0
 
-                    return {
-                        "message": f"Index deleted for {repo_url}@{branch}",
-                        "deleted_chunks": deleted_count
-                    }
-                else:
-                    # Delete all branches for this repo
-                    cur.execute(
-                        "DELETE FROM code_embeddings WHERE repo_id = %s",
-                        (repo_id,)
-                    )
-                    deleted_count = cur.rowcount
-                    conn.commit()
+                # Cascade-clears `chunks` (-> relationships) and `file_imports`
+                # via the composite FK on (file_path, repo_id, branch).
+                cur.execute(
+                    f"DELETE FROM files WHERE repo_id = %s{scope_clause}",
+                    scope_params,
+                )
 
-                    return {
-                        "message": f"Index deleted for {repo_url} (all branches)",
-                        "deleted_chunks": deleted_count
-                    }
+                # Legacy table — still actively written by indexer.py and
+                # incremental.py, so clean it up explicitly here.
+                cur.execute(
+                    f"DELETE FROM code_embeddings WHERE repo_id = %s{scope_clause}",
+                    scope_params,
+                )
+
+                conn.commit()
+
+        return {
+            "message": f"Index deleted for {target_label}",
+            "deleted_chunks": deleted_chunks,
+        }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

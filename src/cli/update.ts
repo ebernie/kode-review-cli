@@ -15,7 +15,7 @@ import { confirm } from '@inquirer/prompts'
 import { exec, execInteractive } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
 import { AppError } from '../utils/errors.js'
-import { getConfig, updateConfig } from '../config/index.js'
+import { getConfig, updateUpdaterConfig } from '../config/index.js'
 import { cyan, green, yellow, bold } from './colors.js'
 
 declare const PKG_VERSION: string
@@ -239,12 +239,9 @@ export async function runUpdate(): Promise<void> {
   await performUpdate(installDir)
 
   // Update config with check result
-  updateConfig({
-    updater: {
-      ...getConfig().updater,
-      lastCheckedAt: new Date().toISOString(),
-      latestKnownVersion: latestVersion,
-    },
+  updateUpdaterConfig({
+    lastCheckedAt: new Date().toISOString(),
+    latestKnownVersion: latestVersion,
   })
 
   console.log('')
@@ -277,11 +274,8 @@ export async function checkForUpdateNotification(): Promise<void> {
     if (!installDir) return
 
     // Record check time immediately to prevent parallel runs
-    updateConfig({
-      updater: {
-        ...config.updater,
-        lastCheckedAt: new Date().toISOString(),
-      },
+    updateUpdaterConfig({
+      lastCheckedAt: new Date().toISOString(),
     })
 
     const latestVersion = await fetchLatestVersion(installDir)
@@ -290,12 +284,9 @@ export async function checkForUpdateNotification(): Promise<void> {
     const currentVersion = PKG_VERSION
 
     // Store latest known version
-    updateConfig({
-      updater: {
-        ...getConfig().updater,
-        lastCheckedAt: new Date().toISOString(),
-        latestKnownVersion: latestVersion,
-      },
+    updateUpdaterConfig({
+      lastCheckedAt: new Date().toISOString(),
+      latestKnownVersion: latestVersion,
     })
 
     if (isNewerVersion(latestVersion, currentVersion)) {

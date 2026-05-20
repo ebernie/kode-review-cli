@@ -2,7 +2,7 @@ import { confirm } from '@inquirer/prompts'
 import ora from 'ora'
 import { checkIndexerPrerequisites } from './detector.js'
 import { startIndexer, stopIndexer, getIndexerStatus, getIndexerApiUrl, cleanupIndexer } from './docker.js'
-import { updateConfig, getConfig } from '../config/index.js'
+import { getConfig, updateIndexerConfig } from '../config/index.js'
 import { logger } from '../utils/logger.js'
 import { green, cyan, yellow, red } from '../cli/colors.js'
 
@@ -62,12 +62,7 @@ export async function setupIndexer(): Promise<void> {
     startSpinner.succeed('Indexer started successfully')
 
     // Update config
-    updateConfig({
-      indexer: {
-        ...getConfig().indexer,
-        enabled: true,
-      },
-    })
+    updateIndexerConfig({ enabled: true })
 
     console.log('')
     console.log(green('Setup complete.'))
@@ -226,12 +221,7 @@ export async function handleCleanupIndexer(): Promise<void> {
     await cleanupIndexer()
 
     // Update config to disable indexer
-    updateConfig({
-      indexer: {
-        ...getConfig().indexer,
-        enabled: false,
-      },
-    })
+    updateIndexerConfig({ enabled: false })
 
     spinner.succeed('Indexer completely removed')
 
