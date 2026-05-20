@@ -137,14 +137,20 @@ describe('buildReviewerUserPrompt', () => {
     // assert no raw structural tag survives in the remaining (user-data)
     // text. This is the *behaviour* that matters: a no-op sanitiser would
     // leave `</diff_content>` in the user-data area and fail this assertion.
+    // The `[^>]*` fragment assumes attribute values themselves contain
+    // no unescaped `>`, which holds for everything the prompt builders
+    // emit today (`untrusted="true"` is the only attribute and uses
+    // double quotes). If a future attribute could carry a `>` inside
+    // its value, this stripping would be too aggressive.
     const stripLegit = (s: string): string =>
       s
-        // tags we legitimately emit as section wrappers
-        .replace(/<author_intent>/g, '')
+        // tags we legitimately emit as section wrappers — accept the
+        // bare form and any attributes (e.g. `untrusted="true"`)
+        .replace(/<author_intent(?:\s[^>]*)?>/g, '')
         .replace(/<\/author_intent>/g, '')
-        .replace(/<related_code>/g, '')
+        .replace(/<related_code(?:\s[^>]*)?>/g, '')
         .replace(/<\/related_code>/g, '')
-        .replace(/<diff_content>/g, '')
+        .replace(/<diff_content(?:\s[^>]*)?>/g, '')
         .replace(/<\/diff_content>/g, '')
 
     const remainder = stripLegit(out)
@@ -162,6 +168,29 @@ describe('buildReviewerUserPrompt', () => {
     expect(out).toContain('<\\pr_mr_info>')
     expect(out).toContain('<\\modified>')
     expect(out).toContain('<\\/modified>')
+  })
+})
+
+describe('buildReviewerUserPrompt — untrusted-content marker on related_code', () => {
+  it('wraps semanticContext in <related_code untrusted="true">', () => {
+    // Mirrors the <prior_findings untrusted="true"> pattern in
+    // revalidate-prompt. The contents originate from the repository
+    // under review and may contain attacker-controlled comments,
+    // strings, or filenames; the trust marker pins this contract for
+    // both the model and future readers of the prompt template.
+    const out = buildReviewerUserPrompt({
+      context: 'ctx',
+      diffContent: 'd',
+      semanticContext: '<modified path="a.ts">x</modified>',
+    })
+    expect(out).toContain('<related_code untrusted="true">')
+    expect(out).toContain('</related_code>')
+  })
+
+  it('omits the related_code wrapper entirely when there is no semantic context', () => {
+    const out = buildReviewerUserPrompt({ context: 'ctx', diffContent: 'd' })
+    expect(out).not.toContain('<related_code')
+    expect(out).not.toContain('</related_code>')
   })
 })
 

@@ -9,6 +9,8 @@ import { getGitLabMRDiff, getGitLabMRInfo } from '../vcs/gitlab.js'
 import { runReview, type ReviewOptions } from '../review/engine.js'
 import { buildRevalidatePrompt, parseRevalidationBlock } from '../review/revalidate-prompt.js'
 import type { Finding } from '../review/finding-schema.js'
+import { sanitizeXmlContent } from '../review/xml-sanitize.js'
+import { sanitizeTerminalText } from '../utils/terminal-safe.js'
 import { WatchStateManager } from './state.js'
 import { detectReviewRequests, type DetectorConfig } from './detector.js'
 import {
@@ -279,8 +281,8 @@ export async function reviewRequest(
 
   console.log('')
   console.log(cyan('========================================'))
-  console.log(cyan(`Reviewing: ${request.repository} #${request.id}`))
-  console.log(cyan(`Title: ${request.title}`))
+  console.log(cyan(`Reviewing: ${sanitizeTerminalText(request.repository)} #${request.id}`))
+  console.log(cyan(`Title: ${sanitizeTerminalText(request.title)}`))
   console.log(cyan('========================================'))
 
   const spinner = ctx.quiet ? null : ora('Fetching diff...').start()
@@ -366,10 +368,19 @@ export async function reviewRequest(
       // Do NOT return — fall through to the fresh-review block below.
     }
 
-    // Build review options
+    // Build review options. The repository name is VCS-controlled
+    // (PR/MR contributors don't set it, but the namespace owner does),
+    // so strip any structural tags before embedding it in the LLM
+    // context string — otherwise a maliciously-named repo could break
+    // out of the surrounding section. sanitizeTerminalText covers the
+    // terminal threat surface; sanitizeXmlContent covers the prompt
+    // injection one. Both apply here.
+    const safeRepository = sanitizeXmlContent(
+      sanitizeTerminalText(request.repository),
+    )
     const reviewOptions: ReviewOptions = {
       diffContent,
-      context: `Reviewing ${request.platform === 'github' ? 'Pull Request' : 'Merge Request'} #${request.id} from ${request.repository}`,
+      context: `Reviewing ${request.platform === 'github' ? 'Pull Request' : 'Merge Request'} #${request.id} from ${safeRepository}`,
       prMrInfo,
       model: cliOptions.model,
     }
@@ -483,12 +494,15 @@ export async function revalidateRequest(
 
   console.log('')
   console.log(cyan('========================================'))
-  console.log(cyan(`Revalidating: ${request.repository} #${request.id}`))
+  console.log(cyan(`Revalidating: ${sanitizeTerminalText(request.repository)} #${request.id}`))
   console.log(cyan(`Prior findings: ${priorFindings.length}`))
   console.log(cyan(`Head: ${headRef.slice(0, 7)}`))
   console.log(cyan('========================================'))
 
-  const userPrompt = buildRevalidatePrompt({ priorFindings, newDiff, prMrInfo })
+  // buildRevalidatePrompt returns both halves so the untrusted-data
+  // boundary lives in the system prompt (authoritative) while the
+  // attacker-influenced prior findings stay in the user prompt (data).
+  const { systemPrompt, userPrompt } = buildRevalidatePrompt({ priorFindings, newDiff, prMrInfo })
 
   const spinner = ctx.quiet ? null : ora('Re-checking prior findings against new diff...').start()
   try {
@@ -498,6 +512,7 @@ export async function revalidateRequest(
       prMrInfo,
       model: cliOptions.model,
       userPromptOverride: userPrompt,
+      systemPrompt,
     })
     spinner?.stop()
 

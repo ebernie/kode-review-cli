@@ -119,7 +119,10 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
   if (data.semanticContext) {
     parts.push('## Related Code Context')
     parts.push('')
-    parts.push('<related_code>')
+    // `untrusted="true"` marks the contents as repository code that may
+    // contain attacker-controlled comments/strings. The model treats it
+    // as evidence per UNTRUSTED_CONTENT_BOUNDARY in the system prompt.
+    parts.push('<related_code untrusted="true">')
     parts.push(sanitizeXmlContent(data.semanticContext, 'related_code'))
     parts.push('</related_code>')
     parts.push('')

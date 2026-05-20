@@ -68,7 +68,14 @@ vi.mock('../../review/engine.js', () => ({
 }))
 
 vi.mock('../../review/revalidate-prompt.js', () => ({
-  buildRevalidatePrompt: vi.fn(() => 'revalidate prompt'),
+  // Return the new BuiltRevalidatePrompt shape: { systemPrompt, userPrompt }.
+  // The watch flow destructures both halves and passes systemPrompt to
+  // runReview so the UNTRUSTED_CONTENT_BOUNDARY makes it into the model
+  // context.
+  buildRevalidatePrompt: vi.fn(() => ({
+    systemPrompt: 'revalidate system',
+    userPrompt: 'revalidate prompt',
+  })),
   parseRevalidationBlock: vi.fn(() => captured.parserResult),
 }))
 

@@ -66,6 +66,31 @@ describe('buildReviewPrompt — findings scope', () => {
   })
 })
 
+describe('buildReviewPrompt — untrusted-content marker on related_code', () => {
+  // Repository code chunks delivered as semantic context may carry
+  // attacker-controlled comments/strings/filenames. Marking the wrapper
+  // `untrusted="true"` aligns it with <prior_findings> and makes the
+  // contract local + machine-checkable.
+  it('wraps semanticContext in <related_code untrusted="true">', () => {
+    const p = buildReviewPrompt({ ...baseOptions, semanticContext: 'ctx-payload' })
+    expect(p).toContain('<related_code untrusted="true">')
+    expect(p).toContain('</related_code>')
+    // Ensure the trust marker is on the WRAPPER, not embedded somewhere
+    // else: pin the open-tag-then-content order. The documentation
+    // prose inside this prompt mentions <related_code> as a tag name in
+    // explanatory English, so a bare `not.toContain('<related_code>')`
+    // would over-match. Anchor to "tag immediately precedes payload"
+    // instead.
+    expect(p).toMatch(/<related_code untrusted="true">\nctx-payload\n<\/related_code>/)
+  })
+
+  it('omits the related_code wrapper entirely when no semantic context is supplied', () => {
+    const p = buildReviewPrompt(baseOptions)
+    expect(p).not.toContain('<related_code')
+    expect(p).not.toContain('</related_code>')
+  })
+})
+
 describe('buildReviewPrompt — trust boundaries', () => {
   it('emits a Trust Boundary Signals section when provided', () => {
     const p = buildReviewPrompt({
