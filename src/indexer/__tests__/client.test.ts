@@ -712,20 +712,59 @@ describe('IndexerClient', () => {
 
   describe('LRU cache behavior', () => {
     it('serves search results from cache on second identical call', async () => {
+      // Mock shape MUST match SearchResponse.chunks in client.ts: the
+      // production mapper reads chunk.code and chunk.score (NOT content
+      // and similarity). The auditor flagged the prior version of this
+      // test for using `content`/`similarity`, which made every cached
+      // result's `code` and `score` come back undefined — but the
+      // assertion was only on fetch call count, so the suite happily
+      // passed against malformed data.
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({
+          query: 'test query',
           chunks: [
-            { filename: 'test.ts', content: 'code', start_line: 1, end_line: 10, similarity: 0.9 },
+            {
+              repo_url: 'https://repo',
+              branch: 'main',
+              filename: 'test.ts',
+              code: 'export function foo() {}',
+              score: 0.91,
+              start_line: 1,
+              end_line: 10,
+            },
           ],
         }),
       })
 
-      await client.search('test query', 'https://repo', 5)
-      await client.search('test query', 'https://repo', 5)
+      const first = await client.search('test query', 'https://repo', 5)
+      const second = await client.search('test query', 'https://repo', 5)
 
-      // fetch should only be called once — second call served from cache
+      // fetch should only be called once — second call served from cache.
       expect(mockFetch).toHaveBeenCalledTimes(1)
+
+      // Result shape: mapped fields populated. If client.ts ever stopped
+      // mapping code → code or score → score, the cached object would
+      // come back with undefined fields — these assertions would catch it.
+      // The exact-object compare also pins the snake_case → camelCase
+      // mapping for repo_url/start_line/end_line; `branch: 'main'` is
+      // included because the mock response sets it and the mapper passes
+      // it through, so it's part of the documented contract here.
+      expect(first).toHaveLength(1)
+      expect(first[0]).toEqual({
+        repoUrl: 'https://repo',
+        branch: 'main',
+        filename: 'test.ts',
+        code: 'export function foo() {}',
+        score: 0.91,
+        startLine: 1,
+        endLine: 10,
+      })
+
+      // Cache must return semantically equal results — a cache bug that
+      // returned an empty array or a sentinel would slip past a
+      // call-count-only check but fails here.
+      expect(second).toEqual(first)
     })
 
     it('serves lookupDefinitions from cache on second identical call', async () => {
