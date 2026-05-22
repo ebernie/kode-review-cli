@@ -5,15 +5,17 @@
  * For v1 (walking skeleton): sequential per-feature review. The worker pool
  * + risk-prioritized order land in task #8 (runner.ts).
  */
+import { stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { cyan, green, yellow } from '../cli/colors.js'
 import type { CliOptions } from '../cli/args.js'
 import { resolveReviewer } from '../reviewers/registry.js'
 import { logger } from '../utils/logger.js'
-import { runClawpatchMap } from './clawpatch-cli.js'
+import { runClawpatchInit, runClawpatchMap } from './clawpatch-cli.js'
 import { reviewFeatureWithAgent } from './engines/kode-agent.js'
 import { isRateLimitError, isTransientModelError } from './error-classify.js'
 import { filterFeaturesBySince } from './feature-filter.js'
-import { pendingFeatures, readFeatures } from './features.js'
+import { CLAWPATCH_STATE_DIR, pendingFeatures, readFeatures } from './features.js'
 import { runRevalidate } from './orchestrator-revalidate.js'
 import {
   buildInstallHint,
@@ -106,7 +108,29 @@ export async function runRepoAudit(
     logger.info(`Detected ${status.version}`)
   }
 
-  // Step 1: ensure clawpatch has mapped this repo (idempotent; auto-inits).
+  // Step 1: ensure clawpatch is initialized in this repo. `clawpatch map`
+  // requires `.clawpatch/` to already exist (exits 2 with "not initialized"
+  // otherwise), so we run `clawpatch init` on first use. The directory
+  // check is more reliable than parsing stderr — wording can drift across
+  // clawpatch versions.
+  if (!(await clawpatchStateDirExists(repoRoot))) {
+    logger.info('Initializing clawpatch state (first run in this repo)…')
+    const initResult = await runClawpatchInit(repoRoot)
+    if (initResult.exitCode !== 0) {
+      // Race: another runner may have initialized between our dir check and
+      // our init call. If the dir is now present, treat that as success;
+      // otherwise the failure is real.
+      if (await clawpatchStateDirExists(repoRoot)) {
+        logger.info('clawpatch state appeared concurrently — continuing.')
+      } else {
+        throw new Error(
+          `clawpatch init failed (exit ${initResult.exitCode}). stderr:\n${initResult.stderr.trim() || '(empty)'}`,
+        )
+      }
+    }
+  }
+
+  // Step 2: map the repo.
   logger.info(cli.remap ? 'Re-mapping repository via clawpatch…' : 'Mapping repository via clawpatch…')
   const mapResult = await runClawpatchMap(repoRoot, { force: cli.remap })
   if (mapResult.exitCode !== 0) {
@@ -115,7 +139,7 @@ export async function runRepoAudit(
     )
   }
 
-  // Step 2: read features.
+  // Step 3: read features.
   const readResult = await readFeatures(repoRoot)
   if (readResult.features.length === 0) {
     logger.warn('clawpatch produced no features for this repo. Nothing to review.')
@@ -132,7 +156,7 @@ export async function runRepoAudit(
   }
   logger.success(`Mapped ${readResult.features.length} features.`)
 
-  // Step 3a: --since <ref> reduces the feature set to those whose owned
+  // Step 4a: --since <ref> reduces the feature set to those whose owned
   // files changed in the diff range. Applied before the "already-reviewed"
   // filter so the user can re-review touched features with --since +
   // --remap together.
@@ -146,7 +170,7 @@ export async function runRepoAudit(
     scoped = filtered.matched
   }
 
-  // Step 3b: skip features that already have findings on disk unless
+  // Step 4b: skip features that already have findings on disk unless
   // --remap (a remap means clawpatch may have re-shaped features; a
   // previous review's findings may be stale, so re-review).
   //
@@ -174,7 +198,7 @@ export async function runRepoAudit(
     }
   }
 
-  // Step 4: review each pending feature.
+  // Step 5: review each pending feature.
   const runId = newRunId()
   const startedAt = new Date().toISOString()
   let totalEmitted = 0
@@ -323,4 +347,14 @@ function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
+}
+
+async function clawpatchStateDirExists(repoRoot: string): Promise<boolean> {
+  try {
+    const s = await stat(join(repoRoot, CLAWPATCH_STATE_DIR))
+    return s.isDirectory()
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
 }

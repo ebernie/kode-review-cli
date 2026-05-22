@@ -78,6 +78,11 @@ import {
   type ReviewOutput,
 } from './output/index.js'
 import {
+  AGENT_REGISTRY,
+  parseAgentList,
+  runAgentInstall,
+} from './agent-install/index.js'
+import {
   setupIndexer,
   showIndexerStatus,
   indexRepository,
@@ -145,6 +150,53 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
   // Hook generation
   if (options.initHooks) {
     await initHooks({ interactive: !options.quiet })
+    return true
+  }
+
+  return false
+}
+
+async function handleAgentInstallCommands(
+  options: CliOptions,
+  ctx: CliContext,
+): Promise<boolean> {
+  if (options.listAgents) {
+    if (options.format === 'json') {
+      console.log(
+        JSON.stringify(
+          AGENT_REGISTRY.map((entry) => ({
+            name: entry.name,
+            displayName: entry.displayName,
+            description: entry.description,
+            perRepo: entry.perRepo,
+          })),
+          null,
+          2,
+        ),
+      )
+    } else {
+      console.log('')
+      console.log('Supported agents (--install-agent <name>):')
+      console.log('')
+      for (const entry of AGENT_REGISTRY) {
+        const scope = entry.perRepo ? '(per-repo)' : '(user-level)'
+        console.log(`  ${cyan(entry.name.padEnd(14))} ${scope}  ${entry.description}`)
+      }
+      console.log('')
+      console.log('Use "all" to install for every agent, or comma-separate (e.g. claude-code,codex).')
+    }
+    return true
+  }
+
+  if (options.installAgent !== undefined) {
+    const agents = parseAgentList(options.installAgent)
+    const repoRoot = (await isGitRepository()) ? await getRepoRoot() : null
+    await runAgentInstall({
+      agents,
+      force: options.installAgentForce,
+      ctx,
+      repoRoot: repoRoot ?? null,
+    })
     return true
   }
 
@@ -1663,6 +1715,15 @@ async function main(): Promise<void> {
 
     // Handle setup commands first
     if (await handleSetupCommands(options)) {
+      return
+    }
+
+    // Handle agent skill/command install (`--install-agent`, `--list-agents`).
+    // Runs after `handleSetupCommands` so info-only flags (`--update`,
+    // `--list-reviewers`) keep their precedence; runs before the onboarding
+    // gate so a fresh install can wire up tooling without configuring pi
+    // first.
+    if (await handleAgentInstallCommands(options, ctx)) {
       return
     }
 

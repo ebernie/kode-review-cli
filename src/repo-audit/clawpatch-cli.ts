@@ -17,14 +17,34 @@ export interface ClawpatchMapResult {
  * Run `clawpatch map` in the given repo root. Pass `force: true` to remap.
  * Returns the full result so callers can surface stderr to the user.
  *
- * `clawpatch map` is idempotent and auto-runs `clawpatch init` if `.clawpatch/`
- * is missing, so this single call covers initialization too.
+ * `clawpatch map` requires `.clawpatch/` to already exist — it exits 2 with
+ * "not initialized; run clawpatch init" otherwise. Callers must run
+ * `runClawpatchInit` first when the state dir is missing.
  */
 export async function runClawpatchMap(
   repoRoot: string,
   options: { force?: boolean } = {},
 ): Promise<ClawpatchMapResult> {
   const args = ['map']
+  if (options.force === true) args.push('--force')
+  const result = await runCommand('clawpatch', args, { cwd: repoRoot })
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  }
+}
+
+/**
+ * Run `clawpatch init` in the given repo root. Pass `force: true` to
+ * re-initialize an existing `.clawpatch/` (clawpatch otherwise exits 2 with
+ * "already initialized").
+ */
+export async function runClawpatchInit(
+  repoRoot: string,
+  options: { force?: boolean } = {},
+): Promise<ClawpatchMapResult> {
+  const args = ['init']
   if (options.force === true) args.push('--force')
   const result = await runCommand('clawpatch', args, { cwd: repoRoot })
   return {

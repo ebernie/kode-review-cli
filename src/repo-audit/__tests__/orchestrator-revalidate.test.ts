@@ -76,6 +76,8 @@ const baseCli: CliOptions = {
   ci: false,
   failOn: 'critical',
   noSuppressions: false,
+  installAgentForce: false,
+  listAgents: false,
   engine: 'kode-agent',
   remap: false,
   jobs: 4,

@@ -104,6 +104,20 @@ export interface CliOptions {
   // Update command
   update: boolean
 
+  // Agent skill/command installer (--install-agent)
+  /**
+   * Raw `--install-agent` value as Commander returns it:
+   *   - `undefined`         flag not passed
+   *   - `true`              `--install-agent` passed with no value (interactive picker)
+   *   - `'claude-code'`     single agent
+   *   - `'claude-code,codex'` or `'all'`
+   * Parsing/validation happens at the install call site so the CLI surface
+   * stays declarative.
+   */
+  installAgent?: string | true
+  installAgentForce: boolean
+  listAgents: boolean
+
   // CI mode
   ci: boolean
   failOn: 'critical' | 'high' | 'none'
@@ -214,6 +228,17 @@ export function createProgram(): Command {
     .option('--revalidate', 'Repo-scope: re-check open findings against current code', false)
     .option('--clawpatch-compat', 'Repo-scope: mirror findings into .clawpatch/findings/ in clawpatch schema', false)
 
+  // ── Agent skill/command install ────────────────────────────────────────────
+  // Writes the bundled kode-review skill/slash-command/rule into each agent's
+  // well-known location on disk (e.g. ~/.claude/, ~/.codex/, <repo>/.cursor/).
+  program
+    .option(
+      '--install-agent [name]',
+      'Install kode-review skill/command for one or more AI agents. Comma-separate or use "all"; omit the value for an interactive picker. Supported: claude-code, codex, cursor.',
+    )
+    .option('--list-agents', 'List supported agents for --install-agent and exit', false)
+    .option('--force', 'With --install-agent: overwrite existing files without prompting', false)
+
   // ── Info & maintenance ─────────────────────────────────────────────────────
   program
     .option('--show-config', 'Display current configuration', false)
@@ -230,6 +255,12 @@ Primary modes:
   $ kode-review -s repo                  Whole-codebase audit (requires clawpatch on PATH)
   $ kode-review -s repo --since main     Audit features whose owned files changed since main
   $ kode-review -s repo --report-only    Render existing findings without calling the model
+
+Agent integration:
+  $ kode-review --install-agent          Interactive picker (Claude Code, Codex, Cursor)
+  $ kode-review --install-agent claude-code,codex   Install for those two agents
+  $ kode-review --install-agent all --force         Install for every agent, overwrite existing
+  $ kode-review --list-agents            List supported agents
 `)
 
   return program
@@ -391,6 +422,9 @@ export function parseArgs(argv: string[]): CliOptions {
     showConfig: opts.showConfig ?? false,
     doctor: opts.doctor ?? false,
     update: opts.update ?? false,
+    installAgent: opts.installAgent as string | true | undefined,
+    installAgentForce: opts.force ?? false,
+    listAgents: opts.listAgents ?? false,
     ci,
     failOn,
     noSuppressions,

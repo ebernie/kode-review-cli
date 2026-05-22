@@ -5,6 +5,7 @@
  * install detection) so we exercise the orchestration logic without
  * shelling out to clawpatch or calling pi.
  */
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // Hoisted mocks for the orchestrator's boundary functions.
 const mocks = vi.hoisted(() => ({
   runClawpatchMap: vi.fn(),
+  runClawpatchInit: vi.fn(),
   detectClawpatch: vi.fn(),
   isNodeVersionCompatible: vi.fn(),
   buildNodeUpgradeHint: vi.fn(() => 'Node upgrade required'),
@@ -23,8 +25,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../clawpatch-cli.js', () => ({
   runClawpatchMap: mocks.runClawpatchMap,
-  // The orchestrator only imports runClawpatchMap, but keep the other
-  // exports stubbed so any future use doesn't surprise the test runner.
+  runClawpatchInit: mocks.runClawpatchInit,
+  // The orchestrator only imports runClawpatchMap and runClawpatchInit,
+  // but keep the other exports stubbed so any future use doesn't surprise
+  // the test runner.
   runClawpatch: vi.fn(),
   runClawpatchDoctor: vi.fn(),
 }))
@@ -88,6 +92,8 @@ const baseCli: CliOptions = {
   ci: false,
   failOn: 'critical',
   noSuppressions: false,
+  installAgentForce: false,
+  listAgents: false,
   engine: 'kode-agent',
   remap: false,
   jobs: 4,
@@ -107,6 +113,7 @@ beforeEach(async () => {
   mocks.isNodeVersionCompatible.mockReturnValue(true)
   mocks.detectClawpatch.mockResolvedValue({ installed: true, version: 'clawpatch 0.3.0' })
   mocks.runClawpatchMap.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+  mocks.runClawpatchInit.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
   mocks.buildNodeUpgradeHint.mockReturnValue('Node upgrade required')
   mocks.buildInstallHint.mockReturnValue('Install clawpatch')
 })
@@ -168,6 +175,7 @@ describe('runRepoAudit — gates', () => {
       cli: { ...baseCli, reportOnly: true },
     })
     expect(mocks.runClawpatchMap).not.toHaveBeenCalled()
+    expect(mocks.runClawpatchInit).not.toHaveBeenCalled()
     expect(mocks.detectClawpatch).not.toHaveBeenCalled()
     expect(mocks.reviewFeatureWithAgent).not.toHaveBeenCalled()
     expect(result.featuresReviewed).toBe(0)
@@ -179,6 +187,62 @@ describe('runRepoAudit — gates', () => {
       runRepoAudit({ repoRoot: tmp, repoUrl: 'https://x.test/r.git', cli: baseCli }),
     ).rejects.toThrow(/clawpatch map failed/)
     expect(mocks.reviewFeatureWithAgent).not.toHaveBeenCalled()
+  })
+
+  it('runs clawpatch init when .clawpatch/ is missing, before map', async () => {
+    // Precondition: tmp has no .clawpatch/. Stating it explicitly so the
+    // test doesn't silently pass if a future beforeEach starts creating it.
+    expect(existsSync(join(tmp, '.clawpatch'))).toBe(false)
+    mocks.runClawpatchMap.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    await runRepoAudit({ repoRoot: tmp, repoUrl: 'https://x.test/r.git', cli: baseCli })
+    expect(mocks.runClawpatchInit).toHaveBeenCalledTimes(1)
+    expect(mocks.runClawpatchInit).toHaveBeenCalledWith(tmp)
+    // Both sides must have run — assert independently so the ordering check
+    // below isn't vacuously true if map never executed.
+    expect(mocks.runClawpatchMap).toHaveBeenCalledTimes(1)
+    const initOrder = mocks.runClawpatchInit.mock.invocationCallOrder[0]
+    const mapOrder = mocks.runClawpatchMap.mock.invocationCallOrder[0]
+    expect(initOrder).toBeLessThan(mapOrder)
+  })
+
+  it('treats a non-zero init exit as success when .clawpatch/ appears (concurrent runner race)', async () => {
+    // Simulate the race: our init lost to another runner. The other runner
+    // created the dir, so our init exits non-zero ("already initialized"),
+    // but we re-check the dir and continue rather than aborting.
+    mocks.runClawpatchInit.mockImplementation(async () => {
+      await mkdir(join(tmp, '.clawpatch'), { recursive: true })
+      return { exitCode: 2, stdout: '', stderr: 'already initialized; use --force' }
+    })
+    mocks.runClawpatchMap.mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    await runRepoAudit({ repoRoot: tmp, repoUrl: 'https://x.test/r.git', cli: baseCli })
+    expect(mocks.runClawpatchInit).toHaveBeenCalledTimes(1)
+    expect(mocks.runClawpatchMap).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips clawpatch init when .clawpatch/ already exists', async () => {
+    // State the precondition directly: the .clawpatch/ dir exists.
+    await mkdir(join(tmp, '.clawpatch'), { recursive: true })
+    await writeFeatureFile('feat-a')
+    mocks.reviewFeatureWithAgent.mockResolvedValue({
+      feature: {} as unknown,
+      persona: {} as unknown,
+      content: '',
+      usage: {} as unknown,
+      truncated: false,
+      findings: [],
+    })
+    await runRepoAudit({ repoRoot: tmp, repoUrl: 'https://x.test/r.git', cli: baseCli })
+    expect(mocks.runClawpatchInit).not.toHaveBeenCalled()
+    expect(mocks.runClawpatchMap).toHaveBeenCalledTimes(1)
+  })
+
+  it('aborts if clawpatch init exits non-zero (and never reaches map)', async () => {
+    mocks.runClawpatchInit.mockResolvedValue({ exitCode: 2, stdout: '', stderr: 'init boom' })
+    await expect(
+      runRepoAudit({ repoRoot: tmp, repoUrl: 'https://x.test/r.git', cli: baseCli }),
+    ).rejects.toThrow(/clawpatch init failed/)
+    expect(mocks.runClawpatchInit).toHaveBeenCalledWith(tmp)
+    expect(mocks.runClawpatchMap).not.toHaveBeenCalled()
   })
 })
 

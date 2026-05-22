@@ -83,6 +83,8 @@ const BASE_CLI: CliOptions = {
   showConfig: false,
   doctor: false,
   update: false,
+  installAgentForce: false,
+  listAgents: false,
   engine: 'kode-agent',
   remap: false,
   jobs: 1,

@@ -79,5 +79,25 @@ export default defineConfig({
         console.log(`Copied ${src} -> ${dest}`)
       }
     }
+
+    // Copy agent-install assets to dist/agent-install/assets/.
+    //
+    // Same pattern as reviewer templates: registry.ts resolves the bundled
+    // assets dir relative to its own __dirname, which lands on dist/ after
+    // tsup bundles everything into dist/index.js.
+    const agentAssetsSrc = 'src/agent-install/assets'
+    const agentAssetsDest = 'dist/agent-install/assets'
+    if (existsSync(agentAssetsSrc)) {
+      if (!existsSync(agentAssetsDest)) {
+        mkdirSync(agentAssetsDest, { recursive: true })
+      }
+      for (const entry of readdirSync(agentAssetsSrc)) {
+        if (!entry.endsWith('.md')) continue
+        const src = join(agentAssetsSrc, entry)
+        const dest = join(agentAssetsDest, entry)
+        copyFileSync(src, dest)
+        console.log(`Copied ${src} -> ${dest}`)
+      }
+    }
   },
 })
