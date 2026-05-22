@@ -151,7 +151,7 @@ export function createProgram(): Command {
 
   // ── Agent / CI tuning ──────────────────────────────────────────────────────
   program
-    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 20)', '20')
+    .option('--max-iterations <n>', 'Max tool call iterations for agent mode (default: 60)', '60')
     .option('--agentic-timeout <s>', 'Timeout in seconds for agent mode (default: 600)', '600')
     .option('--fail-on <level>', 'In --ci mode, exit non-zero on findings of this severity (critical|high|none)', 'critical')
     .option('--no-suppressions', 'Disable kode-review: ignore markers in source — report every finding')
@@ -256,10 +256,10 @@ export function parseArgs(argv: string[]): CliOptions {
   }
 
   // Validate max iterations for agentic mode
-  const maxIterationsRaw = opts.maxIterations ?? '20'
+  const maxIterationsRaw = opts.maxIterations ?? '60'
   const maxIterations = parseInt(maxIterationsRaw, 10)
-  if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 50) {
-    throw new Error(`Invalid max-iterations: "${maxIterationsRaw}". Must be a number between 1 and 50.`)
+  if (isNaN(maxIterations) || maxIterations < 1 || maxIterations > 100) {
+    throw new Error(`Invalid max-iterations: "${maxIterationsRaw}". Must be a number between 1 and 100.`)
   }
 
   // Validate agentic timeout

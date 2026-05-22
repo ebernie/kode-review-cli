@@ -102,7 +102,7 @@ kode-review --scope pr --pr 123 --format json  # JSON output
 | `--migrate-yes` | Skip the typed `wipe` confirmation during the v1.0 clean-break migration |
 | `-a, --agentic` | Agent mode with dynamic codebase exploration (default: **on**) |
 | `--no-agentic` | Diff-only review — disable tool access (faster, cheaper) |
-| `--max-iterations <n>` | Max tool call iterations for agent mode (default: 10) |
+| `--max-iterations <n>` | Max tool call iterations for agent mode (default: 60) |
 | `--agentic-timeout <s>` | Timeout in seconds for agent mode (default: 600, max: 600) |
 
 ---
@@ -273,7 +273,7 @@ apt (`sudo apt-get install ripgrep`), or [the official instructions](https://git
 |------|-------------|
 | `-a, --agentic` | Agent mode (default: **on**) — flag kept for explicit intent / backward compat |
 | `--no-agentic` | Diff-only review — disable agent tool access |
-| `--max-iterations <n>` | Max tool call iterations (default: 10) |
+| `--max-iterations <n>` | Max tool call iterations (default: 60) |
 | `--agentic-timeout <s>` | Timeout in seconds (default: 600, max: 600) |
 
 ---
