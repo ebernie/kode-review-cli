@@ -721,6 +721,31 @@ async function resolveIndexerUrlIfRunning(): Promise<string | undefined> {
   return undefined
 }
 
+/**
+ * Resolve the repo's remote URL for the diff-scope agentic review, coalescing
+ * a missing remote to '' rather than throwing. repoUrl only scopes
+ * indexer-backed tools; filesystem tools (ripgrep + git) ignore it, so a
+ * remoteless repo still reviews — it just loses indexer repo-scoping. Warns
+ * (vs. informs) when the indexer is running, since that's when an empty URL
+ * actually degrades tool results.
+ */
+export async function resolveAgenticRepoUrl(
+  indexerUrl: string | undefined,
+): Promise<string> {
+  const repoUrl = (await getRepoUrl()) ?? ''
+  if (!repoUrl) {
+    if (indexerUrl) {
+      logger.warn(
+        'No git remote configured — indexer-backed tools cannot scope to this repo and may return cross-repo or empty results (get_impact in particular needs a remote). The agent will lean on filesystem tools (ripgrep + git).',
+      )
+    } else {
+      logger.info(
+        'No git remote configured — proceeding with filesystem-backed tools (repo URL is only used for indexer scoping).',
+      )
+    }
+  }
+  return repoUrl
+}
 
 async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void> {
   // Check if we're in a git repository
@@ -1040,14 +1065,11 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         }
       }
 
-      const repoUrl = await getRepoUrl()
-      if (!repoUrl) {
-        progressUpdater?.dispose()
-        spinner?.fail('Could not determine repository URL')
-        throw new Error(
-          'Could not determine repository URL. Ensure you have a git remote configured.'
-        )
-      }
+      // repoUrl only scopes indexer-backed tools to this repo; filesystem
+      // tools (ripgrep + git) ignore it. Coalesce a missing remote to '' and
+      // degrade gracefully (mirroring runRepoScopeAudit) instead of
+      // hard-failing the review.
+      const repoUrl = await resolveAgenticRepoUrl(indexerUrl)
 
       const agenticOptions = {
         diffContent,

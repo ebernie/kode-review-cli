@@ -424,8 +424,35 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`--revalidate is not supported with --engine clawpatch. Run with --engine kode-agent (the default).`)
   }
 
+  // --revalidate only re-checks persisted repo-audit findings, so it only has
+  // meaning in repo scope. Reject an explicit diff scope (so we never silently
+  // override the user's stated intent); otherwise resolve scope to 'repo'
+  // below so the default 'auto' lands in the repo-audit path instead of
+  // misrouting into a diff-scope review that ignores the flag.
+  if (opts.revalidate && (opts.scope === 'local' || opts.scope === 'pr' || opts.scope === 'both')) {
+    throw new Error(`--revalidate only operates in --scope repo (it re-checks persisted repo-audit findings). Remove --scope ${opts.scope}, or run with --scope repo.`)
+  }
+  // The existing --pr / --watch guards above only fire for an *explicit*
+  // `--scope repo`. Because --revalidate promotes the default 'auto' to 'repo'
+  // below, those guards would be bypassed for `--revalidate --pr` /
+  // `--revalidate --watch`, silently dropping --pr or routing into watch mode
+  // (which ignores --revalidate). Reject both combinations explicitly here.
+  if (opts.revalidate && opts.pr) {
+    throw new Error(`--revalidate cannot be combined with --pr. It re-checks persisted repo-audit findings, not an individual PR. Remove --pr ${opts.pr}, or use --scope pr without --revalidate for PR review.`)
+  }
+  if (opts.revalidate && opts.watch) {
+    throw new Error(`--revalidate cannot be combined with --watch. --revalidate re-checks persisted repo-audit findings; --watch monitors PR/MR diffs.`)
+  }
+  // `scope` stays typed `ReviewScope | undefined` to match the returned field;
+  // the `undefined` arm is defensive (Commander defaults --scope to 'auto', so
+  // it is not reachable today) and future-proofs against that default changing.
+  let scope = opts.scope as ReviewScope | undefined
+  if (opts.revalidate && (scope === undefined || scope === 'auto')) {
+    scope = 'repo'
+  }
+
   return {
-    scope: opts.scope as ReviewScope | undefined,
+    scope,
     pr: opts.pr,
     quiet,
     format,

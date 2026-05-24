@@ -94,6 +94,58 @@ describe('parseArgs: --scope repo', () => {
   })
 })
 
+describe('parseArgs: --revalidate resolves to repo scope', () => {
+  it('promotes the default (no --scope) to repo so the flag is honored', () => {
+    const opts = parseArgs(args('--revalidate'))
+    expect(opts.scope).toBe('repo')
+    expect(opts.revalidate).toBe(true)
+  })
+
+  it('promotes an explicit --scope auto to repo while keeping revalidate set', () => {
+    const opts = parseArgs(args('--revalidate', '--scope', 'auto'))
+    expect(opts.scope).toBe('repo')
+    expect(opts.revalidate).toBe(true)
+  })
+
+  it('leaves an explicit --scope repo untouched', () => {
+    const opts = parseArgs(args('--revalidate', '--scope', 'repo'))
+    expect(opts.scope).toBe('repo')
+  })
+
+  it.each(['local', 'pr', 'both'])(
+    'rejects --revalidate combined with the diff scope %s instead of silently overriding it',
+    (scope) => {
+      // Assert the error names the offending scope, not just a generic message,
+      // so a regression in the `${opts.scope}` interpolation is caught.
+      expect(() => parseArgs(args('--revalidate', '--scope', scope))).toThrow(
+        new RegExp(`--revalidate only operates in --scope repo.*Remove --scope ${scope}`),
+      )
+    },
+  )
+
+  it('does not touch scope when --revalidate is absent', () => {
+    expect(parseArgs(args('--scope', 'local')).scope).toBe('local')
+    expect(parseArgs(args()).scope).toBe('auto')
+  })
+
+  // The auto→repo promotion must not let --revalidate slip past the --pr /
+  // --watch guards, which only check the explicit scope value. Without these
+  // dedicated guards, `--revalidate --pr N` would silently drop --pr and
+  // `--revalidate --watch` would route into watch mode, ignoring --revalidate.
+
+  it('rejects --revalidate combined with --pr (even without an explicit --scope)', () => {
+    expect(() => parseArgs(args('--revalidate', '--pr', '42'))).toThrow(
+      /--revalidate cannot be combined with --pr/,
+    )
+  })
+
+  it('rejects --revalidate combined with --watch (even without an explicit --scope)', () => {
+    expect(() => parseArgs(args('--revalidate', '--watch'))).toThrow(
+      /--revalidate cannot be combined with --watch/,
+    )
+  })
+})
+
 describe('parseArgs: --scope validation', () => {
   it.each(['local', 'pr', 'both', 'auto', 'repo'])(
     'accepts the documented scope value: %s',
