@@ -54,6 +54,7 @@ const BASE_CLI: CliOptions = {
   failOn: 'critical',
   noSuppressions: false,
   reportOnly: false,
+  listFindings: false,
   postToPr: false,
   autoApprove: false,
   initHooks: false,

@@ -1,6 +1,6 @@
 ---
 description: Run AI-powered code review on the current repo via the kode-review CLI
-argument-hint: [pr [N] | repo | local | both | --reviewer NAME | --with-context | ...]
+argument-hint: [pr [N] | repo | local | both | findings [open|critical|...] | --reviewer NAME | --with-context | ...]
 ---
 
 # /kode-review
@@ -31,6 +31,7 @@ Decide the scope from the first token:
 |-------------|--------|
 | `pr` | `--scope pr`. If the next token is a number, add `--pr <N>`. |
 | `repo` | `--scope repo` — **warn the user this can take a while** (whole-codebase audit, multiple model calls) and confirm before running |
+| `findings` | `--list-findings` — see the **Listing persisted findings** section below; no model call, no scope detection |
 | `local` | `--scope local` |
 | `both` | `--scope both` |
 | `watch` | `--watch` — tell the user this is long-running and confirm before launching |
@@ -150,6 +151,58 @@ Rules:
 - If more than 5 issues, append `(+ <N> more in JSON)` after the list.
 - Render `<scope>` as `metadata.scope ?? 'unknown'` and `<model>` as `metadata.model ?? 'unknown'` (the CLI's `ReviewMetadata.scope` union currently omits `'repo'` even though that scope is supported — a known CLI bug; render defensively).
 - Don't echo `positives` unless the user asked for the good news.
+
+## Listing persisted findings (`findings` subcommand)
+
+When the first token is `findings`, take this branch instead of Steps 3–5. Reads `.kode-review/findings/` directly — no model call, no pi auth required.
+
+Parse remaining tokens as filters:
+
+| Token(s) | Add flag |
+|----------|----------|
+| `open`, `uncertain`, `fixed`, `false-positive`, `wont-fix` (one or more, any order) | `--status <comma-joined>` |
+| `critical`, `high`, `medium`, `low` (one or more) | `--severity <comma-joined>` |
+| `blockers` (alias) | `--severity critical,high --status open,uncertain` |
+
+Anything else flag-shaped (`--*`) passes through.
+
+Invoke:
+
+```bash
+TMPDIR="${TMPDIR:-/tmp}"
+OUT=$(mktemp "$TMPDIR/kode-findings.XXXXXX.json") || exit 1
+kode-review --list-findings --format json --output-file "$OUT" --quiet \
+  <filter flags>
+```
+
+Read `$OUT` (shape comes from `repo-audit/report.ts`, not the review-engine schema):
+
+```json
+{
+  "total": 18, "openCount": 3, "uncertainCount": 0, "closedCount": 15,
+  "byStatus": { "open": 3, "fixed": 15 }, "bySeverity": { "CRITICAL": 3 },
+  "findings": [
+    { "findingId": "...", "featureId": "...", "persona": "...",
+      "status": "open|uncertain|fixed|false-positive|wont-fix",
+      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "title": "...", "file": "src/x.ts", "lineStart": 42,
+      "evidence": "...", "problem": "...", "recommendation": "..." }
+  ]
+}
+```
+
+Render:
+
+```
+kode-review findings: <total> total · <openCount> open · <closedCount> closed
+
+  <SEVERITY> · <file>:<lineStart> — <title>  [<status>]
+  ... up to 5 unresolved (open + uncertain), sorted CRITICAL → LOW ...
+
+Full JSON: $OUT
+```
+
+If `total === 0` with no filters: reply "No findings on disk yet — run `/kode-review repo` to generate them." and stop. If a filter was applied but matched nothing: reply "No findings matched the filter (<N> on disk total)." and stop.
 
 ## Don't
 

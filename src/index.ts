@@ -112,6 +112,13 @@ async function handleSetupCommands(options: CliOptions): Promise<boolean> {
     return true
   }
 
+  // List persisted findings (no side effects, no model calls, no onboarding).
+  // Reads `.kode-review/findings/` only — works even if clawpatch is missing.
+  if (options.listFindings) {
+    await runListFindings(options)
+    return true
+  }
+
   // Info commands (no side effects, can run without onboarding)
   if (options.showConfig) {
     showConfig({ json: options.format === 'json' })
@@ -1486,6 +1493,60 @@ async function processReviewOutput(
   } else if (options.postToPr && !reviewOutput.structured) {
     logger.warn('Could not parse review for PR posting. Raw comment posted instead.')
   }
+}
+
+/**
+ * Render persisted repo-audit findings from `.kode-review/findings/`.
+ *
+ * Standalone path for `--list-findings`: no model calls, no clawpatch
+ * dependency, no onboarding gate. Honors `--format`, `--output-file`,
+ * `--quiet`, and the `--severity` / `--status` filters.
+ *
+ * Exits 1 (via logger.error + process.exit) when run outside a git repo so
+ * the shell sees a non-zero status, matching the rest of the CLI.
+ */
+export async function runListFindings(options: CliOptions): Promise<void> {
+  const repoRoot = await getRepoRoot()
+  if (!repoRoot) {
+    logger.error('--list-findings must be run inside a git repository.')
+    process.exit(1)
+  }
+
+  const all = await listRepoAuditFindings(repoRoot)
+  const sevFilter = options.findingsSeverity
+  const statusFilter = options.findingsStatus
+  const filtered = all.filter((r) => {
+    if (sevFilter && !sevFilter.includes(r.finding.severity)) return false
+    if (statusFilter && !statusFilter.includes(r.status)) return false
+    return true
+  })
+
+  // Friendly hint for the interactive text path. Skipped when an output file
+  // is requested — CI/reporting scripts expect an artifact even on empty
+  // results — and skipped for json/markdown so machine consumers always get
+  // a parseable payload (renderRepoReport renders empty arrays correctly).
+  if (
+    filtered.length === 0 &&
+    !options.quiet &&
+    options.format === 'text' &&
+    !options.outputFile
+  ) {
+    const where = `${repoRoot}/.kode-review/findings`
+    if (all.length === 0) {
+      logger.info(`No findings on disk yet (${where}). Run \`kode-review -s repo\` to generate them.`)
+    } else {
+      logger.info(`No findings matched the filters (${all.length} on disk in ${where}).`)
+    }
+    return
+  }
+
+  await writeRepoReport({
+    records: filtered,
+    format: options.format,
+    suppressionsDisabled: options.noSuppressions,
+    outputFile: options.outputFile,
+    quiet: options.quiet,
+  })
 }
 
 /**

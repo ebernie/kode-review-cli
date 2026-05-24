@@ -131,6 +131,14 @@ export interface CliOptions {
   reportOnly: boolean
   revalidate: boolean
   clawpatchCompat: boolean
+
+  // Findings inspection
+  /** Print persisted repo-audit findings (.kode-review/findings/) and exit. */
+  listFindings: boolean
+  /** Optional severity filter: subset of CRITICAL/HIGH/MEDIUM/LOW (case-insensitive). */
+  findingsSeverity?: Array<'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'>
+  /** Optional status filter: subset of open/uncertain/fixed/false-positive/wont-fix. */
+  findingsStatus?: Array<'open' | 'uncertain' | 'fixed' | 'false-positive' | 'wont-fix'>
 }
 
 export function createProgram(): Command {
@@ -227,6 +235,9 @@ export function createProgram(): Command {
     .option('--report-only', 'Repo-scope: skip review; render findings already on disk', false)
     .option('--revalidate', 'Repo-scope: re-check open findings against current code', false)
     .option('--clawpatch-compat', 'Repo-scope: mirror findings into .clawpatch/findings/ in clawpatch schema', false)
+    .option('--list-findings', 'Print persisted repo-audit findings (from .kode-review/findings/) and exit. Honors --format and the --severity/--status filters below.', false)
+    .option('--severity <levels>', 'Filter --list-findings by severity: comma-separated subset of critical,high,medium,low')
+    .option('--status <statuses>', 'Filter --list-findings by status: comma-separated subset of open,uncertain,fixed,false-positive,wont-fix')
 
   // ── Agent skill/command install ────────────────────────────────────────────
   // Writes the bundled kode-review skill/slash-command/rule into each agent's
@@ -255,6 +266,8 @@ Primary modes:
   $ kode-review -s repo                  Whole-codebase audit (requires clawpatch on PATH)
   $ kode-review -s repo --since main     Audit features whose owned files changed since main
   $ kode-review -s repo --report-only    Render existing findings without calling the model
+  $ kode-review --list-findings          Print persisted findings from .kode-review/findings/
+  $ kode-review --list-findings --severity critical,high --format json   Filter by severity
 
 Agent integration:
   $ kode-review --install-agent          Interactive picker (Claude Code, Codex, Cursor)
@@ -376,6 +389,34 @@ export function parseArgs(argv: string[]): CliOptions {
     throw new Error(`--report-only and --revalidate cannot be combined. --report-only skips all model calls; --revalidate makes them.`)
   }
 
+  // --severity / --status: parse + validate. Only meaningful with --list-findings,
+  // but we accept them silently otherwise (they're inert if list-findings is off).
+  const SEVERITY_VALUES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const
+  type Severity = (typeof SEVERITY_VALUES)[number]
+  let findingsSeverity: Severity[] | undefined
+  if (typeof opts.severity === 'string' && opts.severity.length > 0) {
+    const parts = opts.severity.split(',').map((s: string) => s.trim().toUpperCase())
+    for (const p of parts) {
+      if (!SEVERITY_VALUES.includes(p as Severity)) {
+        throw new Error(`Invalid --severity value: "${p}". Must be a comma-separated subset of: critical, high, medium, low.`)
+      }
+    }
+    findingsSeverity = parts as Severity[]
+  }
+
+  const STATUS_VALUES = ['open', 'uncertain', 'fixed', 'false-positive', 'wont-fix'] as const
+  type FindingStatus = (typeof STATUS_VALUES)[number]
+  let findingsStatus: FindingStatus[] | undefined
+  if (typeof opts.status === 'string' && opts.status.length > 0) {
+    const parts = opts.status.split(',').map((s: string) => s.trim().toLowerCase())
+    for (const p of parts) {
+      if (!STATUS_VALUES.includes(p as FindingStatus)) {
+        throw new Error(`Invalid --status value: "${p}". Must be a comma-separated subset of: open, uncertain, fixed, false-positive, wont-fix.`)
+      }
+    }
+    findingsStatus = parts as FindingStatus[]
+  }
+
   // --revalidate is implemented only for the kode-agent engine. The clawpatch
   // engine has its own pipeline for emitting findings and there is no
   // equivalent re-check operation, so mixing the two is incoherent.
@@ -435,5 +476,8 @@ export function parseArgs(argv: string[]): CliOptions {
     reportOnly: opts.reportOnly ?? false,
     revalidate: opts.revalidate ?? false,
     clawpatchCompat: opts.clawpatchCompat ?? false,
+    listFindings: opts.listFindings ?? false,
+    findingsSeverity,
+    findingsStatus,
   }
 }

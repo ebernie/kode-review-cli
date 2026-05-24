@@ -27,6 +27,12 @@ triggers:
   - look at my PR
   - find bugs in my changes
   - code review my work
+  - show findings
+  - list findings
+  - what findings are open
+  - what bugs are open
+  - open findings
+  - critical findings
 allowed-tools:
   - Bash
   - Read
@@ -57,6 +63,7 @@ Pick from the user's phrasing first; fall back to git state.
 | Includes `PR #N`, `MR !N`, or a GitHub/GitLab PR URL | `--scope pr --pr <N>` |
 | "review my PR" / "review this PR" on a feature branch (no number) | `--scope pr` |
 | "audit this repo", "audit the codebase", "whole repo" | `--scope repo` |
+| "show/list findings", "open findings", "what bugs are open" | `--list-findings` — see the **Listing persisted findings** section below |
 | "review my changes" / "review my branch" / "kode review" | smart-detect below |
 | "watch for PRs", "monitor reviewers" | `--watch` — but **confirm** before launching (long-running) |
 
@@ -203,6 +210,64 @@ Rules:
   "metadata": { "scope": "...", "model": "...", "agentic": true, "branch": "...", "prNumber": 42 }
 }
 ```
+
+## Listing persisted findings (`--list-findings`)
+
+Separate flow from a review: reads `.kode-review/findings/` directly, makes **no model calls**, requires no pi auth. Use when the user asks to see findings from a previous repo audit (`--scope repo`) rather than to run a new one.
+
+```bash
+TMPDIR="${TMPDIR:-/tmp}"
+OUT=$(mktemp "$TMPDIR/kode-findings.XXXXXX.json") || exit 1
+kode-review --list-findings --format json --output-file "$OUT" --quiet \
+  [--severity critical,high]  [--status open,uncertain]
+```
+
+Filter passthrough (only when the user mentions it):
+
+| User said | Add flag |
+|-----------|----------|
+| "only critical" / "criticals" | `--severity critical` |
+| "critical and high" / "blockers" | `--severity critical,high` |
+| "open ones" / "still open" | `--status open` |
+| "open or uncertain" / "needs human" | `--status open,uncertain` |
+
+`--list-findings` JSON shape (different from a review — comes from `repo-audit/report.ts`):
+
+```json
+{
+  "version": 1,
+  "generatedAt": "ISO timestamp",
+  "total": 18,
+  "openCount": 3, "uncertainCount": 0, "closedCount": 15,
+  "byStatus":   { "open": 3, "fixed": 15 },
+  "bySeverity": { "CRITICAL": 3 },
+  "findings": [
+    { "findingId": "...", "featureId": "...", "persona": "...",
+      "status": "open|uncertain|fixed|false-positive|wont-fix",
+      "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+      "category": "...", "confidence": "...",
+      "title": "...", "file": "src/x.ts",
+      "lineStart": 42, "lineEnd": 42,
+      "evidence": "...", "problem": "...", "recommendation": "...",
+      "createdByRunId": "...", "createdAt": "...", "updatedAt": "..." }
+  ]
+}
+```
+
+Render summary:
+
+```
+kode-review findings: <total> total · <openCount> open · <closedCount> closed
+
+  <SEVERITY> · <file>:<lineStart> — <title>  [<status>]
+  ... up to 5 unresolved (open + uncertain), sorted CRITICAL → LOW ...
+
+Full JSON: $OUT
+```
+
+If `total === 0`: reply "No findings on disk yet — run `kode-review -s repo` to generate them." and stop.
+
+If a filter was applied but matched nothing: reply "No findings matched the filter (<N> on disk total)." and stop.
 
 ## Follow-ups
 

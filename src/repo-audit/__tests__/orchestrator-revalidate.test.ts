@@ -82,6 +82,7 @@ const baseCli: CliOptions = {
   remap: false,
   jobs: 4,
   reportOnly: false,
+  listFindings: false,
   revalidate: true,
   clawpatchCompat: false,
 }
