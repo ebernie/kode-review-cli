@@ -89,7 +89,7 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 - **`suppressions-structured.ts`** — `filterSuppressedStructured(Finding[], repoRoot)`: applies `kode-review: ignore` markers to structured findings (sibling of `src/review/suppressions.ts`)
 - **`feature-filter.ts`** — `--since <ref>` filter via `git diff --name-only ref...HEAD`
 - **`report.ts`** — text / markdown / json renderer with Feature × Severity matrix
-- **`orchestrator.ts`** — `runRepoAudit`: install gate → clawpatch map → readFeatures → since/already-reviewed filter → per-feature review with persona dispatch → write findings → render
+- **`orchestrator.ts`** — `runRepoAudit`: install gate → clawpatch map → readFeatures → since/already-reviewed filter → per-feature review **(parallel, bounded by `--jobs`, default 2)** with persona dispatch → write findings → render
 
 **State boundary:**
 
@@ -101,6 +101,10 @@ The main entry point (`src/index.ts`) orchestrates three main flows:
 **Engine surface:** `runAgenticReview` (`src/review/engine.ts`) was extended to honor `options.systemPrompt` and `options.userPromptOverride` so the same agent loop powers both diff-scope persona dispatch and repo-scope feature review.
 
 **Caps** (mirror clawpatch): `MAX_OWNED_FILES_IN_PROMPT=12`, `MAX_CONTEXT_FILES_IN_PROMPT=24`, `MAX_FINDINGS_PER_FEATURE=10` (in `types.ts`). Files past the cap are referenced by path with a `read_file`-via-tool hint — never silently truncated.
+
+**Concurrency (`--jobs`, default 2):**
+
+Both the audit loop and `--revalidate` review features in parallel via an in-process bounded worker pool (`src/utils/concurrency.ts`, `runPool`). `--jobs 1` is fully sequential (byte-for-byte the old behavior). Within one process the pool partitions work across lanes; per-feature locks (`.kode-review/locks/`) still coordinate across *separate* processes. The pool supports cooperative stop: when a worker hits a hard rate limit (or an unexpected error), it stops scheduling new features, lets in-flight features finish (their persisted findings are preserved), and the run returns `aborted: true` with the reason — `appendRunHistory` is still recorded. The binding constraint on raising `--jobs` is the model provider's rate limit, not the locking.
 
 ### Indexer Architecture
 
