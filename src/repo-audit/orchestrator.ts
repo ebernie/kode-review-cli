@@ -62,6 +62,19 @@ export interface RunRepoAuditResult {
 }
 
 /**
+ * Counters accumulated while reviewing a single feature. Each pool worker
+ * returns one of these; `runRepoAudit` sums them into the run totals. Keeping
+ * the tally local (not shared mutable outer-scope counters) is what makes
+ * parallel feature workers safe.
+ */
+interface AuditTally {
+  reviewed: number
+  emitted: number
+  suppressed: number
+  abortReason?: string
+}
+
+/**
  * Top-level entry for `--scope repo`. Called from src/index.ts when scope
  * resolves to 'repo'.
  *
@@ -213,13 +226,6 @@ export async function runRepoAudit(
   const runId = newRunId()
   const startedAt = new Date().toISOString()
 
-  interface AuditTally {
-    reviewed: number
-    emitted: number
-    suppressed: number
-    abortReason?: string
-  }
-
   async function reviewFeature(
     feature: (typeof toReview)[number],
     _index: number,
@@ -292,6 +298,10 @@ export async function runRepoAudit(
               )
               tally.abortReason = msg
               handle.requestStop()
+              // Count the interrupted feature as reviewed — matches the original
+              // sequential behavior (reviewed += 1 ran after a rate-limit break)
+              // and mirrors the revalidate path, which counts a started feature
+              // via featuresTouched at lock-acquire.
               tally.reviewed += 1
               return tally
             }

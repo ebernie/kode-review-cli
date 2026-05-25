@@ -727,6 +727,10 @@ describe('runRepoAudit — edge cases', () => {
     const onDisk = await listFindings(tmp)
     expect(onDisk.map((r) => r.featureId)).toContain('feat-x')
     expect(result.findingsEmitted).toBe(1)
+    // Both features acquired their lock and ran before the pool stopped:
+    // feat-x completed normally (reviewed += 1) and feat-y is counted as
+    // reviewed even though it rate-limited (interrupted-feature semantics).
+    expect(result.featuresReviewed).toBe(2)
   })
 
   it('stops dispatching remaining personas of an in-flight feature once a peer hits a rate limit', async () => {
