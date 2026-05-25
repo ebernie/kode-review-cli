@@ -36,7 +36,7 @@ import {
   stateDir,
   writeFinding,
 } from '../state.js'
-import type { RepoFindingRecord } from '../types.js'
+import type { FeatureRecord, RepoFindingRecord } from '../types.js'
 
 let tmp: string
 
@@ -811,10 +811,11 @@ describe('runRevalidate — rate-limit abort', () => {
     await writeFinding(tmp, makeRecord({ findingId: 'a1', featureId: 'feat-a' }))
     await writeFinding(tmp, makeRecord({ findingId: 'b1', featureId: 'feat-b' }))
 
-    let call = 0
-    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async () => {
-      call += 1
-      if (call === 1) return buildResult({ a1: 'fixed' })
+    // Key the outcome on feature identity, not invocation order: with the
+    // worker pool feat-a and feat-b are reviewed concurrently, so we cannot
+    // assume which engine call lands first. feat-a succeeds; feat-b rate-limits.
+    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async ({ feature }) => {
+      if ((feature as FeatureRecord).featureId === 'feat-a') return buildResult({ a1: 'fixed' })
       throw new Error('Model returned an error: You have hit your usage limit. Try again in ~10 min.')
     })
 
@@ -909,5 +910,170 @@ describe('runRevalidate — sanity: findings dir is initialized lazily', () => {
     })
     // Post-run: still no findings on disk.
     expect(await listFindings(tmp)).toEqual([])
+  })
+})
+
+describe('runRevalidate — concurrency', () => {
+  it('reviews multiple features in parallel up to --jobs', async () => {
+    // Three independent features, each with one open finding and a registered
+    // persona. With jobs=3 the worker pool should run all three engine calls
+    // concurrently, so the max number of simultaneously-active invocations
+    // must exceed 1 (a sequential loop would never overlap).
+    for (const id of ['feat-A', 'feat-B', 'feat-C']) {
+      await writeFeatureFile(id)
+      await writeFinding(tmp, makeRecord({ findingId: `fid-${id}`, featureId: id, persona: 'general' }))
+    }
+
+    const jobs = 3
+    let active = 0
+    let maxActive = 0
+    const waiters: Array<() => void> = []
+    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async ({ openFindings }) => {
+      active++
+      maxActive = Math.max(maxActive, active)
+      // Park until `jobs` workers are concurrently in-flight; the last to arrive
+      // releases all of them. Sequential execution never reaches `jobs`, so it
+      // deadlocks instead of falsely passing.
+      await new Promise<void>((resolve) => {
+        waiters.push(resolve)
+        if (waiters.length >= jobs) waiters.forEach((w) => w())
+      })
+      active--
+      return {
+        feature: {} as unknown,
+        persona: {} as unknown,
+        verdicts: new Map(
+          (openFindings as RepoFindingRecord[]).map((f) => [
+            f.findingId,
+            { findingId: f.findingId, verdict: 'fixed' as const, evidence: 'gone' },
+          ]),
+        ),
+        content: '',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+        truncated: false,
+        blockParsed: true,
+      }
+    })
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, jobs: 3, revalidate: true },
+    })
+
+    expect(maxActive).toBe(3)
+    expect(result.featuresReviewed).toBe(3)
+  })
+
+  it('aborts the pool and preserves open findings on a rate-limit error', async () => {
+    // feat-A's worker hits a rate limit (429); feat-B resolves normally. The
+    // pool must stop scheduling new work, report aborted=true with a
+    // rate-limit reason, and leave feat-A's finding untouched on disk.
+    await writeFeatureFile('feat-A')
+    await writeFeatureFile('feat-B')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-A', featureId: 'feat-A', persona: 'general' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-B', featureId: 'feat-B', persona: 'general' }))
+
+    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async ({ feature, openFindings }) => {
+      if ((feature as FeatureRecord).featureId === 'feat-A') {
+        // isRateLimitError matches `\b429\b` in the message.
+        const err = new Error('Model returned an error: 429 rate limit exceeded') as Error & {
+          status?: number
+        }
+        err.status = 429
+        throw err
+      }
+      return buildResult(
+        Object.fromEntries(
+          (openFindings as RepoFindingRecord[]).map((f) => [f.findingId, 'fixed' as const]),
+        ),
+      )
+    })
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, jobs: 2, revalidate: true },
+    })
+
+    expect(result.aborted).toBe(true)
+    expect(result.abortReason).toMatch(/rate limit/i)
+    // feat-A's finding was never given a verdict — it stays open on disk so a
+    // later --revalidate retries it.
+    const records = await listFindings(tmp)
+    const a = records.find((r) => r.findingId === 'fid-A')
+    expect(a?.status).toBe('open')
+    expect(a?.revalidationVerdict).toBeUndefined()
+    // feat-B's worker ran to completion before the pool stopped scheduling new
+    // work, so its finding must be persisted as fixed.
+    const bRecord = records.find((r) => r.featureId === 'feat-B')
+    expect(bRecord?.status).toBe('fixed')
+    expect(bRecord?.revalidationVerdict).toBe('fixed')
+  })
+
+  it('stops starting later persona groups of an in-flight feature once a peer worker rate-limits', async () => {
+    // feat-multi has two persona groups (general, security); feat-rl has one
+    // group that rate-limits immediately. With jobs=2 both features run
+    // concurrently. feat-multi's FIRST persona group is held open long enough
+    // for feat-rl to throw and request stop; the worker must then NOT start
+    // feat-multi's SECOND group, leaving that finding open for retry.
+    //
+    // The assertions are deliberately independent of which persona group is
+    // processed first: listFindings() uses readdir() ordering, which is not
+    // guaranteed across filesystems, and groupByFeatureAndPersona preserves
+    // that order. We only assert that exactly one of feat-multi's two groups
+    // ran and exactly one of its findings stayed open.
+    await writeFeatureFile('feat-multi')
+    await writeFeatureFile('feat-rl')
+    await writeFinding(tmp, makeRecord({ findingId: 'm-gen', featureId: 'feat-multi', persona: 'general' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'm-sec', featureId: 'feat-multi', persona: 'security' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'rl-1', featureId: 'feat-rl', persona: 'general' }))
+
+    let multiCalls = 0
+    const multiPersonasInvoked: string[] = []
+    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async ({ feature, persona, openFindings }) => {
+      const featureId = (feature as FeatureRecord).featureId
+      if (featureId === 'feat-rl') {
+        throw new Error('Model returned an error: 429 rate limit exceeded')
+      }
+      // feat-multi
+      multiPersonasInvoked.push((persona as { name: string }).name)
+      multiCalls += 1
+      if (multiCalls === 1) {
+        // Hold the lane open on the FIRST group (whichever persona that is) so
+        // feat-rl's worker throws + requestStop() runs before this group
+        // resolves and the worker checks the next group.
+        await new Promise((r) => setTimeout(r, 30))
+      }
+      return buildResult(
+        Object.fromEntries(
+          (openFindings as RepoFindingRecord[]).map((f) => [f.findingId, 'fixed' as const]),
+        ),
+      )
+    })
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, jobs: 2, revalidate: true },
+    })
+
+    expect(result.aborted).toBe(true)
+    // Exactly one of feat-multi's two persona groups ran; the second was
+    // short-circuited once the peer worker requested stop.
+    expect(multiPersonasInvoked).toHaveLength(1)
+    // Exactly one of feat-multi's findings was verdicted; the other is left
+    // open (untouched) for a later run.
+    const records = await listFindings(tmp)
+    const mGen = records.find((r) => r.findingId === 'm-gen')
+    const mSec = records.find((r) => r.findingId === 'm-sec')
+    const statuses = [mGen?.status, mSec?.status].sort()
+    expect(statuses).toEqual(['fixed', 'open'])
+    // The rate-limited feature's finding was never given a verdict — it stays
+    // open and untouched for a later run, and the abort reason propagated.
+    expect(result.abortReason).toMatch(/rate limit/i)
+    const rlRecord = records.find((r) => r.findingId === 'rl-1')
+    expect(rlRecord?.status).toBe('open')
+    expect(rlRecord?.revalidationVerdict).toBeUndefined()
   })
 })

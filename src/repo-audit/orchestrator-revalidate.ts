@@ -41,6 +41,7 @@
  */
 import { cyan, green, yellow } from '../cli/colors.js'
 import { logger } from '../utils/logger.js'
+import { runPool } from '../utils/concurrency.js'
 import { resolveReviewer } from '../reviewers/registry.js'
 import { isRateLimitError, isTransientModelError } from './error-classify.js'
 import { filterFeaturesBySince } from './feature-filter.js'
@@ -147,15 +148,6 @@ export async function runRevalidate(
 
   const runId = newRunId()
   const startedAt = new Date().toISOString()
-  let revalidated = 0
-  let closed = 0
-  let uncertainCount = 0
-  let stillPresent = 0
-  // Open findings whose check failed or came back incomplete this run. They
-  // are left untouched on disk so the next --revalidate retries them.
-  let leftOpen = 0
-  let featuresTouched = 0
-  let abortLoop: { reason: string } | null = null
 
   // Group iterations are organized per-feature so the lock can guard the
   // whole feature's groups in one acquire/release cycle.
@@ -166,149 +158,243 @@ export async function runRevalidate(
     byFeature.set(g.featureId, arr)
   }
 
-  outer: for (const [featureId, featureGroups] of byFeature) {
-    const feature = featureById.get(featureId)
-    if (feature === undefined) {
-      // Feature disappeared from clawpatch's map (re-mapped without it, or
-      // never mapped — e.g. a finding from a previous repo layout). Verdict
-      // every finding in every group as `'uncertain'`.
-      logger.warn(
-        cyan(`feature=${featureId}`) +
-          ` — feature no longer in clawpatch map; marking findings as 'uncertain'.`,
-      )
-      for (const group of featureGroups) {
-        for (const record of group.findings) {
-          await persistVerdict(repoRoot, record, 'uncertain', runId, {
-            agentEvidence: 'feature no longer present in clawpatch map',
-          })
-          revalidated += 1
-          uncertainCount += 1
-        }
-      }
-      featuresTouched += 1
-      continue
-    }
+  const featureEntries = Array.from(byFeature.entries())
 
-    const lock = await acquireFeatureLock(repoRoot, featureId, runId)
-    if (lock === null) {
-      logger.info(cyan(`feature=${featureId} skipped — locked by another runner`))
-      continue
-    }
+  // Per-feature worker. Each call processes one feature's groups end-to-end,
+  // accumulating into a LOCAL tally that the caller sums afterward. The worker
+  // NEVER throws — engine failures are caught and reported via the tally;
+  // a hard rate limit calls handle.requestStop() (so the pool stops dequeuing
+  // new features) and records the reason — partial progress already persisted
+  // to disk is preserved.
+  async function reviewFeatureGroup(
+    [featureId, featureGroups]: [string, FeatureGroup[]],
+    _index: number,
+    handle: { requestStop(): void; readonly stopRequested: boolean },
+  ): Promise<FeatureTally> {
+    const tally: FeatureTally = { ...ZERO_TALLY }
 
-    // Count the feature as touched at the start of work so a mid-run abort
-    // (e.g. rate-limit) doesn't undercount the in-progress feature whose
-    // partial verdicts were already persisted.
-    featuresTouched += 1
     try {
-      for (const group of featureGroups) {
-        logger.info(
-          cyan(`feature=${featureId} persona=${group.persona}`) +
-            ` revalidating ${group.findings.length} finding(s)`,
+      const feature = featureById.get(featureId)
+      if (feature === undefined) {
+        // Feature disappeared from clawpatch's map (re-mapped without it, or
+        // never mapped — e.g. a finding from a previous repo layout). Verdict
+        // every finding in every group as `'uncertain'`.
+        logger.warn(
+          cyan(`feature=${featureId}`) +
+            ` — feature no longer in clawpatch map; marking findings as 'uncertain'.`,
         )
-
-        // Defend against findings whose persona is no longer registered.
-        let persona
-        try {
-          persona = resolveReviewer(group.persona)
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          logger.warn(
-            `  ${group.persona}: persona no longer registered — marking findings as 'uncertain'. (${msg})`,
-          )
+        // No feature lock here: an orphaned feature (gone from clawpatch's map) is
+        // keyed uniquely in `byFeature`, so it is handled by exactly one worker
+        // in-process. Writes are atomic (temp-write-rename); a concurrent external
+        // --revalidate is last-writer-wins with no corruption.
+        for (const group of featureGroups) {
           for (const record of group.findings) {
             await persistVerdict(repoRoot, record, 'uncertain', runId, {
-              agentEvidence: `persona "${group.persona}" no longer registered`,
+              agentEvidence: 'feature no longer present in clawpatch map',
             })
-            revalidated += 1
-            uncertainCount += 1
+            tally.revalidated += 1
+            tally.uncertain += 1
           }
-          continue
         }
+        tally.featuresTouched += 1
+        return tally
+      }
 
-        let result
-        try {
-          result = await revalidateFeatureGroupWithAgent({
-            feature,
-            persona,
-            openFindings: group.findings,
-            repoRoot,
-            repoUrl: opts.repoUrl,
-            branch: opts.branch,
-            indexerUrl: opts.indexerUrl,
-            model: cli.model,
-            maxIterations: cli.maxIterations,
-            timeoutSec: cli.agenticTimeout,
-          })
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err)
-          if (isRateLimitError(err)) {
-            // This group was attempted and failed; its findings stay 'open'
-            // (unpersisted) for retry, so count them as left-open before we
-            // abort — otherwise the run-history entry under-reports them.
-            leftOpen += group.findings.length
-            logger.error(
-              `  ${group.persona}: rate limit hit — aborting the run. Already-written records are preserved. (${msg})`,
+      const lock = await acquireFeatureLock(repoRoot, featureId, runId)
+      if (lock === null) {
+        logger.info(cyan(`feature=${featureId} skipped — locked by another runner`))
+        return tally
+      }
+
+      // Count the feature as touched at the start of work so a mid-run abort
+      // (e.g. rate-limit) doesn't undercount the in-progress feature whose
+      // partial verdicts were already persisted.
+      tally.featuresTouched += 1
+      try {
+        for (let groupIndex = 0; groupIndex < featureGroups.length; groupIndex++) {
+          // A peer worker may have hit a hard rate limit and called
+          // requestStop() while we were mid-feature. runPool's cooperative stop
+          // only blocks dequeuing NEW features, so we must check between persona
+          // groups too — otherwise we'd keep firing model calls at a provider we
+          // already know is rate-limited. We only short-circuit groups AFTER the
+          // first: a feature that was already dequeued is "in flight" and, per
+          // runPool semantics, runs its first unit to completion (otherwise a
+          // stop requested by a peer before this lane started its first group
+          // would skip the whole feature). Subsequent persona groups are genuine
+          // NEW work and are left 'open' for a later --revalidate.
+          if (groupIndex > 0 && handle.stopRequested) {
+            let remaining = 0
+            for (let i = groupIndex; i < featureGroups.length; i++) {
+              remaining += featureGroups[i]!.findings.length
+            }
+            if (remaining > 0) {
+              tally.leftOpen += remaining
+              logger.info(
+                cyan(`feature=${featureId}`) +
+                  ` stop requested by a peer worker — leaving ${remaining} finding(s) untouched for retry.`,
+              )
+            }
+            return tally
+          }
+
+          const group = featureGroups[groupIndex]!
+          logger.info(
+            cyan(`feature=${featureId} persona=${group.persona}`) +
+              ` revalidating ${group.findings.length} finding(s)`,
+          )
+
+          // Defend against findings whose persona is no longer registered.
+          let persona
+          try {
+            persona = resolveReviewer(group.persona)
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            logger.warn(
+              `  ${group.persona}: persona no longer registered — marking findings as 'uncertain'. (${msg})`,
             )
-            abortLoop = { reason: msg }
-            break outer
-          }
-          // An engine failure is a failed check, not an observation about the
-          // code. Leave the group's findings 'open' (untouched) so a later
-          // --revalidate retries them; never flip to 'uncertain', which the
-          // revalidate scan would then skip forever.
-          const kind = isTransientModelError(err) ? 'transient model error' : 'error'
-          logger.warn(
-            `  ${group.persona}: ${kind} — leaving ${group.findings.length} finding(s) untouched for retry. (${msg})`,
-          )
-          leftOpen += group.findings.length
-          continue
-        }
-
-        if (!result.blockParsed) {
-          logger.warn(
-            `  ${group.persona}: agent did not emit a parseable kode-revalidations block (${result.blockError ?? 'unknown'}) — leaving findings untouched for retry.`,
-          )
-        }
-
-        // Apply only the verdicts the agent actually rendered. A finding with
-        // no emitted verdict was not checked (unparseable block, or the agent
-        // silently dropped it), so we leave it 'open' and untouched — a later
-        // --revalidate retries it. An explicit 'uncertain' verdict is honored:
-        // that is the agent reporting "I looked and can't tell", not a failed
-        // check.
-        let missingCount = 0
-        for (const record of group.findings) {
-          const verdictEntry = result.verdicts.get(record.findingId)
-          if (verdictEntry === undefined) {
-            missingCount += 1
-            leftOpen += 1
+            for (const record of group.findings) {
+              await persistVerdict(repoRoot, record, 'uncertain', runId, {
+                agentEvidence: `persona "${group.persona}" no longer registered`,
+              })
+              tally.revalidated += 1
+              tally.uncertain += 1
+            }
             continue
           }
-          const verdict = verdictEntry.verdict
-          await persistVerdict(repoRoot, record, verdict, runId, {
-            agentEvidence: verdictEntry.evidence,
-          })
-          revalidated += 1
-          if (verdict === 'fixed') closed += 1
-          else if (verdict === 'uncertain') uncertainCount += 1
-          else if (verdict === 'still-present') stillPresent += 1
-        }
 
-        // Only warn about omissions when the block parsed — an unparseable
-        // block already logged above, and every finding would be "missing".
-        if (missingCount > 0 && result.blockParsed) {
-          logger.warn(
-            `  ${group.persona}: agent omitted ${missingCount} verdict(s); left untouched for retry.`,
-          )
-        }
+          let result
+          try {
+            result = await revalidateFeatureGroupWithAgent({
+              feature,
+              persona,
+              openFindings: group.findings,
+              repoRoot,
+              repoUrl: opts.repoUrl,
+              branch: opts.branch,
+              indexerUrl: opts.indexerUrl,
+              model: cli.model,
+              maxIterations: cli.maxIterations,
+              timeoutSec: cli.agenticTimeout,
+            })
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (isRateLimitError(err)) {
+              // This group was attempted and failed; its findings stay 'open'
+              // (unpersisted) for retry, so count them as left-open before we
+              // stop — otherwise the run-history entry under-reports them.
+              tally.leftOpen += group.findings.length
+              tally.abortReason = msg
+              logger.error(
+                `  ${group.persona}: rate limit hit — stopping new work. Already-written records are preserved. (${msg})`,
+              )
+              handle.requestStop()
+              return tally
+            }
+            // An engine failure is a failed check, not an observation about the
+            // code. Leave the group's findings 'open' (untouched) so a later
+            // --revalidate retries them; never flip to 'uncertain', which the
+            // revalidate scan would then skip forever.
+            const kind = isTransientModelError(err) ? 'transient model error' : 'error'
+            logger.warn(
+              `  ${group.persona}: ${kind} — leaving ${group.findings.length} finding(s) untouched for retry. (${msg})`,
+            )
+            tally.leftOpen += group.findings.length
+            continue
+          }
 
-        if (result.truncated) {
-          logger.warn(`  ${group.persona}: ${result.truncationReason ?? 'truncated'}`)
+          if (!result.blockParsed) {
+            logger.warn(
+              `  ${group.persona}: agent did not emit a parseable kode-revalidations block (${result.blockError ?? 'unknown'}) — leaving findings untouched for retry.`,
+            )
+          }
+
+          // Apply only the verdicts the agent actually rendered. A finding with
+          // no emitted verdict was not checked (unparseable block, or the agent
+          // silently dropped it), so we leave it 'open' and untouched — a later
+          // --revalidate retries it. An explicit 'uncertain' verdict is honored:
+          // that is the agent reporting "I looked and can't tell", not a failed
+          // check.
+          let missingCount = 0
+          for (const record of group.findings) {
+            const verdictEntry = result.verdicts.get(record.findingId)
+            if (verdictEntry === undefined) {
+              missingCount += 1
+              tally.leftOpen += 1
+              continue
+            }
+            const verdict = verdictEntry.verdict
+            await persistVerdict(repoRoot, record, verdict, runId, {
+              agentEvidence: verdictEntry.evidence,
+            })
+            tally.revalidated += 1
+            if (verdict === 'fixed') tally.closed += 1
+            else if (verdict === 'uncertain') tally.uncertain += 1
+            else if (verdict === 'still-present') tally.stillPresent += 1
+          }
+
+          // Only warn about omissions when the block parsed — an unparseable
+          // block already logged above, and every finding would be "missing".
+          if (missingCount > 0 && result.blockParsed) {
+            logger.warn(
+              `  ${group.persona}: agent omitted ${missingCount} verdict(s); left untouched for retry.`,
+            )
+          }
+
+          if (result.truncated) {
+            logger.warn(`  ${group.persona}: ${result.truncationReason ?? 'truncated'}`)
+          }
         }
+      } finally {
+        await releaseFeatureLock(repoRoot, featureId)
       }
-    } finally {
-      await releaseFeatureLock(repoRoot, featureId)
+
+      return tally
+    } catch (err) {
+      // The worker must never throw — runPool would otherwise reject and skip
+      // run-history. An unexpected error (e.g. disk I/O in persistVerdict, or a
+      // lock-acquire failure) is treated like a hard stop: report it, stop
+      // scheduling new features, and leave any unpersisted findings 'open' on
+      // disk for the next --revalidate. The inner try/finally has already
+      // released the feature lock if one was held.
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(
+        cyan(`feature=${featureId}`) +
+          ` — unexpected error; stopping new work, remaining findings left for retry. (${msg})`,
+      )
+      tally.abortReason = msg
+      handle.requestStop()
+      return tally
     }
+  }
+
+  // --jobs governs the pool width; clamp to >= 1 so a stray 0 still runs.
+  const concurrency = Math.max(1, cli.jobs)
+  const outcome = await runPool(featureEntries, concurrency, reviewFeatureGroup)
+
+  // Sum the per-feature tallies. The first feature to hit a hard rate limit
+  // wins the abort reason; the pool stopped dequeuing new features once it did.
+  let revalidated = 0
+  let closed = 0
+  let uncertainCount = 0
+  let stillPresent = 0
+  let leftOpen = 0
+  let featuresTouched = 0
+  let abortReason: string | null = null
+  for (const t of outcome.results) {
+    revalidated += t.revalidated
+    closed += t.closed
+    uncertainCount += t.uncertain
+    stillPresent += t.stillPresent
+    leftOpen += t.leftOpen
+    featuresTouched += t.featuresTouched
+    if (t.abortReason && abortReason === null) abortReason = t.abortReason
+  }
+
+  // Belt-and-suspenders: if the pool was stopped but no worker recorded a
+  // reason (e.g. a future requestStop() path that forgets to set one), still
+  // surface the abort rather than silently returning success.
+  if (outcome.stopped && abortReason === null) {
+    abortReason = 'revalidation stopped early (no reason recorded)'
   }
 
   await appendRunHistory(repoRoot, {
@@ -329,7 +415,7 @@ export async function runRevalidate(
   })
 
   const findingsOnDisk = (await listFindings(repoRoot)).length
-  if (abortLoop !== null) {
+  if (abortReason !== null) {
     return {
       featuresReviewed: featuresTouched,
       featuresSkipped: 0,
@@ -337,7 +423,7 @@ export async function runRevalidate(
       findingsSuppressed: 0,
       findingsOnDisk,
       aborted: true,
-      abortReason: abortLoop.reason,
+      abortReason,
     }
   }
 
@@ -363,6 +449,32 @@ interface FeatureGroup {
   featureId: string
   persona: string
   findings: RepoFindingRecord[]
+}
+
+/**
+ * Counters accumulated while reviewing a single feature's groups. Each pool
+ * worker returns one of these; `runRevalidate` sums them into the run totals.
+ * Keeping the tally local (not shared mutable outer-scope counters) is what
+ * makes parallel feature workers safe.
+ */
+interface FeatureTally {
+  featuresTouched: number
+  revalidated: number
+  closed: number
+  uncertain: number
+  stillPresent: number
+  leftOpen: number
+  /** Set when this feature's work hit a hard rate limit. */
+  abortReason?: string
+}
+
+const ZERO_TALLY: FeatureTally = {
+  featuresTouched: 0,
+  revalidated: 0,
+  closed: 0,
+  uncertain: 0,
+  stillPresent: 0,
+  leftOpen: 0,
 }
 
 function groupByFeatureAndPersona(records: RepoFindingRecord[]): FeatureGroup[] {
