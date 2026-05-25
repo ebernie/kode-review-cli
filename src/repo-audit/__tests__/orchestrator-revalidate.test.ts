@@ -84,6 +84,7 @@ const baseCli: CliOptions = {
   reportOnly: false,
   listFindings: false,
   revalidate: true,
+  retryUncertain: false,
   clawpatchCompat: false,
 }
 
@@ -289,11 +290,12 @@ describe('runRevalidate — verdict application', () => {
     expect(updated?.finding).toEqual(original.finding)
   })
 
-  it('defaults to "uncertain" for findings the agent omitted from its verdict block', async () => {
+  it('leaves a finding the agent omitted from its verdict block "open" for retry', async () => {
     await writeFeatureFile('feat-a')
     await writeFinding(tmp, makeRecord({ findingId: 'fid-a' }))
     await writeFinding(tmp, makeRecord({ findingId: 'fid-b' }))
-    // Agent only verdicts fid-a; fid-b is missing.
+    // Agent only verdicts fid-a; fid-b is missing — an incomplete check, not
+    // an observation, so fid-b must stay open and pristine for a later pass.
     mocks.revalidateFeatureGroupWithAgent.mockResolvedValue(
       buildResult({ 'fid-a': 'fixed' }),
     )
@@ -307,11 +309,15 @@ describe('runRevalidate — verdict application', () => {
     const a = await readFinding(tmp, 'fid-a')
     const b = await readFinding(tmp, 'fid-b')
     expect(a?.status).toBe('fixed')
-    expect(b?.status).toBe('uncertain')
-    expect(b?.revalidationVerdict).toBe('uncertain')
+    expect(b?.status).toBe('open')
+    // Untouched: no verdict, no revalidation stamp, original updatedAt.
+    expect(b?.revalidationVerdict).toBeUndefined()
+    expect(b?.lastRevalidatedAt).toBeUndefined()
+    expect(b?.revalidationRunId).toBeUndefined()
+    expect(b?.updatedAt).toBe('2026-05-18T10:00:00.000Z')
   })
 
-  it('defaults every finding to "uncertain" when the agent emits no parseable block', async () => {
+  it('leaves every finding "open" when the agent emits no parseable block', async () => {
     await writeFeatureFile('feat-a')
     await writeFinding(tmp, makeRecord({ findingId: 'fid-a' }))
     await writeFinding(tmp, makeRecord({ findingId: 'fid-b' }))
@@ -328,8 +334,202 @@ describe('runRevalidate — verdict application', () => {
 
     const a = await readFinding(tmp, 'fid-a')
     const b = await readFinding(tmp, 'fid-b')
-    expect(a?.status).toBe('uncertain')
-    expect(b?.status).toBe('uncertain')
+    // Both findings are untouched — same depth of check for each.
+    for (const r of [a, b]) {
+      expect(r?.status).toBe('open')
+      expect(r?.revalidationVerdict).toBeUndefined()
+      expect(r?.lastRevalidatedAt).toBeUndefined()
+      expect(r?.revalidationRunId).toBeUndefined()
+      expect(r?.updatedAt).toBe('2026-05-18T10:00:00.000Z')
+    }
+  })
+})
+
+describe('runRevalidate — engine errors leave findings open for retry', () => {
+  it('leaves findings "open" (untouched) on a transient model error', async () => {
+    await writeFeatureFile('feat-a')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-a' }))
+    mocks.revalidateFeatureGroupWithAgent.mockRejectedValue(
+      new Error('Model returned an error: 503 service unavailable, please retry'),
+    )
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: baseCli,
+    })
+
+    const after = await readFinding(tmp, 'fid-a')
+    expect(after?.status).toBe('open')
+    // Fully pin "untouched": no verdict, no stamps, original updatedAt.
+    expect(after?.revalidationVerdict).toBeUndefined()
+    expect(after?.lastRevalidatedAt).toBeUndefined()
+    expect(after?.revalidationRunId).toBeUndefined()
+    expect(after?.updatedAt).toBe('2026-05-18T10:00:00.000Z')
+    // The run did not abort — only the rate-limit path aborts.
+    expect(result.aborted).toBeUndefined()
+  })
+
+  // Non-transient errors take the same leave-open branch as transient ones;
+  // `isTransientModelError` only changes the log label, not the outcome. We
+  // exercise the `else` branch explicitly and pin the same untouched contract.
+  it('leaves findings "open" on a non-transient engine error', async () => {
+    await writeFeatureFile('feat-a')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-a' }))
+    mocks.revalidateFeatureGroupWithAgent.mockRejectedValue(
+      new Error('unexpected parser blowup'),
+    )
+
+    await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: baseCli,
+    })
+
+    const after = await readFinding(tmp, 'fid-a')
+    expect(after?.status).toBe('open')
+    expect(after?.revalidationVerdict).toBeUndefined()
+    expect(after?.lastRevalidatedAt).toBeUndefined()
+    expect(after?.revalidationRunId).toBeUndefined()
+    expect(after?.updatedAt).toBe('2026-05-18T10:00:00.000Z')
+  })
+
+  it('records left-open findings in run history under findingsLeftOpen, excluded from findingsRevalidated', async () => {
+    await writeFeatureFile('feat-a')
+    // fid-a gets a real verdict; fid-b is omitted (left open).
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-a' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-b' }))
+    mocks.revalidateFeatureGroupWithAgent.mockResolvedValue(
+      buildResult({ 'fid-a': 'fixed' }),
+    )
+
+    await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: baseCli,
+    })
+
+    const historyPath = join(stateDir(tmp), 'run-history.jsonl')
+    const entry = JSON.parse((await readFile(historyPath, 'utf-8')).trim())
+    expect(entry.findingsRevalidated).toBe(1) // only fid-a was actually checked
+    expect(entry.findingsClosed).toBe(1)
+    expect(entry.findingsLeftOpen).toBe(1) // fid-b
+    expect(entry.findingsUncertain).toBe(0)
+    expect(entry.findingsStillPresent).toBe(0)
+    // leftOpen is excluded from revalidated; together they cover both open findings.
+    expect(entry.findingsRevalidated + entry.findingsLeftOpen).toBe(2)
+  })
+})
+
+describe('runRevalidate — --retry-uncertain scope widening', () => {
+  it('by default does NOT re-check uncertain findings', async () => {
+    await writeFeatureFile('feat-a')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-unc', status: 'uncertain' }))
+    mocks.revalidateFeatureGroupWithAgent.mockResolvedValue(
+      buildResult({ 'fid-unc': 'fixed' }),
+    )
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: baseCli, // retryUncertain: false
+    })
+
+    // Uncertain is out of scope: engine never called, finding untouched.
+    expect(mocks.revalidateFeatureGroupWithAgent).not.toHaveBeenCalled()
+    expect(result.featuresReviewed).toBe(0)
+    // The finding is still counted on disk — this distinguishes "excluded from
+    // scope" from the "nothing on disk at all" early-exit (which also returns 0).
+    expect(result.findingsOnDisk).toBe(1)
+    const after = await readFinding(tmp, 'fid-unc')
+    expect(after?.status).toBe('uncertain')
+    expect(after?.revalidationVerdict).toBeUndefined()
+  })
+
+  it('re-checks uncertain findings when --retry-uncertain is set, alongside open ones', async () => {
+    await writeFeatureFile('feat-a')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-unc', status: 'uncertain' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-open', status: 'open' }))
+    // The stranded uncertain finding is now fixed; the open one is still present.
+    mocks.revalidateFeatureGroupWithAgent.mockResolvedValue(
+      buildResult({ 'fid-unc': 'fixed', 'fid-open': 'still-present' }),
+    )
+
+    const result = await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, retryUncertain: true },
+    })
+
+    expect(result.featuresReviewed).toBe(1)
+    // Both findings entered the same (feature, persona) group in one call.
+    const calls = mocks.revalidateFeatureGroupWithAgent.mock.calls
+    expect(calls).toHaveLength(1)
+    expect((calls[0][0].openFindings as RepoFindingRecord[]).map((r) => r.findingId).sort()).toEqual(
+      ['fid-open', 'fid-unc'],
+    )
+
+    const unc = await readFinding(tmp, 'fid-unc')
+    const open = await readFinding(tmp, 'fid-open')
+    // The stranded finding got a real verdict and left uncertain limbo.
+    expect(unc?.status).toBe('fixed')
+    expect(unc?.revalidationVerdict).toBe('fixed')
+    expect(unc?.lastRevalidatedAt).toBeDefined()
+    expect(open?.status).toBe('open')
+    expect(open?.revalidationVerdict).toBe('still-present')
+  })
+
+  it('groups uncertain and open findings purely by (feature, persona), independent of status', async () => {
+    // The uncertain and open findings live in DIFFERENT features so a
+    // regression that folds status into the grouping key would surface as the
+    // wrong call count / membership.
+    await writeFeatureFile('feat-open')
+    await writeFeatureFile('feat-unc')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-open', featureId: 'feat-open', status: 'open' }))
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-unc', featureId: 'feat-unc', status: 'uncertain' }))
+    mocks.revalidateFeatureGroupWithAgent.mockImplementation(async ({ openFindings }) =>
+      buildResult(Object.fromEntries(openFindings.map((r: RepoFindingRecord) => [r.findingId, 'fixed' as const]))),
+    )
+
+    await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, retryUncertain: true },
+    })
+
+    // Two distinct features → two calls, one finding each (status is not a key).
+    const seen = mocks.revalidateFeatureGroupWithAgent.mock.calls
+      .map((c) => (c[0] as { feature: { featureId: string }; openFindings: RepoFindingRecord[] }))
+      .map((a) => ({ feature: a.feature.featureId, ids: a.openFindings.map((r) => r.findingId) }))
+      .sort((x, y) => x.feature.localeCompare(y.feature))
+    expect(seen).toEqual([
+      { feature: 'feat-open', ids: ['fid-open'] },
+      { feature: 'feat-unc', ids: ['fid-unc'] },
+    ])
+    expect((await readFinding(tmp, 'fid-unc'))?.status).toBe('fixed')
+    expect((await readFinding(tmp, 'fid-open'))?.status).toBe('fixed')
+  })
+
+  it('with --retry-uncertain, a re-checked uncertain finding stays uncertain (untouched) when the check fails', async () => {
+    await writeFeatureFile('feat-a')
+    await writeFinding(tmp, makeRecord({ findingId: 'fid-unc', status: 'uncertain' }))
+    mocks.revalidateFeatureGroupWithAgent.mockRejectedValue(
+      new Error('503 service unavailable, please retry'),
+    )
+
+    await runRevalidate({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, retryUncertain: true },
+    })
+
+    // Failed check must not downgrade or fabricate — the record is untouched,
+    // so the NEXT --retry-uncertain run picks it up again.
+    const after = await readFinding(tmp, 'fid-unc')
+    expect(after?.status).toBe('uncertain')
+    expect(after?.revalidationVerdict).toBeUndefined()
+    expect(after?.lastRevalidatedAt).toBeUndefined()
+    expect(after?.updatedAt).toBe('2026-05-18T10:00:00.000Z')
   })
 })
 
@@ -633,6 +833,14 @@ describe('runRevalidate — rate-limit abort', () => {
     const b1 = await readFinding(tmp, 'b1')
     expect(b1?.status).toBe('open')
     expect(b1?.revalidationVerdict).toBeUndefined()
+
+    // The rate-limited group's findings are counted as left-open in run
+    // history, so an aborted run does not under-report them.
+    const historyPath = join(stateDir(tmp), 'run-history.jsonl')
+    const entry = JSON.parse((await readFile(historyPath, 'utf-8')).trim())
+    expect(entry.findingsRevalidated).toBe(1) // a1
+    expect(entry.findingsClosed).toBe(1) // a1 → fixed
+    expect(entry.findingsLeftOpen).toBe(1) // b1, rate-limited
   })
 })
 
@@ -660,6 +868,7 @@ describe('runRevalidate — run history', () => {
     expect(entry.findingsClosed).toBe(1)
     expect(entry.findingsUncertain).toBe(1)
     expect(entry.findingsStillPresent).toBe(1)
+    expect(entry.findingsLeftOpen).toBe(0) // every finding got a real verdict
     expect(entry.findingsEmitted).toBe(0) // revalidation never emits new findings
     // The verdict decomposition must sum to revalidated — guards against
     // a future regression where a new verdict type is added but the
@@ -667,6 +876,8 @@ describe('runRevalidate — run history', () => {
     expect(
       entry.findingsClosed + entry.findingsUncertain + entry.findingsStillPresent,
     ).toBe(entry.findingsRevalidated)
+    // leftOpen is genuinely excluded from revalidated, not folded into it.
+    expect(entry.findingsRevalidated + (entry.findingsLeftOpen ?? 0)).toBe(3)
   })
 })
 

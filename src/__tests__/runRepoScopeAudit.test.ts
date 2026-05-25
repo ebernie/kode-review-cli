@@ -90,6 +90,7 @@ const BASE_CLI: CliOptions = {
   remap: false,
   jobs: 1,
   revalidate: false,
+  retryUncertain: false,
   clawpatchCompat: false,
 }
 

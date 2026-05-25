@@ -100,6 +100,7 @@ const baseCli: CliOptions = {
   reportOnly: false,
   listFindings: false,
   revalidate: false,
+  retryUncertain: false,
   clawpatchCompat: false,
 }
 

@@ -268,6 +268,10 @@ export interface RunHistoryEntry {
   /** Findings whose verdict was `'still-present'` — counted separately so
    * `closed + uncertain + stillPresent === revalidated`. */
   findingsStillPresent?: number
+  /** Open findings whose check failed or came back incomplete (engine error,
+   * unparseable block, omitted verdict). Left `'open'` and untouched for a
+   * later retry — NOT counted in `findingsRevalidated`. */
+  findingsLeftOpen?: number
 }
 
 export async function appendRunHistory(

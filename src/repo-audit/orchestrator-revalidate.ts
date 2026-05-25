@@ -1,12 +1,15 @@
 /**
  * Orchestrator for `--scope repo --revalidate`.
  *
- * Re-checks each existing `status === 'open'` finding under
- * `.kode-review/findings/` against the current code and updates the record's
- * lifecycle fields in place. Does NOT produce new findings.
+ * Re-checks each existing `status === 'open'` finding (plus `'uncertain'` ones
+ * when `--retry-uncertain` is set) under `.kode-review/findings/` against the
+ * current code and updates the record's lifecycle fields in place. Does NOT
+ * produce new findings.
  *
  * Flow:
- *   1. Load all findings; filter to `status === 'open'`.
+ *   1. Load all findings; filter to `status === 'open'` — and, with
+ *      `--retry-uncertain`, also `status === 'uncertain'` (e.g. findings
+ *      stranded by an earlier connection error).
  *   2. Optionally filter by `--since <ref>` (feature-level) and
  *      `--reviewers <names>` (per-record persona).
  *   3. Group by `(featureId, persona)`. For each group:
@@ -14,11 +17,21 @@
  *        - If the persona is no longer registered, verdict all of the group
  *          as `'uncertain'` with a synthetic note; do not crash.
  *        - Otherwise call `revalidateFeatureGroupWithAgent` and apply the
- *          verdicts. Missing or hallucinated verdicts default to
- *          `'uncertain'` so users can never mistake "not checked" for
- *          "still open".
+ *          verdicts the agent actually rendered (including an explicit
+ *          `'uncertain'`, which is a real "I looked and can't tell").
  *        - Persist each updated record via `writeFinding` immediately so
  *          partial progress survives a mid-run abort (rate limit, crash).
+ *
+ * `'uncertain'` vs. "leave open": `'uncertain'` is reserved for situations
+ * where re-checking genuinely cannot help — the feature is gone from
+ * clawpatch's map, the persona is no longer registered, or the agent looked
+ * and explicitly couldn't decide. A *transient or incomplete check* (engine
+ * error, unparseable block, a finding the agent silently dropped) is NOT an
+ * observation about the code: those findings are left `'open'` and untouched
+ * so a later `--revalidate` retries them naturally. Flipping them to
+ * `'uncertain'` would be wrong twice over — it fabricates a verdict the agent
+ * never made, and the revalidate scan (which only picks up `status === 'open'`)
+ * would then skip them forever.
  *   4. Append a `RunHistoryEntry` with `mode: 'revalidate'` and counters.
  *
  * Immutable across revalidation: `createdAt`, `createdByRunId`, `persona`,
@@ -54,12 +67,19 @@ export async function runRevalidate(
 ): Promise<RunRepoAuditResult> {
   const { cli, repoRoot } = opts
 
-  // 1. Load all findings and isolate the open ones.
+  // 1. Load all findings and isolate the ones to re-check. By default that is
+  // just `open`; with --retry-uncertain we also re-check `uncertain` findings
+  // (e.g. ones stranded by an earlier connection error) so a real verdict can
+  // replace the "couldn't tell" state.
   const allRecords = await listFindings(repoRoot)
-  const openRecords = allRecords.filter((r) => r.status === 'open')
+  const checkUncertain = cli.retryUncertain
+  const unresolvedRecords = allRecords.filter(
+    (r) => r.status === 'open' || (checkUncertain && r.status === 'uncertain'),
+  )
 
-  if (openRecords.length === 0) {
-    logger.success(green('No open findings on disk. Nothing to revalidate.'))
+  if (unresolvedRecords.length === 0) {
+    const scopeNote = checkUncertain ? 'open or uncertain findings' : 'open findings'
+    logger.success(green(`No ${scopeNote} on disk. Nothing to revalidate.`))
     return {
       featuresReviewed: 0,
       featuresSkipped: 0,
@@ -76,7 +96,7 @@ export async function runRevalidate(
   let scopedFeatureIds: Set<string> | null = null
   if (cli.since !== undefined) {
     const readResult = await readFeatures(repoRoot)
-    const candidateIds = new Set(openRecords.map((r) => r.featureId))
+    const candidateIds = new Set(unresolvedRecords.map((r) => r.featureId))
     const relevantFeatures: FeatureRecord[] = readResult.features.filter((f) =>
       candidateIds.has(f.featureId),
     )
@@ -97,7 +117,7 @@ export async function runRevalidate(
   const reviewerSet = reviewerOverride === null ? null : new Set(reviewerOverride)
 
   // Apply both filters and group.
-  const inScope = openRecords.filter((r) => {
+  const inScope = unresolvedRecords.filter((r) => {
     if (scopedFeatureIds !== null && !scopedFeatureIds.has(r.featureId)) return false
     if (reviewerSet !== null && !reviewerSet.has(r.persona)) return false
     return true
@@ -106,7 +126,7 @@ export async function runRevalidate(
   if (inScope.length === 0) {
     logger.info(
       yellow(
-        `0 of ${openRecords.length} open finding(s) match the supplied filters; nothing to revalidate.`,
+        `0 of ${unresolvedRecords.length} finding(s) match the supplied filters; nothing to revalidate.`,
       ),
     )
     return {
@@ -131,6 +151,9 @@ export async function runRevalidate(
   let closed = 0
   let uncertainCount = 0
   let stillPresent = 0
+  // Open findings whose check failed or came back incomplete this run. They
+  // are left untouched on disk so the next --revalidate retries them.
+  let leftOpen = 0
   let featuresTouched = 0
   let abortLoop: { reason: string } | null = null
 
@@ -219,62 +242,63 @@ export async function runRevalidate(
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (isRateLimitError(err)) {
+            // This group was attempted and failed; its findings stay 'open'
+            // (unpersisted) for retry, so count them as left-open before we
+            // abort — otherwise the run-history entry under-reports them.
+            leftOpen += group.findings.length
             logger.error(
               `  ${group.persona}: rate limit hit — aborting the run. Already-written records are preserved. (${msg})`,
             )
             abortLoop = { reason: msg }
             break outer
           }
-          if (isTransientModelError(err)) {
-            logger.warn(
-              `  ${group.persona}: transient model error — marking findings as 'uncertain'. (${msg})`,
-            )
-          } else {
-            logger.warn(
-              `  ${group.persona}: error — marking findings as 'uncertain'. (${msg})`,
-            )
-          }
-          for (const record of group.findings) {
-            await persistVerdict(repoRoot, record, 'uncertain', runId, {
-              agentEvidence: `revalidation engine error: ${msg}`,
-            })
-            revalidated += 1
-            uncertainCount += 1
-          }
+          // An engine failure is a failed check, not an observation about the
+          // code. Leave the group's findings 'open' (untouched) so a later
+          // --revalidate retries them; never flip to 'uncertain', which the
+          // revalidate scan would then skip forever.
+          const kind = isTransientModelError(err) ? 'transient model error' : 'error'
+          logger.warn(
+            `  ${group.persona}: ${kind} — leaving ${group.findings.length} finding(s) untouched for retry. (${msg})`,
+          )
+          leftOpen += group.findings.length
           continue
         }
 
         if (!result.blockParsed) {
           logger.warn(
-            `  ${group.persona}: agent did not emit a parseable kode-revalidations block (${result.blockError ?? 'unknown'}) — marking findings as 'uncertain'.`,
+            `  ${group.persona}: agent did not emit a parseable kode-revalidations block (${result.blockError ?? 'unknown'}) — leaving findings untouched for retry.`,
           )
         }
 
-        // Apply verdicts. Findings without an emitted verdict default to
-        // 'uncertain' — never assume "not checked" means "still open".
+        // Apply only the verdicts the agent actually rendered. A finding with
+        // no emitted verdict was not checked (unparseable block, or the agent
+        // silently dropped it), so we leave it 'open' and untouched — a later
+        // --revalidate retries it. An explicit 'uncertain' verdict is honored:
+        // that is the agent reporting "I looked and can't tell", not a failed
+        // check.
         let missingCount = 0
         for (const record of group.findings) {
           const verdictEntry = result.verdicts.get(record.findingId)
-          let verdict: RevalidationVerdict
-          let evidence: string | undefined
           if (verdictEntry === undefined) {
-            verdict = 'uncertain'
-            evidence = 'agent did not emit a verdict for this finding'
             missingCount += 1
-          } else {
-            verdict = verdictEntry.verdict
-            evidence = verdictEntry.evidence
+            leftOpen += 1
+            continue
           }
-          await persistVerdict(repoRoot, record, verdict, runId, { agentEvidence: evidence })
+          const verdict = verdictEntry.verdict
+          await persistVerdict(repoRoot, record, verdict, runId, {
+            agentEvidence: verdictEntry.evidence,
+          })
           revalidated += 1
           if (verdict === 'fixed') closed += 1
           else if (verdict === 'uncertain') uncertainCount += 1
           else if (verdict === 'still-present') stillPresent += 1
         }
 
+        // Only warn about omissions when the block parsed — an unparseable
+        // block already logged above, and every finding would be "missing".
         if (missingCount > 0 && result.blockParsed) {
           logger.warn(
-            `  ${group.persona}: agent omitted ${missingCount} verdict(s); defaulted to 'uncertain'.`,
+            `  ${group.persona}: agent omitted ${missingCount} verdict(s); left untouched for retry.`,
           )
         }
 
@@ -299,6 +323,7 @@ export async function runRevalidate(
     findingsClosed: closed,
     findingsUncertain: uncertainCount,
     findingsStillPresent: stillPresent,
+    findingsLeftOpen: leftOpen,
     model: cli.model,
     since: cli.since,
   })
@@ -316,9 +341,10 @@ export async function runRevalidate(
     }
   }
 
+  const leftOpenSuffix = leftOpen > 0 ? `, ${leftOpen} left for retry` : ''
   logger.success(
     green(
-      `Revalidation complete: ${revalidated} checked, ${closed} now fixed, ${uncertainCount} uncertain.`,
+      `Revalidation complete: ${revalidated} checked, ${closed} now fixed, ${uncertainCount} uncertain${leftOpenSuffix}.`,
     ),
   )
 

@@ -130,6 +130,8 @@ export interface CliOptions {
   since?: string
   reportOnly: boolean
   revalidate: boolean
+  /** With --revalidate: also re-check `uncertain` findings, not just `open` ones. */
+  retryUncertain: boolean
   clawpatchCompat: boolean
 
   // Findings inspection
@@ -234,6 +236,7 @@ export function createProgram(): Command {
     .option('--since <ref>', 'Repo-scope: only review features whose owned files changed since <ref>')
     .option('--report-only', 'Repo-scope: skip review; render findings already on disk', false)
     .option('--revalidate', 'Repo-scope: re-check open findings against current code', false)
+    .option('--retry-uncertain', "With --revalidate: also re-check 'uncertain' findings (e.g. ones stranded by an earlier connection error), not just 'open' ones", false)
     .option('--clawpatch-compat', 'Repo-scope: mirror findings into .clawpatch/findings/ in clawpatch schema', false)
     .option('--list-findings', 'Print persisted repo-audit findings (from .kode-review/findings/) and exit. Honors --format and the --severity/--status filters below.', false)
     .option('--severity <levels>', 'Filter --list-findings by severity: comma-separated subset of critical,high,medium,low')
@@ -443,6 +446,11 @@ export function parseArgs(argv: string[]): CliOptions {
   if (opts.revalidate && opts.watch) {
     throw new Error(`--revalidate cannot be combined with --watch. --revalidate re-checks persisted repo-audit findings; --watch monitors PR/MR diffs.`)
   }
+  // --retry-uncertain only widens the --revalidate scope; on its own it has no
+  // effect, so reject it rather than silently ignoring it.
+  if (opts.retryUncertain && !opts.revalidate) {
+    throw new Error(`--retry-uncertain only applies with --revalidate (it adds 'uncertain' findings to the re-check set). Add --revalidate, or drop --retry-uncertain.`)
+  }
   // `scope` stays typed `ReviewScope | undefined` to match the returned field;
   // the `undefined` arm is defensive (Commander defaults --scope to 'auto', so
   // it is not reachable today) and future-proofs against that default changing.
@@ -502,6 +510,7 @@ export function parseArgs(argv: string[]): CliOptions {
     since: opts.since,
     reportOnly: opts.reportOnly ?? false,
     revalidate: opts.revalidate ?? false,
+    retryUncertain: opts.retryUncertain ?? false,
     clawpatchCompat: opts.clawpatchCompat ?? false,
     listFindings: opts.listFindings ?? false,
     findingsSeverity,

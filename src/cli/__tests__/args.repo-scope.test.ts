@@ -61,6 +61,23 @@ describe('parseArgs: --scope repo', () => {
     expect(opts.reportOnly).toBe(false)
   })
 
+  it('--retry-uncertain defaults to false when only --revalidate is passed', () => {
+    const off = parseArgs(args('--scope', 'repo', '--revalidate'))
+    expect(off.retryUncertain).toBe(false)
+  })
+
+  it('--retry-uncertain toggles to true when passed with --revalidate (and does not displace --revalidate)', () => {
+    const on = parseArgs(args('--scope', 'repo', '--revalidate', '--retry-uncertain'))
+    expect(on.retryUncertain).toBe(true)
+    expect(on.revalidate).toBe(true)
+  })
+
+  it('refuses --retry-uncertain without --revalidate (it only widens the revalidate scope)', () => {
+    expect(() => parseArgs(args('--scope', 'repo', '--retry-uncertain'))).toThrow(
+      /--retry-uncertain only applies with --revalidate/,
+    )
+  })
+
   it('--remap and --clawpatch-compat are off by default', () => {
     const opts = parseArgs(args('--scope', 'repo'))
     expect(opts.remap).toBe(false)
