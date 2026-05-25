@@ -24,3 +24,10 @@ export {
   getCategoryLabel,
   type ErrorCategory,
 } from './errors.js'
+
+// Bounded async worker pool
+export {
+  runPool,
+  type PoolHandle,
+  type PoolOutcome,
+} from './concurrency.js'
