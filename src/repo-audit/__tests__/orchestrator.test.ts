@@ -524,6 +524,46 @@ describe('runRepoAudit — --revalidate', () => {
   })
 })
 
+describe('runRepoAudit — concurrency', () => {
+  it('reviews features in parallel up to --jobs (no deadlock)', async () => {
+    // Three pending features, each dispatching only the general persona
+    // (kind 'unknown'), so reviewFeatureWithAgent is called once per feature.
+    await writeFeatureFile('feat-1')
+    await writeFeatureFile('feat-2')
+    await writeFeatureFile('feat-3')
+
+    // Barrier: each invocation parks until all `jobs` invocations are
+    // simultaneously in-flight, then they all release together. A sequential
+    // implementation can never get 3 in-flight at once → the barrier never
+    // releases → the test times out (which is the failure signal). A correct
+    // parallel implementation releases instantly.
+    const jobs = 3
+    let active = 0
+    let maxActive = 0
+    const waiters: Array<() => void> = []
+    mocks.reviewFeatureWithAgent.mockImplementation(async () => {
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise<void>((resolve) => {
+        waiters.push(resolve)
+        if (waiters.length >= jobs) waiters.forEach((w) => w())
+      })
+      active--
+      return { findings: [], truncated: false }
+    })
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'https://x.test/r.git',
+      cli: { ...baseCli, scope: 'repo', jobs: 3 },
+    })
+
+    expect(maxActive).toBe(3)
+    expect(result.featuresReviewed).toBe(3)
+    expect(result.featuresSkipped).toBe(0)
+  })
+})
+
 describe('runRepoAudit — edge cases', () => {
   it('returns zero counts when clawpatch maps no features', async () => {
     // No feature files written.
@@ -636,48 +676,123 @@ describe('runRepoAudit — edge cases', () => {
     expect(result.aborted).toBeFalsy()
   })
 
-  it('breaks the loop on a rate-limit error and reports aborted=true', async () => {
-    // Two features, each dispatching 3 personas (general/architect/security).
-    await writeFeatureFile('feat-x', {
-      kind: 'service',
-      trustBoundaries: ['user-input'],
-    })
-    await writeFeatureFile('feat-y', {
-      kind: 'service',
-      trustBoundaries: ['user-input'],
-    })
+  it('stops new work on a rate-limit error and reports aborted=true', async () => {
+    // Two single-persona features (kind 'unknown' → general only). Key the
+    // outcome on feature identity, not invocation order: with the worker pool
+    // feat-x and feat-y may be reviewed concurrently, so we cannot assume which
+    // engine call lands first. feat-x succeeds (emits a finding so we can prove
+    // partial progress survives); feat-y rate-limits.
+    await writeFeatureFile('feat-x')
+    await writeFeatureFile('feat-y')
 
-    let call = 0
-    mocks.reviewFeatureWithAgent.mockImplementation(async ({ persona }) => {
-      call += 1
-      if (call === 1) {
-        return {
-          feature: undefined,
-          persona,
-          findings: [],
-          content: '',
-          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
-          truncated: false,
-        }
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ feature, persona }) => {
+      if (feature.featureId === 'feat-y') {
+        throw new Error(
+          'Model returned an error: You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.',
+        )
       }
-      throw new Error(
-        'Model returned an error: You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.',
-      )
+      return {
+        feature,
+        persona,
+        findings: [
+          {
+            severity: 'LOW',
+            category: 'maintainability',
+            confidence: 'HIGH',
+            title: 'tidy',
+            file: 'src/foo.ts',
+            lineStart: 1,
+            lineEnd: 1,
+            evidence: 'foo',
+            problem: 'p',
+            recommendation: 'r',
+          },
+        ],
+        content: '',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+        truncated: false,
+      }
     })
 
     const result = await runRepoAudit({
       repoRoot: tmp,
       repoUrl: 'git@example.com:o/r.git',
-      cli: { ...baseCli },
+      cli: { ...baseCli, jobs: 2 },
     })
 
-    // Loop broke after the rate-limit fired on the second persona of feat-x —
-    // exactly 2 calls (success + rate-limit) and exactly 1 feature touched.
-    // Tight equality catches any regression that delays the break.
-    expect(call).toBe(2)
     expect(result.aborted).toBe(true)
     expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
-    expect(result.featuresReviewed).toBe(1)
+    // feat-x's finding was persisted before the abort — partial progress
+    // survives even though feat-y rate-limited.
+    const onDisk = await listFindings(tmp)
+    expect(onDisk.map((r) => r.featureId)).toContain('feat-x')
+    expect(result.findingsEmitted).toBe(1)
+  })
+
+  it('stops dispatching remaining personas of an in-flight feature once a peer hits a rate limit', async () => {
+    // feat-multi is a multi-persona feature (service + user-input → general,
+    // architect, security). feat-rl rate-limits on its sole persona. With
+    // jobs=2 both are dequeued together. We hold feat-multi's FIRST persona
+    // (general) in-flight until feat-rl has rate-limited and called
+    // requestStop(); after general resolves, the persona loop must observe
+    // handle.stopRequested and skip architect + security rather than keep
+    // hammering an already-rate-limited provider.
+    // Ordering invariant: readFeatures sorts by featureId, and
+    // 'feat-multi' < 'feat-rl' alphabetically, so feat-multi is dispatched to
+    // lane 0 and feat-rl to lane 1 under jobs:2. The barrier relies on both
+    // running concurrently; renaming so the sort reverses would break it.
+    await writeFeatureFile('feat-multi', { kind: 'service', trustBoundaries: ['user-input'] })
+    await writeFeatureFile('feat-rl')
+
+    let releaseGeneral: (() => void) | null = null
+    const generalParked = new Promise<void>((resolve) => {
+      releaseGeneral = resolve
+    })
+    let rlHappened: (() => void) | null = null
+    const rlDone = new Promise<void>((resolve) => {
+      rlHappened = resolve
+    })
+    const personasCalledForMulti: string[] = []
+
+    mocks.reviewFeatureWithAgent.mockImplementation(async ({ feature, persona }) => {
+      if (feature.featureId === 'feat-rl') {
+        rlHappened?.()
+        throw new Error(
+          'Model returned an error: You have hit your ChatGPT usage limit (plus plan). Try again in ~10 min.',
+        )
+      }
+      // feat-multi
+      personasCalledForMulti.push(persona.name)
+      if (persona.name === 'general') {
+        // Park until the peer feature has rate-limited and set the stop flag.
+        await rlDone
+        await generalParked
+      }
+      return {
+        feature,
+        persona,
+        findings: [],
+        content: '',
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUsd: 0 },
+        truncated: false,
+      }
+    })
+
+    // Once the rate limit has fired (stop requested), release feat-multi's
+    // general persona so the worker proceeds to its between-persona check.
+    void rlDone.then(() => releaseGeneral?.())
+
+    const result = await runRepoAudit({
+      repoRoot: tmp,
+      repoUrl: 'git@example.com:o/r.git',
+      cli: { ...baseCli, jobs: 2 },
+    })
+
+    expect(result.aborted).toBe(true)
+    expect(result.abortReason).toMatch(/usage limit|rate.?limit/i)
+    // general ran (it was already in flight); architect + security were
+    // skipped because the peer set stopRequested before they were dispatched.
+    expect(personasCalledForMulti).toEqual(['general'])
   })
 
   it('skips a feature when another runner already holds its lock', async () => {

@@ -2,8 +2,11 @@
  * Repo-audit orchestrator: ties together install detection, clawpatch map,
  * feature read, persona dispatch, the kode-agent engine, and state persistence.
  *
- * For v1 (walking skeleton): sequential per-feature review. The worker pool
- * + risk-prioritized order land in task #8 (runner.ts).
+ * Features are independent units of work, so the review step runs them through
+ * a bounded worker pool (`runPool`, width = `--jobs`). Each worker returns a
+ * local tally; the caller sums them. A hard rate limit cooperatively stops the
+ * pool from dequeuing new features while letting in-flight ones finish, so
+ * partial progress already written to disk is preserved.
  */
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -11,6 +14,7 @@ import { cyan, green, yellow } from '../cli/colors.js'
 import type { CliOptions } from '../cli/args.js'
 import { resolveReviewer } from '../reviewers/registry.js'
 import { logger } from '../utils/logger.js'
+import { runPool } from '../utils/concurrency.js'
 import { runClawpatchInit, runClawpatchMap } from './clawpatch-cli.js'
 import { reviewFeatureWithAgent } from './engines/kode-agent.js'
 import { isRateLimitError, isTransientModelError } from './error-classify.js'
@@ -198,131 +202,185 @@ export async function runRepoAudit(
     }
   }
 
-  // Step 5: review each pending feature.
+  // Step 5: review each pending feature. Features are independent units of
+  // work — a bounded worker pool reviews up to `--jobs` of them in parallel.
+  // Each worker accumulates into a LOCAL tally that the caller sums afterward;
+  // keeping the tally local (not shared mutable outer-scope counters) is what
+  // makes parallel feature workers safe. The worker NEVER throws — engine
+  // failures are caught and reported via the tally; a hard rate limit calls
+  // handle.requestStop() so the pool stops dequeuing new features, while
+  // partial progress already persisted to disk is preserved.
   const runId = newRunId()
   const startedAt = new Date().toISOString()
-  let totalEmitted = 0
-  let totalSuppressed = 0
-  let reviewed = 0
 
-  for (const feature of toReview) {
-    const personaNames = resolvePersonasWithOverride(feature, cli.reviewers === undefined || arraysEqual(cli.reviewers, ['general']) ? [] : cli.reviewers)
+  interface AuditTally {
+    reviewed: number
+    emitted: number
+    suppressed: number
+    abortReason?: string
+  }
 
-    // Acquire an exclusive per-feature lock so concurrent audits on the same
-    // repo don't double-spend model budget or race on the deterministic
-    // finding-file path. A held lock means another runner is already on it —
-    // skip and let that runner finish.
-    const lock = await acquireFeatureLock(repoRoot, feature.featureId, runId)
-    if (lock === null) {
-      logger.info(
-        cyan(`feature=${feature.featureId} skipped — locked by another runner`),
-      )
-      continue
-    }
-
-    logger.info(
-      cyan(`feature=${feature.featureId} personas=${personaNames.join(',')}`),
-    )
-
-    let abortLoop: { reason: string } | null = null
+  async function reviewFeature(
+    feature: (typeof toReview)[number],
+    _index: number,
+    handle: { requestStop(): void; readonly stopRequested: boolean },
+  ): Promise<AuditTally> {
+    const tally: AuditTally = { reviewed: 0, emitted: 0, suppressed: 0 }
     try {
-    for (const name of personaNames) {
-      const persona = resolveReviewer(name)
-      let result
+      const personaNames = resolvePersonasWithOverride(
+        feature,
+        cli.reviewers === undefined || arraysEqual(cli.reviewers, ['general']) ? [] : cli.reviewers,
+      )
+
+      // Acquire an exclusive per-feature lock so concurrent audits on the same
+      // repo don't double-spend model budget or race on the deterministic
+      // finding-file path. A held lock means another runner is already on it —
+      // skip and let that runner finish.
+      const lock = await acquireFeatureLock(repoRoot, feature.featureId, runId)
+      if (lock === null) {
+        logger.info(cyan(`feature=${feature.featureId} skipped — locked by another runner`))
+        return tally
+      }
+
+      logger.info(cyan(`feature=${feature.featureId} personas=${personaNames.join(',')}`))
+
       try {
-        result = await reviewFeatureWithAgent({
-          feature,
-          persona,
-          repoRoot,
-          repoUrl: opts.repoUrl,
-          branch: opts.branch,
-          indexerUrl: opts.indexerUrl,
-          model: cli.model,
-          maxIterations: cli.maxIterations,
-          timeoutSec: cli.agenticTimeout,
-        })
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        if (isRateLimitError(err)) {
-          logger.error(
-            `  ${persona.name}: rate limit hit — aborting the run. Already-written findings are preserved. (${msg})`,
-          )
-          abortLoop = { reason: msg }
-          break
+        for (let personaIndex = 0; personaIndex < personaNames.length; personaIndex++) {
+          // A peer worker may have hit a hard rate limit and called
+          // requestStop() while we were mid-feature. runPool's cooperative stop
+          // only blocks dequeuing NEW features, so we must check between
+          // personas too — otherwise we'd keep firing model calls at a provider
+          // we already know is rate-limited. We only short-circuit AFTER the
+          // first persona: a feature that was already dequeued is "in flight"
+          // and runs its first unit to completion (a stop requested by a peer
+          // before this lane began would otherwise skip the whole feature).
+          if (personaIndex > 0 && handle.stopRequested) {
+            logger.info(
+              cyan(`feature=${feature.featureId}`) +
+                ` stop requested by a peer worker — skipping remaining persona(s).`,
+            )
+            break
+          }
+
+          const name = personaNames[personaIndex]!
+          let persona
+          try {
+            persona = resolveReviewer(name)
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            logger.warn(`  ${name}: reviewer not registered — skipping this persona. (${msg})`)
+            continue
+          }
+          let result
+          try {
+            result = await reviewFeatureWithAgent({
+              feature,
+              persona,
+              repoRoot,
+              repoUrl: opts.repoUrl,
+              branch: opts.branch,
+              indexerUrl: opts.indexerUrl,
+              model: cli.model,
+              maxIterations: cli.maxIterations,
+              timeoutSec: cli.agenticTimeout,
+            })
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (isRateLimitError(err)) {
+              logger.error(
+                `  ${persona.name}: rate limit hit — stopping new work. Already-written findings are preserved. (${msg})`,
+              )
+              tally.abortReason = msg
+              handle.requestStop()
+              tally.reviewed += 1
+              return tally
+            }
+            if (isTransientModelError(err)) {
+              logger.warn(`  ${persona.name}: transient model error — skipping this persona. (${msg})`)
+            } else {
+              logger.warn(`  ${persona.name}: error — skipping this persona. (${msg})`)
+            }
+            continue
+          }
+
+          // Apply structured suppression filter (unless --no-suppressions).
+          let kept = result.findings
+          if (!cli.noSuppressions) {
+            const filtered = await filterSuppressedStructured(result.findings, repoRoot)
+            kept = filtered.kept
+            tally.suppressed += filtered.suppressedCount
+            if (filtered.suppressedCount > 0) {
+              logger.info(
+                yellow(`  Suppressed ${filtered.suppressedCount} finding(s) via kode-review: ignore markers`),
+              )
+            }
+          }
+
+          // Persist findings.
+          for (const f of kept) {
+            const findingId = computeFindingId(feature.featureId, f.file, f.lineStart, f.title)
+            const record: RepoFindingRecord = {
+              schemaVersion: 1,
+              findingId,
+              featureId: feature.featureId,
+              persona: persona.name,
+              status: 'open',
+              finding: f,
+              createdByRunId: runId,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            }
+            await writeFinding(repoRoot, record)
+            tally.emitted += 1
+          }
+
+          if (result.truncated) {
+            logger.warn(`  ${persona.name}: ${result.truncationReason ?? 'truncated'}`)
+          }
         }
-        if (isTransientModelError(err)) {
-          logger.warn(`  ${persona.name}: transient model error — skipping this persona. (${msg})`)
-        } else {
-          logger.warn(`  ${persona.name}: error — skipping this persona. (${msg})`)
-        }
-        continue
+      } finally {
+        await releaseFeatureLock(repoRoot, feature.featureId)
       }
 
-      // Apply structured suppression filter (unless --no-suppressions).
-      let kept = result.findings
-      let suppressedThisRun = 0
-      if (!cli.noSuppressions) {
-        const filtered = await filterSuppressedStructured(result.findings, repoRoot)
-        kept = filtered.kept
-        suppressedThisRun = filtered.suppressedCount
-        totalSuppressed += suppressedThisRun
-        if (suppressedThisRun > 0) {
-          logger.info(yellow(`  Suppressed ${suppressedThisRun} finding(s) via kode-review: ignore markers`))
-        }
-      }
-
-      // Persist findings.
-      for (const f of kept) {
-        const findingId = computeFindingId(feature.featureId, f.file, f.lineStart, f.title)
-        const record: RepoFindingRecord = {
-          schemaVersion: 1,
-          findingId,
-          featureId: feature.featureId,
-          persona: persona.name,
-          status: 'open',
-          finding: f,
-          createdByRunId: runId,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }
-        await writeFinding(repoRoot, record)
-        totalEmitted += 1
-      }
-
-      if (result.truncated) {
-        logger.warn(`  ${persona.name}: ${result.truncationReason ?? 'truncated'}`)
-      }
-    }
-    } finally {
-      await releaseFeatureLock(repoRoot, feature.featureId)
-    }
-
-    reviewed += 1
-    if (abortLoop) {
-      // Record what we accomplished and propagate aborted=true to the caller.
-      await appendRunHistory(repoRoot, {
-        runId,
-        startedAt,
-        endedAt: new Date().toISOString(),
-        engine: 'kode-agent',
-        featuresReviewed: reviewed,
-        findingsEmitted: totalEmitted,
-        model: cli.model,
-        since: cli.since,
-      })
-      return {
-        featuresReviewed: reviewed,
-        featuresSkipped: skipped,
-        findingsEmitted: totalEmitted,
-        findingsSuppressed: totalSuppressed,
-        findingsOnDisk: (await listFindings(repoRoot)).length,
-        aborted: true,
-        abortReason: abortLoop.reason,
-      }
+      tally.reviewed += 1
+      return tally
+    } catch (err) {
+      // The worker must never throw — runPool would otherwise reject and skip
+      // run-history. An unexpected error (e.g. disk I/O in writeFinding, or a
+      // lock-acquire failure) is treated like a hard stop. The inner finally
+      // has already released the lock if held.
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(
+        cyan(`feature=${feature.featureId}`) +
+          ` — unexpected error; stopping new work. (${msg})`,
+      )
+      tally.abortReason = msg
+      handle.requestStop()
+      return tally
     }
   }
 
-  // Record run history.
+  const concurrency = Math.max(1, cli.jobs)
+  const outcome = await runPool(toReview, concurrency, reviewFeature)
+
+  // Sum the per-feature tallies. The first feature to hit a hard rate limit
+  // wins the abort reason; the pool stopped dequeuing new features once it did.
+  let totalEmitted = 0
+  let totalSuppressed = 0
+  let reviewed = 0
+  let abortReason: string | null = null
+  for (const t of outcome.results) {
+    totalEmitted += t.emitted
+    totalSuppressed += t.suppressed
+    reviewed += t.reviewed
+    if (t.abortReason && abortReason === null) abortReason = t.abortReason
+  }
+  // Belt-and-suspenders: if the pool was stopped but no worker recorded a
+  // reason, still surface the abort rather than silently returning success.
+  if (outcome.stopped && abortReason === null) {
+    abortReason = 'audit stopped early (no reason recorded)'
+  }
+
   await appendRunHistory(repoRoot, {
     runId,
     startedAt,
@@ -340,6 +398,7 @@ export async function runRepoAudit(
     findingsEmitted: totalEmitted,
     findingsSuppressed: totalSuppressed,
     findingsOnDisk: (await listFindings(repoRoot)).length,
+    ...(abortReason !== null ? { aborted: true, abortReason } : {}),
   }
 }
 
