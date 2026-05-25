@@ -28,9 +28,9 @@ describe('parseArgs: --scope repo', () => {
     expect(() => parseArgs(args('--scope', 'repo', '--engine', 'gpt-fast'))).toThrow(/Invalid --engine/)
   })
 
-  it('--jobs defaults to 4', () => {
+  it('--jobs defaults to 2', () => {
     const opts = parseArgs(args('--scope', 'repo'))
-    expect(opts.jobs).toBe(4)
+    expect(opts.jobs).toBe(2)
   })
 
   it('--jobs accepts an explicit integer in range', () => {

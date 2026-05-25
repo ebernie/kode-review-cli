@@ -232,7 +232,7 @@ export function createProgram(): Command {
   program
     .option('--engine <name>', 'Repo-audit engine: kode-agent (default) or clawpatch', 'kode-agent')
     .option('--remap', 'Force clawpatch to re-detect features (pass --force to clawpatch map)', false)
-    .option('--jobs <n>', 'Worker concurrency for repo-scope reviews (default: 4)', '4')
+    .option('--jobs <n>', 'Worker concurrency for repo-scope reviews — features reviewed in parallel (default: 2)', '2')
     .option('--since <ref>', 'Repo-scope: only review features whose owned files changed since <ref>')
     .option('--report-only', 'Repo-scope: skip review; render findings already on disk', false)
     .option('--revalidate', 'Repo-scope: re-check open findings against current code', false)
@@ -367,7 +367,7 @@ export function parseArgs(argv: string[]): CliOptions {
   }
   const engine = engineRaw as RepoEngine
 
-  const jobsRaw = opts.jobs ?? '4'
+  const jobsRaw = opts.jobs ?? '2'
   const jobs = parseInt(jobsRaw, 10)
   if (isNaN(jobs) || jobs < 1 || jobs > 32) {
     throw new Error(`Invalid --jobs: "${jobsRaw}". Must be a number between 1 and 32.`)
