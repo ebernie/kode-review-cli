@@ -207,7 +207,9 @@ export function buildAgenticPrompt(options: AgenticPromptOptions): string {
   if (options.projectStructureContext) {
     parts.push('## Project Structure')
     parts.push('')
+    parts.push('<project_structure untrusted="true">')
     parts.push(sanitizeXmlContent(options.projectStructureContext, 'project_structure'))
+    parts.push('</project_structure>')
     parts.push('')
   }
 

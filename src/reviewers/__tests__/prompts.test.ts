@@ -235,19 +235,33 @@ describe('buildReviewerUserPrompt — untrusted="true" on external-data wrappers
     )
   })
 
+  it('wraps project_structure in <project_structure untrusted="true"> when supplied', () => {
+    const out = buildReviewerUserPrompt({
+      context: 'ctx',
+      diffContent: 'd',
+      projectStructureContext: 'PROJECT-STRUCTURE-PAYLOAD',
+    })
+    expect(out).toMatch(
+      /<project_structure untrusted="true">\nPROJECT-STRUCTURE-PAYLOAD\n<\/project_structure>/,
+    )
+  })
+
   it('closing tags stay bare (attribute only on the opening tag)', () => {
     const out = buildReviewerUserPrompt({
       context: 'ctx',
       diffContent: 'd',
       prMrInfo: '{"x":1}',
       prDescriptionSummary: 'i',
+      projectStructureContext: 'src/\n  a.ts',
     })
     expect(out).toContain('</diff_content>')
     expect(out).toContain('</pr_mr_info>')
     expect(out).toContain('</author_intent>')
+    expect(out).toContain('</project_structure>')
     expect(out).not.toContain('</diff_content untrusted')
     expect(out).not.toContain('</pr_mr_info untrusted')
     expect(out).not.toContain('</author_intent untrusted')
+    expect(out).not.toContain('</project_structure untrusted')
   })
 })
 

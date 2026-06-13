@@ -104,7 +104,7 @@ export function buildReviewerUserPrompt(data: ReviewData): string {
   if (data.projectStructureContext) {
     parts.push('## Project Structure')
     parts.push('')
-    parts.push('<project_structure>')
+    parts.push('<project_structure untrusted="true">')
     parts.push(sanitizeXmlContent(data.projectStructureContext, 'project_structure'))
     parts.push('</project_structure>')
     parts.push('')

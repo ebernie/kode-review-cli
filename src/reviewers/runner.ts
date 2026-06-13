@@ -14,6 +14,7 @@ import {
   type ReviewOptions,
 } from '../review/engine.js'
 import type { Finding } from '../review/finding-schema.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../review/untrusted-boundary.js'
 import type { UsageTotals } from '../review/usage.js'
 import {
   buildReviewerUserPrompt,
@@ -26,6 +27,13 @@ import {
   resolveReviewer,
   type ReviewerInfo,
 } from './registry.js'
+
+function composeReviewerSystemPrompt(template: string): string {
+  if (template.includes('## Untrusted Content Boundary')) {
+    return template
+  }
+  return `${template}\n\n${UNTRUSTED_CONTENT_BOUNDARY}`
+}
 
 export interface ReviewerRunResult {
   reviewer: ReviewerInfo
@@ -131,7 +139,7 @@ export async function runReviewers(
     const started = Date.now()
     let systemPrompt: string
     try {
-      systemPrompt = loadReviewerSystemPrompt(reviewer)
+      systemPrompt = composeReviewerSystemPrompt(loadReviewerSystemPrompt(reviewer))
     } catch (err) {
       const result: ReviewerRunResult = {
         reviewer,
@@ -217,7 +225,7 @@ export async function runAgenticReviewers(
     const started = Date.now()
     let systemPrompt: string
     try {
-      systemPrompt = loadReviewerSystemPrompt(reviewer)
+      systemPrompt = composeReviewerSystemPrompt(loadReviewerSystemPrompt(reviewer))
     } catch (err) {
       const result: ReviewerRunResult = {
         reviewer,

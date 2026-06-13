@@ -134,6 +134,26 @@ describe('buildReviewPrompt — untrusted="true" markers on all external-data wr
     expect(p).toMatch(/<author_intent untrusted="true">\nINTENT-PAYLOAD\n<\/author_intent>/)
   })
 
+  it('wraps project_structure in <project_structure untrusted="true"> when supplied', () => {
+    const p = buildReviewPrompt({
+      ...baseOptions,
+      projectStructureContext: 'PROJECT-STRUCTURE-PAYLOAD',
+    })
+    expect(p).toMatch(
+      /<project_structure untrusted="true">\nPROJECT-STRUCTURE-PAYLOAD\n<\/project_structure>/,
+    )
+  })
+
+  it('wraps trust_boundaries in <trust_boundaries untrusted="true"> when supplied', () => {
+    const p = buildReviewPrompt({
+      ...baseOptions,
+      trustBoundarySummary: 'network: src/routes/users.ts',
+    })
+    expect(p).toMatch(
+      /<trust_boundaries untrusted="true">\nnetwork: src\/routes\/users\.ts\n<\/trust_boundaries>/,
+    )
+  })
+
   it('does not regress the existing <related_code untrusted="true"> marker', () => {
     // Belt-and-suspenders: the related_code marker was added earlier
     // (D-3). Make sure this round's edits did not strip it.
@@ -145,7 +165,7 @@ describe('buildReviewPrompt — untrusted="true" markers on all external-data wr
     // The XML convention is for the attribute to appear on the open
     // tag only. A bug that produced `<diff_content untrusted="true">
     // ... </diff_content untrusted="true">` would be valid markup but
-    // confuses regex consumers downstream. Supply ALL three inputs so
+    // confuses regex consumers downstream. Supply every checked input so
     // every closing-tag assertion exercises a real generated section
     // (otherwise the negatives pass vacuously on sections that were
     // never emitted).
@@ -154,13 +174,19 @@ describe('buildReviewPrompt — untrusted="true" markers on all external-data wr
       diffContent: 'DIFF',
       prMrInfo: '{"title":"x"}',
       prDescriptionSummary: 'INTENT',
+      projectStructureContext: 'STRUCTURE',
+      trustBoundarySummary: 'network: src/routes/users.ts',
     })
     expect(p).toContain('</diff_content>')
     expect(p).toContain('</pr_mr_info>')
     expect(p).toContain('</author_intent>')
+    expect(p).toContain('</project_structure>')
+    expect(p).toContain('</trust_boundaries>')
     expect(p).not.toContain('</diff_content untrusted')
     expect(p).not.toContain('</pr_mr_info untrusted')
     expect(p).not.toContain('</author_intent untrusted')
+    expect(p).not.toContain('</project_structure untrusted')
+    expect(p).not.toContain('</trust_boundaries untrusted')
   })
 })
 
