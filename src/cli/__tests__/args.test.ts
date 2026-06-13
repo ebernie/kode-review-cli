@@ -75,6 +75,36 @@ describe('parseArgs short-flag aliases', () => {
     expect(opts.ci).toBe(true)
     expect(opts.quiet).toBe(true)
   })
+
+  it.each([
+    ['--watch --ci', ['--watch', '--ci']],
+    ['--ci --watch', ['--ci', '--watch']],
+    ['-w -c', ['-w', '-c']],
+    ['-c -w', ['-c', '-w']],
+    ['--watch -c', ['--watch', '-c']],
+    ['-w --ci', ['-w', '--ci']],
+  ])('rejects %s because CI mode is a one-shot gated review', (_label, flags) => {
+    expect(() => parseArgs(args(...flags))).toThrow(
+      /--ci cannot be combined with --watch/,
+    )
+  })
+
+  it('--watch alone remains valid', () => {
+    const opts = parseArgs(args('--watch'))
+    expect(opts.watch).toBe(true)
+    expect(opts.ci).toBe(false)
+    expect(opts.quiet).toBe(false)
+    expect(opts.format).toBe('text')
+  })
+
+  it('--ci alone remains valid', () => {
+    const opts = parseArgs(args('--ci'))
+    expect(opts.ci).toBe(true)
+    expect(opts.watch).toBe(false)
+    expect(opts.quiet).toBe(true)
+    expect(opts.format).toBe('markdown')
+    expect(opts.postToPr).toBe(true)
+  })
 })
 
 /**

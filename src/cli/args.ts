@@ -360,6 +360,13 @@ export function parseArgs(argv: string[]): CliOptions {
     )
   }
 
+  if (ci && opts.watch) {
+    throw new Error(
+      '--ci cannot be combined with --watch. --ci is a one-shot gated review; ' +
+        '--watch is a long-running poller. Run kode-review --ci per PR from your CI pipeline instead.',
+    )
+  }
+
   // Repo-scope options (only meaningful when --scope repo).
   const engineRaw = String(opts.engine ?? 'kode-agent')
   if (!['kode-agent', 'clawpatch'].includes(engineRaw)) {
