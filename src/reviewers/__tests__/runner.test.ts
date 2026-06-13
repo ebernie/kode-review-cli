@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../../review/untrusted-boundary.js'
 import type { UsageTotals } from '../../review/usage.js'
 
 // Capture every invocation of the underlying engine so we can verify that
@@ -178,6 +179,25 @@ describe('runReviewers — parallel orchestration', () => {
     expect(
       captured.find((r) => /staff-level software architect/i.test(String(r.systemPrompt))),
     ).toBeDefined()
+  })
+
+  it('appends the shared untrusted-content boundary to reviewer system prompts', async () => {
+    writeFileSync(join(tmp, 'performance.md'), 'PERFORMANCE REVIEWER TEMPLATE')
+    const reviewers = resolveReviewerNames(['security', 'performance'])
+    await runReviewers({
+      reviewers,
+      data: { context: 'ctx', diffContent: 'd' },
+    })
+
+    expect(captured).toHaveLength(2)
+    const securityPrompt = captured.find((r) =>
+      String(r.systemPrompt).includes('senior application security engineer'),
+    )?.systemPrompt
+    const customPrompt = captured.find((r) =>
+      String(r.systemPrompt).includes('PERFORMANCE REVIEWER TEMPLATE'),
+    )?.systemPrompt
+    expect(securityPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(customPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
   })
 
   it('runs reviewers in parallel, not serially', async () => {
@@ -388,6 +408,41 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
         /staff-level software architect/i.test(String(r.systemPrompt)),
       ),
     ).toBeDefined()
+  })
+
+  it('appends the shared untrusted-content boundary to agentic reviewer system prompts', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'kode-review-runner-agentic-'))
+    const originalEnv = process.env.KODE_REVIEW_REVIEWERS_DIR
+    process.env.KODE_REVIEW_REVIEWERS_DIR = tmp
+    clearReviewerPromptCacheForTests()
+    try {
+      writeFileSync(join(tmp, 'performance.md'), 'PERFORMANCE REVIEWER TEMPLATE')
+      const reviewers = resolveReviewerNames(['security', 'performance'])
+      const results = await runAgenticReviewers({
+        reviewers,
+        agenticBase: baseAgentic,
+      })
+
+      expect(results).toHaveLength(2)
+      for (const r of results) expect(r.ok).toBe(true)
+      expect(capturedAgentic).toHaveLength(2)
+      const securityPrompt = capturedAgentic.find((r) =>
+        String(r.systemPrompt).includes('senior application security engineer'),
+      )?.systemPrompt
+      const customPrompt = capturedAgentic.find((r) =>
+        String(r.systemPrompt).includes('PERFORMANCE REVIEWER TEMPLATE'),
+      )?.systemPrompt
+      expect(securityPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+      expect(customPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.KODE_REVIEW_REVIEWERS_DIR
+      } else {
+        process.env.KODE_REVIEW_REVIEWERS_DIR = originalEnv
+      }
+      rmSync(tmp, { recursive: true, force: true })
+      clearReviewerPromptCacheForTests()
+    }
   })
 
   it('runs agentic reviewers in parallel, not serially', async () => {
