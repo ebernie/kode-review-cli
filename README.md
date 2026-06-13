@@ -211,6 +211,9 @@ kode-review --watch --watch-interactive  # Prompt to select PR/MR
 kode-review --watch --quiet              # Background monitoring
 ```
 
+Watch mode is a long-running poller and cannot be combined with `--ci`. Run
+`kode-review --ci` as a one-shot review per PR from your CI pipeline instead.
+
 **Features:**
 - Polls both GitHub and GitLab simultaneously (if both CLIs are authenticated)
 - Persists reviewed state to avoid duplicates across restarts
