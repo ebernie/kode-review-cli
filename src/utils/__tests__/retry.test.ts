@@ -53,38 +53,58 @@ describe('isRetryableError', () => {
     expect(isRetryableError(error)).toBe(true)
   })
 
-  it('returns true for HTTP 500 in error message', () => {
+  it('returns true for labeled HTTP 500 in error message', () => {
     const error = new Error('Request failed with status 500')
     expect(isRetryableError(error)).toBe(true)
   })
 
-  it('returns true for HTTP 502 in error message', () => {
-    const error = new Error('Bad Gateway: 502 error from server')
+  it('returns true for labeled HTTP 502 in error message', () => {
+    const error = new Error('HTTP 502 Bad Gateway from server')
     expect(isRetryableError(error)).toBe(true)
   })
 
-  it('returns true for HTTP 503 in error message', () => {
-    const error = new Error('Service unavailable: 503')
+  it('returns true for status followed by a known retryable reason phrase', () => {
+    const error = new Error('502 Bad Gateway from server')
     expect(isRetryableError(error)).toBe(true)
   })
 
-  it('returns true for HTTP 504 in error message', () => {
-    const error = new Error('Gateway timeout 504')
+  it('returns true for status-code 503 in error message', () => {
+    const error = new Error('Service unavailable: status code 503')
     expect(isRetryableError(error)).toBe(true)
   })
 
-  it('returns true for HTTP 429 in error message', () => {
-    const error = new Error('Rate limited: 429 Too Many Requests')
+  it('returns true for a known retryable reason phrase followed by status', () => {
+    const error = new Error('Service Unavailable: 503')
     expect(isRetryableError(error)).toBe(true)
+  })
+
+  it('returns true for response-status 504 in error message', () => {
+    const error = new Error('Gateway timeout response status 504')
+    expect(isRetryableError(error)).toBe(true)
+  })
+
+  it('returns true for status 429 in error message', () => {
+    const error = new Error('Rate limited: status 429 Too Many Requests')
+    expect(isRetryableError(error)).toBe(true)
+  })
+
+  it('returns true for rate-limit status with reason phrase', () => {
+    const error = new Error('429 Too Many Requests')
+    expect(isRetryableError(error)).toBe(true)
+  })
+
+  it('returns false when a retry count looks like an HTTP status code', () => {
+    const error = new Error('Failed after 500 attempts')
+    expect(isRetryableError(error)).toBe(false)
   })
 
   it('returns false for HTTP 404 in error message', () => {
-    const error = new Error('Not found: 404')
+    const error = new Error('HTTP 404 Not Found')
     expect(isRetryableError(error)).toBe(false)
   })
 
   it('returns false for HTTP 401 in error message', () => {
-    const error = new Error('Unauthorized: 401')
+    const error = new Error('status 401 Unauthorized')
     expect(isRetryableError(error)).toBe(false)
   })
 
