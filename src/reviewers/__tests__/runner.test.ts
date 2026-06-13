@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { FINDINGS_BLOCK_INSTRUCTIONS } from '../../review/prompt.js'
 import { UNTRUSTED_CONTENT_BOUNDARY } from '../../review/untrusted-boundary.js'
 import type { UsageTotals } from '../../review/usage.js'
 
@@ -198,6 +199,21 @@ describe('runReviewers — parallel orchestration', () => {
     )?.systemPrompt
     expect(securityPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
     expect(customPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+  })
+
+  it('requires kode-findings in reviewer system prompts, including custom reviewers', async () => {
+    writeFileSync(join(tmp, 'performance.md'), 'PERFORMANCE REVIEWER TEMPLATE')
+    const reviewers = resolveReviewerNames(['security', 'performance'])
+    await runReviewers({
+      reviewers,
+      data: { context: 'ctx', diffContent: 'd' },
+    })
+
+    expect(captured).toHaveLength(2)
+    for (const run of captured) {
+      expect(run.systemPrompt).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
+      expect(run.systemPrompt).toMatch(/REQUIRED.*kode-findings/i)
+    }
   })
 
   it('runs reviewers in parallel, not serially', async () => {
@@ -442,6 +458,20 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
       }
       rmSync(tmp, { recursive: true, force: true })
       clearReviewerPromptCacheForTests()
+    }
+  })
+
+  it('requires kode-findings in agentic reviewer system prompts', async () => {
+    const reviewers = resolveReviewerNames(['security', 'architect'])
+    await runAgenticReviewers({
+      reviewers,
+      agenticBase: baseAgentic,
+    })
+
+    expect(capturedAgentic).toHaveLength(2)
+    for (const run of capturedAgentic) {
+      expect(run.systemPrompt).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
+      expect(run.systemPrompt).toMatch(/REQUIRED.*kode-findings/i)
     }
   })
 

@@ -8,6 +8,7 @@
 
 import { sanitizeXmlContent } from './xml-sanitize.js'
 import { UNTRUSTED_CONTENT_BOUNDARY } from './untrusted-boundary.js'
+import { FINDINGS_BLOCK_INSTRUCTIONS } from './prompt.js'
 
 /**
  * System prompt for agentic code review
@@ -169,6 +170,8 @@ Merge Decision: [SAFE_TO_MERGE | DO_NOT_MERGE | CONDITIONAL_MERGE]
 Rationale: <1-2 sentence explanation>
 Issues Summary: X CRITICAL, Y HIGH, Z MEDIUM, W LOW
 \`\`\`
+
+${FINDINGS_BLOCK_INSTRUCTIONS}
 ` + '\n\n' + UNTRUSTED_CONTENT_BOUNDARY
 
 export interface AgenticPromptOptions {

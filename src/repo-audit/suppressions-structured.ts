@@ -14,7 +14,7 @@
  * Shares readFileSafe + shouldSuppressAtLine with the diff filter so the two
  * cannot drift apart.
  */
-import { readFileSafe, shouldSuppressAtLine } from '../review/suppressions.js'
+import { filterSuppressedStructuredFindings } from '../review/suppressions.js'
 import type { Finding } from '../review/finding-schema.js'
 
 export interface StructuredFilterResult {
@@ -35,28 +35,5 @@ export async function filterSuppressedStructured(
   findings: Finding[],
   repoRoot: string,
 ): Promise<StructuredFilterResult> {
-  const kept: Finding[] = []
-  const byFile = new Map<string, number>()
-  let suppressedCount = 0
-  // Cache key is `finding.file` verbatim. If two findings on the same file
-  // arrive with different path encodings (e.g., `./foo.ts` vs `foo.ts`) the
-  // cache misses; the impact is a redundant readFileSafe call, never a
-  // correctness issue (the path-guarded read is idempotent).
-  const fileCache = new Map<string, string | null>()
-
-  for (const f of findings) {
-    let content: string | null | undefined = fileCache.get(f.file)
-    if (content === undefined) {
-      content = await readFileSafe(repoRoot, f.file)
-      fileCache.set(f.file, content)
-    }
-    if (content !== null && shouldSuppressAtLine(content, f.lineStart)) {
-      suppressedCount += 1
-      byFile.set(f.file, (byFile.get(f.file) ?? 0) + 1)
-      continue
-    }
-    kept.push(f)
-  }
-
-  return { kept, suppressedCount, byFile }
+  return filterSuppressedStructuredFindings(findings, repoRoot)
 }

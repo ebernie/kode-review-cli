@@ -13,6 +13,7 @@ import {
   type AgenticReviewOptions,
   type ReviewOptions,
 } from '../review/engine.js'
+import { FINDINGS_BLOCK_INSTRUCTIONS } from '../review/prompt.js'
 import type { Finding } from '../review/finding-schema.js'
 import { UNTRUSTED_CONTENT_BOUNDARY } from '../review/untrusted-boundary.js'
 import type { UsageTotals } from '../review/usage.js'
@@ -29,10 +30,14 @@ import {
 } from './registry.js'
 
 function composeReviewerSystemPrompt(template: string): string {
-  if (template.includes('## Untrusted Content Boundary')) {
-    return template
+  let prompt = template
+  if (!prompt.includes('kode-findings')) {
+    prompt = `${prompt}\n\n${FINDINGS_BLOCK_INSTRUCTIONS}`
   }
-  return `${template}\n\n${UNTRUSTED_CONTENT_BOUNDARY}`
+  if (!prompt.includes('## Untrusted Content Boundary')) {
+    prompt = `${prompt}\n\n${UNTRUSTED_CONTENT_BOUNDARY}`
+  }
+  return prompt
 }
 
 export interface ReviewerRunResult {

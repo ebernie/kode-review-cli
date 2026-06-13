@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { buildAgenticPrompt, AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
+import { FINDINGS_BLOCK_INSTRUCTIONS } from '../prompt.js'
 import { UNTRUSTED_CONTENT_BOUNDARY } from '../untrusted-boundary.js'
 
 describe('buildAgenticPrompt — XML injection hardening', () => {
@@ -60,6 +61,11 @@ describe('buildAgenticPrompt — XML injection hardening', () => {
 describe('AGENTIC_SYSTEM_PROMPT — untrusted boundary', () => {
   it('appends UNTRUSTED_CONTENT_BOUNDARY', () => {
     expect(AGENTIC_SYSTEM_PROMPT).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+  })
+
+  it('requires the shared kode-findings structured block', () => {
+    expect(AGENTIC_SYSTEM_PROMPT).toContain(FINDINGS_BLOCK_INSTRUCTIONS)
+    expect(AGENTIC_SYSTEM_PROMPT).toMatch(/REQUIRED.*kode-findings/i)
   })
 })
 
