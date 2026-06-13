@@ -38,10 +38,11 @@ import {
   buildCommentPayload,
   buildCompositeCiCommentBody,
   parseReviewSummary,
+  applyReviewFiltersForCi,
   postCiComment,
   type CiPlatform,
 } from './review/ci-mode.js'
-import { filterSuppressedFindings } from './review/suppressions.js'
+import type { Finding } from './review/finding-schema.js'
 import {
   listAvailableReviewers,
   resolveReviewerNames,
@@ -1110,6 +1111,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           options,
           repoRoot!,
           result.usage,
+          { findings: result.findings },
         )
 
         // Process review output. When --ci posted a sticky comment we suppress
@@ -1170,7 +1172,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
             options,
             repoRoot!,
             r.usage,
-            { postComment: false },
+            { postComment: false, findings: r.findings },
           )
           r.content = filtered
           if (ciExitCode !== undefined) {
@@ -1252,7 +1254,7 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           options,
           repoRoot!,
           r.usage,
-          { postComment: false },
+          { postComment: false, findings: r.findings },
         )
         r.content = filtered
         if (ciExitCode !== undefined) {
@@ -1313,28 +1315,46 @@ async function applyCiAndSuppressions(
   // function only filters + computes the exit code and leaves the sticky
   // comment alone. Without this, N reviewers would post-and-delete N times
   // under the same marker, leaving only the last reviewer's comment.
-  opts: { postComment?: boolean } = {},
+  opts: { postComment?: boolean; findings?: readonly Finding[] } = {},
 ): Promise<CiAndSuppressionsResult> {
   const { postComment = true } = opts
 
   // 1) Suppressions — always-on; --no-suppressions disables.
   let reviewContent = rawContent
+  let summary = parseReviewSummary(rawContent)
   if (!options.noSuppressions) {
     try {
-      const { filtered, suppressedCount } = await filterSuppressedFindings(rawContent, repoRoot)
-      reviewContent = filtered
+      const filtered = await applyReviewFiltersForCi(rawContent, repoRoot, {
+        findings: opts.findings,
+        suppressionsEnabled: true,
+      })
+      reviewContent = filtered.content
+      summary = filtered.summary
+      const { suppressedCount } = filtered
       if (suppressedCount > 0) {
         logger.info(`Suppressed ${suppressedCount} finding(s) via kode-review: ignore markers`)
       }
     } catch (err) {
+      const unfiltered = await applyReviewFiltersForCi(rawContent, repoRoot, {
+        findings: opts.findings,
+        suppressionsEnabled: false,
+      })
+      reviewContent = unfiltered.content
+      summary = unfiltered.summary
       logger.warn(`Suppression filter failed — using raw review: ${(err as Error).message}`)
     }
+  } else {
+    const filtered = await applyReviewFiltersForCi(rawContent, repoRoot, {
+      findings: opts.findings,
+      suppressionsEnabled: false,
+    })
+    reviewContent = filtered.content
+    summary = filtered.summary
   }
 
   // 2) CI mode — compute the exit code (and optionally post the sticky).
   if (!options.ci) return { content: reviewContent }
 
-  const summary = parseReviewSummary(reviewContent)
   const exitCode = resolveCiExitCode(summary, options.failOn)
 
   if (postComment) {

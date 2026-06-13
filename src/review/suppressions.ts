@@ -15,6 +15,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { assertWithinRepo } from './tools/path-guard.js'
 import type { ReviewSummary } from './ci-mode.js'
+import type { Finding } from './finding-schema.js'
 
 const IGNORE_RE = /kode-review:\s*ignore(?!-file)/
 const IGNORE_FILE_RE = /kode-review:\s*ignore-file/
@@ -143,4 +144,43 @@ export async function filterSuppressedFindings(
     suppressedCount,
     summary: { verdict, issuesByCount: counts },
   }
+}
+
+export interface StructuredFilterResult {
+  kept: Finding[]
+  suppressedCount: number
+  /** Per-file count of suppressions, for logging. */
+  byFile: Map<string, number>
+}
+
+/**
+ * Drop structured findings whose source location is annotated with a
+ * suppression marker. Shares readFileSafe + shouldSuppressAtLine with the
+ * markdown filter so CI counts and rendered markdown follow the same marker
+ * semantics.
+ */
+export async function filterSuppressedStructuredFindings(
+  findings: readonly Finding[],
+  repoRoot: string,
+): Promise<StructuredFilterResult> {
+  const kept: Finding[] = []
+  const byFile = new Map<string, number>()
+  let suppressedCount = 0
+  const fileCache = new Map<string, string | null>()
+
+  for (const f of findings) {
+    let content: string | null | undefined = fileCache.get(f.file)
+    if (content === undefined) {
+      content = await readFileSafe(repoRoot, f.file)
+      fileCache.set(f.file, content)
+    }
+    if (content !== null && shouldSuppressAtLine(content, f.lineStart)) {
+      suppressedCount += 1
+      byFile.set(f.file, (byFile.get(f.file) ?? 0) + 1)
+      continue
+    }
+    kept.push(f)
+  }
+
+  return { kept, suppressedCount, byFile }
 }

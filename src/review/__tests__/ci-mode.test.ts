@@ -1,5 +1,10 @@
-import { describe, it, expect, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
+  applyReviewFiltersForCi,
+  countFindingsBySeverity,
   detectCiPlatform,
   extractPrNumber,
   resolveCiExitCode,
@@ -10,6 +15,9 @@ import {
   STICKY_MARKER,
   type ReviewSummary,
 } from '../ci-mode.js'
+import { logger } from '../../utils/logger.js'
+import type { Finding } from '../finding-schema.js'
+import { parseFindingsBlock } from '../finding-parser.js'
 import type { UsageTotals } from '../usage.js'
 
 function usage(totalTokens: number, costTotal: number): UsageTotals {
@@ -23,6 +31,45 @@ function usage(totalTokens: number, costTotal: number): UsageTotals {
     assistantMessages: 1,
   }
 }
+
+function finding(severity: Finding['severity']): Finding {
+  return {
+    severity,
+    category: 'correctness',
+    confidence: 'HIGH',
+    title: `${severity} finding`,
+    file: 'src/app.ts',
+    lineStart: 1,
+    lineEnd: 1,
+    evidence: 'code',
+    problem: 'problem',
+    recommendation: 'fix',
+  }
+}
+
+function findingsBlock(findings: Finding[]): string {
+  return `\`\`\`kode-findings\n${JSON.stringify({ findings }, null, 2)}\n\`\`\``
+}
+
+let tmpRepo: string | undefined
+
+function makeRepo(): string {
+  tmpRepo = mkdtempSync(join(tmpdir(), 'kode-review-ci-'))
+  mkdirSync(join(tmpRepo, 'src'))
+  writeFileSync(
+    join(tmpRepo, 'src/app.ts'),
+    'export function app() {\n  return risky(); // kode-review: ignore\n}\nexport const ok = true;\n',
+  )
+  return tmpRepo
+}
+
+afterEach(() => {
+  if (tmpRepo) {
+    rmSync(tmpRepo, { recursive: true, force: true })
+    tmpRepo = undefined
+  }
+  vi.restoreAllMocks()
+})
 
 describe('detectCiPlatform', () => {
   it('detects GitHub Actions from GITHUB_ACTIONS=true', () => {
@@ -137,6 +184,126 @@ Issues Summary: 2 CRITICAL, 1 HIGH, 0 MEDIUM, 3 LOW
       verdict: 'APPROVE',
       issuesByCount: { critical: 0, high: 0, medium: 0, low: 0 },
     })
+  })
+
+  it('uses structured findings over a contradictory Issues Summary', () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    const md = `
+RECOMMENDATION: APPROVE
+Issues Summary: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW
+`
+    const summary = parseReviewSummary(md, { findings: [finding('CRITICAL')] })
+
+    expect(summary.issuesByCount).toEqual({ critical: 1, high: 0, medium: 0, low: 0 })
+    expect(resolveCiExitCode(summary, 'critical')).toBe(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('does not match Issues Summary'))
+    warn.mockRestore()
+  })
+
+  it('uses structured findings when the markdown Issues Summary is missing', () => {
+    const summary = parseReviewSummary('RECOMMENDATION: REQUEST_CHANGES\n', {
+      findings: [finding('HIGH'), finding('LOW')],
+    })
+
+    expect(summary).toEqual({
+      verdict: 'REQUEST_CHANGES',
+      issuesByCount: { critical: 0, high: 1, medium: 0, low: 1 },
+    })
+    expect(resolveCiExitCode(summary, 'high')).toBe(1)
+  })
+})
+
+describe('countFindingsBySeverity', () => {
+  it('counts each structured finding severity', () => {
+    expect(countFindingsBySeverity([
+      finding('CRITICAL'),
+      finding('HIGH'),
+      finding('HIGH'),
+      finding('MEDIUM'),
+      finding('LOW'),
+    ])).toEqual({ critical: 1, high: 2, medium: 1, low: 1 })
+  })
+})
+
+describe('applyReviewFiltersForCi', () => {
+  it('derives CI counts from the parsed kode-findings block instead of the markdown self-report', async () => {
+    const repo = makeRepo()
+    const raw = `
+RECOMMENDATION: APPROVE
+Issues Summary: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW
+
+${findingsBlock([finding('CRITICAL')])}
+`
+
+    const result = await applyReviewFiltersForCi(raw, repo, {
+      suppressionsEnabled: false,
+    })
+
+    expect(result.summary.issuesByCount).toEqual({ critical: 1, high: 0, medium: 0, low: 0 })
+    expect(resolveCiExitCode(result.summary, 'critical')).toBe(1)
+  })
+
+  it('derives CI counts from structured findings when markdown Issues Summary is absent', async () => {
+    const repo = makeRepo()
+    const raw = `
+RECOMMENDATION: REQUEST_CHANGES
+
+${findingsBlock([finding('HIGH')])}
+`
+
+    const result = await applyReviewFiltersForCi(raw, repo, {
+      suppressionsEnabled: false,
+    })
+
+    expect(result.summary.issuesByCount).toEqual({ critical: 0, high: 1, medium: 0, low: 0 })
+    expect(resolveCiExitCode(result.summary, 'high')).toBe(1)
+  })
+
+  it('excludes suppressed structured findings before resolving the CI exit summary', async () => {
+    const repo = makeRepo()
+    const suppressed = finding('CRITICAL')
+    suppressed.file = 'src/app.ts'
+    suppressed.lineStart = 2
+    suppressed.lineEnd = 2
+    const raw = `
+**[SEVERITY: CRITICAL]** - Category: suppressed finding
+
+File: src/app.ts:2
+
+Problem:
+ignored
+
+Confidence: HIGH
+
+RECOMMENDATION: REQUEST_CHANGES
+Issues Summary: 1 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW
+
+${findingsBlock([suppressed])}
+`
+
+    const result = await applyReviewFiltersForCi(raw, repo, {
+      suppressionsEnabled: true,
+    })
+
+    expect(result.suppressedCount).toBe(1)
+    expect(result.summary.issuesByCount).toEqual({ critical: 0, high: 0, medium: 0, low: 0 })
+    expect(resolveCiExitCode(result.summary, 'critical')).toBe(0)
+    expect(parseFindingsBlock(result.content).findings).toEqual([])
+  })
+
+  it('falls back to markdown Issues Summary when the kode-findings block is missing', async () => {
+    const repo = makeRepo()
+    const raw = `
+RECOMMENDATION: REQUEST_CHANGES
+Issues Summary: 0 CRITICAL, 1 HIGH, 0 MEDIUM, 0 LOW
+`
+
+    const result = await applyReviewFiltersForCi(raw, repo, {
+      suppressionsEnabled: false,
+    })
+
+    expect(result.summary.issuesByCount).toEqual({ critical: 0, high: 1, medium: 0, low: 0 })
+    expect(resolveCiExitCode(result.summary, 'high')).toBe(1)
   })
 })
 

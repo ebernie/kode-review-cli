@@ -9,6 +9,12 @@
 
 import { exec as runProcess } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
+import { FINDINGS_FENCE_TAG, parseFindingsBlock } from './finding-parser.js'
+import type { Finding } from './finding-schema.js'
+import {
+  filterSuppressedFindings,
+  filterSuppressedStructuredFindings,
+} from './suppressions.js'
 import { formatUsageOneLiner, sumUsage, type UsageTotals } from './usage.js'
 
 export type CiPlatform = 'github' | 'gitlab'
@@ -56,10 +62,9 @@ export function extractPrNumber(
 
 export function resolveCiExitCode(summary: ReviewSummary, failOn: FailOn): number {
   if (failOn === 'none') return 0
-  // Evaluate the counts FIRST and only honor an APPROVE verdict when the
-  // counts agree. An LLM that emits APPROVE alongside critical/high findings
-  // (model error, prompt injection, persona inconsistency) must still fail
-  // CI — the count axis is the ground truth, the verdict is advisory.
+  // Evaluate severity counts FIRST and only honor an APPROVE verdict when the
+  // counts agree. Callers prefer parsed `kode-findings` counts when available,
+  // then fall back to the markdown `Issues Summary`; the verdict is advisory.
   if (failOn === 'critical' && summary.issuesByCount.critical > 0) return 1
   if (failOn === 'high' && (summary.issuesByCount.critical > 0 || summary.issuesByCount.high > 0)) return 1
   return 0
@@ -201,25 +206,145 @@ export async function postCiComment(
   return replaceStickyComment(runner, prNumber, payload)
 }
 
+const ISSUES_SUMMARY_RE = /Issues Summary:\s*(\d+)\s*CRITICAL,\s*(\d+)\s*HIGH,\s*(\d+)\s*MEDIUM,\s*(\d+)\s*LOW/i
+const VERDICT_RE = /RECOMMENDATION:\s*(APPROVE|REQUEST_CHANGES|NEEDS_DISCUSSION)/
+const FINDINGS_BLOCK_RE = new RegExp(
+  '^```' + FINDINGS_FENCE_TAG + '\\s*\\r?\\n([\\s\\S]*?)\\r?\\n```',
+  'gm',
+)
+
+export function countFindingsBySeverity(
+  findings: readonly Pick<Finding, 'severity'>[],
+): ReviewSummary['issuesByCount'] {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 }
+  for (const finding of findings) {
+    counts[finding.severity.toLowerCase() as keyof ReviewSummary['issuesByCount']] += 1
+  }
+  return counts
+}
+
+function formatCounts(counts: ReviewSummary['issuesByCount']): string {
+  return `${counts.critical} CRITICAL, ${counts.high} HIGH, ${counts.medium} MEDIUM, ${counts.low} LOW`
+}
+
+function countsEqual(
+  a: ReviewSummary['issuesByCount'],
+  b: ReviewSummary['issuesByCount'],
+): boolean {
+  return a.critical === b.critical && a.high === b.high && a.medium === b.medium && a.low === b.low
+}
+
+function replaceLastFindingsBlock(reviewMarkdown: string, findings: readonly Finding[]): string {
+  const matches: RegExpExecArray[] = []
+  FINDINGS_BLOCK_RE.lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = FINDINGS_BLOCK_RE.exec(reviewMarkdown)) !== null) {
+    matches.push(match)
+  }
+  const last = matches[matches.length - 1]
+  if (!last) return reviewMarkdown
+
+  const replacement = [
+    '```' + FINDINGS_FENCE_TAG,
+    JSON.stringify({ findings }, null, 2),
+    '```',
+  ].join('\n')
+  return reviewMarkdown.slice(0, last.index) +
+    replacement +
+    reviewMarkdown.slice(last.index + last[0].length)
+}
+
+export interface ParseReviewSummaryOptions {
+  /**
+   * Structured findings parsed from a valid `kode-findings` block after
+   * suppression filtering. When present, these counts drive CI; markdown
+   * counts remain a fallback for legacy/malformed outputs.
+   */
+  findings?: readonly Finding[]
+}
+
+export interface ApplyReviewFiltersForCiOptions {
+  /** Structured findings returned by the review engine, if already parsed. */
+  findings?: readonly Finding[]
+  /** Whether source-code suppression markers should filter markdown and structured findings. */
+  suppressionsEnabled: boolean
+}
+
+export interface ApplyReviewFiltersForCiResult {
+  content: string
+  suppressedCount: number
+  summary: ReviewSummary
+}
+
 /**
  * Parse the model's verdict block out of the review markdown.
  *
- * Parser is intentionally tiny — extracts `Issues Summary: X CRITICAL, ...`
- * counts and the `RECOMMENDATION:` verdict. If either is absent the counts
- * are zero and the verdict defaults to NEEDS_DISCUSSION (the safe default).
+ * CI counts come from structured `kode-findings` when the caller supplies
+ * them. If the structured block is missing or invalid, this falls back to the
+ * markdown `Issues Summary`. The verdict defaults to NEEDS_DISCUSSION when
+ * absent, but it does not override severity counts.
  */
-export function parseReviewSummary(reviewMarkdown: string): ReviewSummary {
+export function parseReviewSummary(
+  reviewMarkdown: string,
+  options: ParseReviewSummaryOptions = {},
+): ReviewSummary {
   const counts = { critical: 0, high: 0, medium: 0, low: 0 }
-  const summaryMatch = /Issues Summary:\s*(\d+)\s*CRITICAL,\s*(\d+)\s*HIGH,\s*(\d+)\s*MEDIUM,\s*(\d+)\s*LOW/i.exec(reviewMarkdown)
+  const summaryMatch = ISSUES_SUMMARY_RE.exec(reviewMarkdown)
   if (summaryMatch) {
     counts.critical = Number(summaryMatch[1])
     counts.high = Number(summaryMatch[2])
     counts.medium = Number(summaryMatch[3])
     counts.low = Number(summaryMatch[4])
   }
-  const verdictMatch = /RECOMMENDATION:\s*(APPROVE|REQUEST_CHANGES|NEEDS_DISCUSSION)/.exec(reviewMarkdown)
+  const structuredCounts = options.findings
+    ? countFindingsBySeverity(options.findings)
+    : undefined
+  if (structuredCounts && summaryMatch && !countsEqual(counts, structuredCounts)) {
+    logger.warn(
+      `Structured kode-findings count (${formatCounts(structuredCounts)}) does not match Issues Summary (${formatCounts(counts)}); using structured findings for CI.`,
+    )
+  }
+  const verdictMatch = VERDICT_RE.exec(reviewMarkdown)
   const verdict = verdictMatch?.[1] ?? 'NEEDS_DISCUSSION'
-  return { verdict, issuesByCount: counts }
+  return { verdict, issuesByCount: structuredCounts ?? counts }
+}
+
+/**
+ * Apply post-review filtering and build the summary that CI gates evaluate.
+ *
+ * This is intentionally independent from sticky-comment posting so the
+ * markdown/structured-finding adapter can be unit-tested without importing
+ * the CLI entrypoint.
+ */
+export async function applyReviewFiltersForCi(
+  rawContent: string,
+  repoRoot: string,
+  options: ApplyReviewFiltersForCiOptions,
+): Promise<ApplyReviewFiltersForCiResult> {
+  const parsedFindings = parseFindingsBlock(rawContent)
+  let findingsForCi = parsedFindings.error
+    ? undefined
+    : (options.findings ?? parsedFindings.findings)
+
+  let reviewContent = rawContent
+  let suppressedCount = 0
+  if (options.suppressionsEnabled) {
+    const filteredMarkdown = await filterSuppressedFindings(rawContent, repoRoot)
+    reviewContent = filteredMarkdown.filtered
+    suppressedCount = filteredMarkdown.suppressedCount
+
+    if (findingsForCi) {
+      const structured = await filterSuppressedStructuredFindings(findingsForCi, repoRoot)
+      findingsForCi = structured.kept
+      reviewContent = replaceLastFindingsBlock(reviewContent, findingsForCi)
+    }
+  }
+
+  return {
+    content: reviewContent,
+    suppressedCount,
+    summary: parseReviewSummary(reviewContent, { findings: findingsForCi }),
+  }
 }
 
 /**

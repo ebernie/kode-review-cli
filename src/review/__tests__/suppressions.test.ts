@@ -6,7 +6,9 @@ import {
   hasIgnoreMarker,
   hasIgnoreFileMarker,
   filterSuppressedFindings,
+  filterSuppressedStructuredFindings,
 } from '../suppressions.js'
+import type { Finding } from '../finding-schema.js'
 
 describe('hasIgnoreMarker', () => {
   it('matches // kode-review: ignore', () => {
@@ -72,6 +74,19 @@ describe('filterSuppressedFindings', () => {
 
   const md = (path: string, line: number, severity = 'CRITICAL'): string =>
     `**[SEVERITY: ${severity}]** - Cat: title\n\nFile: ${path}:${line}\n\nProblem:\nstuff\n\nConfidence: HIGH\n`
+
+  const structured = (path: string, line: number, severity: Finding['severity'] = 'CRITICAL'): Finding => ({
+    severity,
+    category: 'correctness',
+    confidence: 'HIGH',
+    title: `${severity} finding`,
+    file: path,
+    lineStart: line,
+    lineEnd: line,
+    evidence: 'code',
+    problem: 'problem',
+    recommendation: 'fix',
+  })
 
   it('drops findings on a line carrying the ignore marker', async () => {
     const input = md('src/a.ts', 2) + '\nIssues Summary: 1 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW\n'
@@ -153,5 +168,16 @@ describe('filterSuppressedFindings', () => {
     const input = md('src/a.ts', 4) + '\nIssues Summary: 1 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW\n'
     const { summary } = await filterSuppressedFindings(input, repo)
     expect(summary.verdict).toBe('NEEDS_DISCUSSION')
+  })
+
+  it('drops structured findings with the same marker rules used by CI counts', async () => {
+    const result = await filterSuppressedStructuredFindings([
+      structured('src/a.ts', 2, 'CRITICAL'),
+      structured('src/a.ts', 4, 'HIGH'),
+      structured('src/b.ts', 2, 'LOW'),
+    ], repo)
+
+    expect(result.suppressedCount).toBe(2)
+    expect(result.kept.map((f) => f.severity)).toEqual(['HIGH'])
   })
 })
