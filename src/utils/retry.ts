@@ -52,6 +52,20 @@ const RETRYABLE_HTTP_STATUS_CODES = new Set([
   504, // Gateway Timeout
 ])
 
+const HTTP_STATUS_MESSAGE_PATTERN =
+  /\b(?:HTTP|status(?:\s+code)?|statusCode|response\s+status)\b[\s:=#-]*(4\d{2}|5\d{2})\b/i
+
+const HTTP_REASON_PHRASE_STATUS_PATTERN =
+  /\b(?:(4\d{2}|5\d{2})\s+(?:Too Many Requests|Request Timeout|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)|(?:Too Many Requests|Request Timeout|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)[\s:=#-]+(4\d{2}|5\d{2}))\b/i
+
+export function hasRetryableHttpStatusInMessage(message: string): boolean {
+  const match = message.match(HTTP_STATUS_MESSAGE_PATTERN) ??
+    message.match(HTTP_REASON_PHRASE_STATUS_PATTERN)
+  if (!match) return false
+  const status = match[1] ?? match[2]
+  return RETRYABLE_HTTP_STATUS_CODES.has(parseInt(status, 10))
+}
+
 /**
  * Determines if an error is retryable based on its type and properties
  *
@@ -64,6 +78,14 @@ const RETRYABLE_HTTP_STATUS_CODES = new Set([
 export function isRetryableError(error: unknown): boolean {
   if (error === null || error === undefined) {
     return false
+  }
+
+  // Handle response-like objects with status property before scanning text.
+  if (typeof error === 'object' && 'status' in error) {
+    const response = error as { status: number }
+    if (RETRYABLE_HTTP_STATUS_CODES.has(response.status)) {
+      return true
+    }
   }
 
   // Handle AbortError (from AbortSignal.timeout)
@@ -84,20 +106,7 @@ export function isRetryableError(error: unknown): boolean {
       return true
     }
 
-    // Check for HTTP status code in the error message (common pattern)
-    const match = error.message.match(/\b(4\d{2}|5\d{2})\b/)
-    if (match) {
-      const statusCode = parseInt(match[1], 10)
-      if (RETRYABLE_HTTP_STATUS_CODES.has(statusCode)) {
-        return true
-      }
-    }
-  }
-
-  // Handle response-like objects with status property
-  if (typeof error === 'object' && 'status' in error) {
-    const response = error as { status: number }
-    if (RETRYABLE_HTTP_STATUS_CODES.has(response.status)) {
+    if (hasRetryableHttpStatusInMessage(error.message)) {
       return true
     }
   }

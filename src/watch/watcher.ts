@@ -10,6 +10,7 @@ import { runReview, type ReviewOptions } from '../review/engine.js'
 import { buildRevalidatePrompt, parseRevalidationBlock } from '../review/revalidate-prompt.js'
 import type { Finding } from '../review/finding-schema.js'
 import { sanitizeXmlContent } from '../review/xml-sanitize.js'
+import { hasRetryableHttpStatusInMessage } from '../utils/retry.js'
 import { sanitizeTerminalText } from '../utils/terminal-safe.js'
 import { WatchStateManager } from './state.js'
 import { detectReviewRequests, type DetectorConfig } from './detector.js'
@@ -431,7 +432,7 @@ export async function reviewRequest(
     logger.error(`Failed to review ${label}: ${errorMessage}`)
 
     // Check if error is retryable (network, timeout, rate limit)
-    const isRetryable = isRetryableError(errorMessage)
+    const isRetryable = isRetryableWatchError(errorMessage)
 
     if (isRetryable) {
       logger.info('Error appears transient - will retry in next poll cycle')
@@ -599,24 +600,22 @@ export function mergeFindingsByTitle(earlier: Finding[], later: Finding[]): Find
 /**
  * Check if an error is likely transient and should be retried
  */
-function isRetryableError(errorMessage: string): boolean {
+export function isRetryableWatchError(errorMessage: string): boolean {
   const retryablePatterns = [
-    'network',
-    'timeout',
-    'timed out',
-    'rate limit',
-    'econnreset',
-    'enotfound',
-    'socket hang up',
-    'connection refused',
-    'temporarily unavailable',
-    '503',
-    '502',
-    '429',
+    /\bnetwork\b/,
+    /\btimeout\b/,
+    /\btimed out\b/,
+    /\brate limit(?:ed)?\b/,
+    /\beconnreset\b/,
+    /\benotfound\b/,
+    /\bsocket hang up\b/,
+    /\bconnection refused\b/,
+    /\btemporarily unavailable\b/,
   ]
 
   const lowerMessage = errorMessage.toLowerCase()
-  return retryablePatterns.some((pattern) => lowerMessage.includes(pattern))
+  return retryablePatterns.some((pattern) => pattern.test(lowerMessage)) ||
+    hasRetryableHttpStatusInMessage(errorMessage)
 }
 
 /**

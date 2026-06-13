@@ -21,7 +21,7 @@ export async function exec(
   return {
     stdout: String(result.stdout ?? ''),
     stderr: String(result.stderr ?? ''),
-    exitCode: result.exitCode ?? 0,
+    exitCode: result.exitCode ?? 1,
   }
 }
 
