@@ -1,4 +1,5 @@
 import { IndexerClient } from './client.js'
+import { readIndexerApiSecret } from './env.js'
 import { getIndexerApiUrl, isIndexerRunning } from './docker.js'
 import { logger } from '../utils/logger.js'
 import type { CodeChunk, SemanticContextOptions, ModifiedLine, ParsedDiff, WeightedCodeChunk, PrDescriptionInfo } from './types.js'
@@ -1474,7 +1475,7 @@ export async function getSemanticContext(
   }
 
   const apiUrl = getIndexerApiUrl()
-  const client = new IndexerClient(apiUrl)
+  const client = new IndexerClient(apiUrl, readIndexerApiSecret())
 
   // Check health
   const healthy = await client.health()
@@ -1769,7 +1770,7 @@ export async function getSemanticContextWithPipeline(
   }
 
   const apiUrl = getIndexerApiUrl()
-  const client = new IndexerClient(apiUrl)
+  const client = new IndexerClient(apiUrl, readIndexerApiSecret())
 
   // Check health
   const healthy = await client.health()

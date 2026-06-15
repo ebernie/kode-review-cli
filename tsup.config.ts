@@ -34,6 +34,7 @@ export default defineConfig({
       // Additional Python modules for indexer functionality
       'import_graph.py',
       'call_graph.py',
+      'api_auth.py',
       'ast_chunker.py',
       'bm25.py',
       'hybrid.py',

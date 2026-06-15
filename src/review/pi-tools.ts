@@ -20,6 +20,7 @@ import ignore, { type Ignore } from 'ignore'
 import { Type } from 'typebox'
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent'
 import { IndexerClient } from '../indexer/client.js'
+import { readIndexerApiSecret } from '../indexer/env.js'
 import { exec as runProcess } from '../utils/exec.js'
 import { logger } from '../utils/logger.js'
 import {
@@ -177,7 +178,7 @@ export function createKodeReviewToolsExtension(
     // ripgrep — exactly the wrong failure mode.
     let indexerClient: IndexerClient | null = null
     if (ctx.indexerUrl) {
-      const candidate = new IndexerClient(ctx.indexerUrl)
+      const candidate = new IndexerClient(ctx.indexerUrl, readIndexerApiSecret())
       const ok = await candidate.health().catch(() => false)
       if (ok) {
         indexerClient = candidate

@@ -19,6 +19,7 @@ import type {
 } from './types.js'
 import { LRUCache } from '../utils/cache.js'
 import { withRetry } from '../utils/retry.js'
+import { INDEXER_API_SECRET_HEADER } from './env.js'
 
 export interface IndexRequest {
   repoUrl: string
@@ -207,6 +208,7 @@ interface HybridSearchResponse {
  */
 export class IndexerClient {
   private baseUrl: string
+  private apiSecret?: string
 
   // Timeout constants
   private static readonly DEFAULT_TIMEOUT_MS = 30000
@@ -221,8 +223,19 @@ export class IndexerClient {
   private definitionsCache = new LRUCache<string, DefinitionLookupResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
   private usagesCache = new LRUCache<string, UsageLookupResult>({ maxSize: 100, ttlMs: 5 * 60 * 1000 })
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, apiSecret?: string) {
     this.baseUrl = baseUrl.replace(/\/$/, '') // Remove trailing slash
+    this.apiSecret = apiSecret
+  }
+
+  private headers(extra: Record<string, string> = {}): Record<string, string> | undefined {
+    if (!this.apiSecret) {
+      return Object.keys(extra).length > 0 ? extra : undefined
+    }
+    return {
+      ...extra,
+      [INDEXER_API_SECRET_HEADER]: this.apiSecret,
+    }
   }
 
   /**
@@ -243,6 +256,7 @@ export class IndexerClient {
     try {
       const response = await fetch(`${this.baseUrl}/health`, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(5000),
       })
 
@@ -264,9 +278,9 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/index`, {
         method: 'POST',
-        headers: {
+        headers: this.headers({
           'Content-Type': 'application/json',
-        },
+        }),
         body: JSON.stringify({
           repo_url: request.repoUrl,
           repo_path: request.repoPath,
@@ -310,9 +324,9 @@ export class IndexerClient {
     const result = await withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/search`, {
         method: 'POST',
-        headers: {
+        headers: this.headers({
           'Content-Type': 'application/json',
-        },
+        }),
         body: JSON.stringify({
           query,
           repo_url: repoUrl,
@@ -361,6 +375,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.STATS_TIMEOUT_MS),
       })
 
@@ -398,6 +413,7 @@ export class IndexerClient {
     // No retry for delete operations - they should be idempotent but we don't want accidental double-deletes
     const response = await fetch(url, {
       method: 'DELETE',
+      headers: this.headers(),
       signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
     })
 
@@ -419,6 +435,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/repos`, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.STATS_TIMEOUT_MS),
       })
 
@@ -481,6 +498,7 @@ export class IndexerClient {
     const result = await withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
       })
 
@@ -551,6 +569,7 @@ export class IndexerClient {
     const result = await withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
       })
 
@@ -614,6 +633,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
       })
 
@@ -663,6 +683,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
       })
 
@@ -717,6 +738,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.LOOKUP_TIMEOUT_MS),
       })
 
@@ -780,9 +802,9 @@ export class IndexerClient {
     const result = await withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/keyword-search`, {
         method: 'POST',
-        headers: {
+        headers: this.headers({
           'Content-Type': 'application/json',
-        },
+        }),
         body: JSON.stringify({
           query,
           repo_url: repoUrl,
@@ -883,9 +905,9 @@ export class IndexerClient {
     const result = await withRetry(async () => {
       const response = await fetch(`${this.baseUrl}/hybrid-search`, {
         method: 'POST',
-        headers: {
+        headers: this.headers({
           'Content-Type': 'application/json',
-        },
+        }),
         body: JSON.stringify({
           query,
           repo_url: repoUrl,
@@ -982,6 +1004,7 @@ export class IndexerClient {
     return withRetry(async () => {
       const response = await fetch(url, {
         method: 'GET',
+        headers: this.headers(),
         signal: AbortSignal.timeout(IndexerClient.DEFAULT_TIMEOUT_MS),
       })
 

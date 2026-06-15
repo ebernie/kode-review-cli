@@ -3,10 +3,10 @@ services:
     image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: cocoindex
-      POSTGRES_PASSWORD: cocoindex
+      POSTGRES_PASSWORD: ${KODE_REVIEW_DB_PASSWORD}
       POSTGRES_DB: cocoindex
     ports:
-      - "${KODE_REVIEW_DB_PORT:-5436}:5432"
+      - "127.0.0.1:${KODE_REVIEW_DB_PORT:-5436}:5432"
     volumes:
       - indexer-data:/var/lib/postgresql/data
     healthcheck:
@@ -20,10 +20,11 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "${KODE_REVIEW_API_PORT:-8321}:8000"
+      - "127.0.0.1:${KODE_REVIEW_API_PORT:-8321}:8000"
     environment:
-      - COCOINDEX_DATABASE_URL=postgresql://cocoindex:cocoindex@db:5432/cocoindex
+      - COCOINDEX_DATABASE_URL=${COCOINDEX_DATABASE_URL}
       - EMBEDDING_MODEL=${KODE_REVIEW_EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - KODE_REVIEW_INDEXER_API_SECRET=${KODE_REVIEW_INDEXER_API_SECRET}
     depends_on:
       db:
         condition: service_healthy
