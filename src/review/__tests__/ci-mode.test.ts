@@ -8,6 +8,8 @@ import {
   detectCiPlatform,
   extractPrNumber,
   resolveCiExitCode,
+  resolveMultiReviewerCiExitCode,
+  resolveReviewerFailureCiExitCode,
   buildCommentPayload,
   buildCompositeCiCommentBody,
   parseReviewSummary,
@@ -143,6 +145,48 @@ describe('resolveCiExitCode', () => {
   })
   it('returns 0 when fail-on=none even with criticals', () => {
     expect(resolveCiExitCode(review('REQUEST_CHANGES', 3, 0), 'none')).toBe(0)
+  })
+})
+
+describe('resolveReviewerFailureCiExitCode', () => {
+  const failed = [{ reviewer: { name: 'security' }, error: 'timed out' }]
+
+  it('fails closed for reviewer execution failures in CI when fail-on is active', () => {
+    expect(resolveReviewerFailureCiExitCode(failed, { ci: true, failOn: 'critical' })).toBe(1)
+    expect(resolveReviewerFailureCiExitCode(failed, { ci: true, failOn: 'high' })).toBe(1)
+  })
+
+  it('does not force failure when fail-on is none', () => {
+    expect(resolveReviewerFailureCiExitCode(failed, { ci: true, failOn: 'none' })).toBeUndefined()
+  })
+
+  it('leaves non-CI multi-reviewer partial failures unchanged', () => {
+    expect(resolveReviewerFailureCiExitCode(failed, { ci: false, failOn: 'critical' })).toBeUndefined()
+  })
+
+  it('does nothing when no reviewers failed', () => {
+    expect(resolveReviewerFailureCiExitCode([], { ci: true, failOn: 'critical' })).toBeUndefined()
+  })
+})
+
+describe('resolveMultiReviewerCiExitCode', () => {
+  const failed = [{ reviewer: { name: 'security' }, error: 'timed out' }]
+
+  it('fails closed when one reviewer fails and a successful reviewer is clean in CI', () => {
+    expect(resolveMultiReviewerCiExitCode([0], failed, { ci: true, failOn: 'critical' })).toBe(1)
+    expect(resolveMultiReviewerCiExitCode([0], failed, { ci: true, failOn: 'high' })).toBe(1)
+  })
+
+  it('does not force failure for reviewer execution errors when fail-on is none', () => {
+    expect(resolveMultiReviewerCiExitCode([0], failed, { ci: true, failOn: 'none' })).toBe(0)
+  })
+
+  it('leaves non-CI partial reviewer failures without a forced exit code', () => {
+    expect(resolveMultiReviewerCiExitCode([], failed, { ci: false, failOn: 'critical' })).toBeUndefined()
+  })
+
+  it('preserves the worst successful reviewer CI exit code', () => {
+    expect(resolveMultiReviewerCiExitCode([0, 1], [], { ci: true, failOn: 'critical' })).toBe(1)
   })
 })
 
@@ -440,6 +484,18 @@ describe('buildCompositeCiCommentBody', () => {
     expect(body).toMatch(/across 2 reviewers/)
     // Aggregated tokens reflect only the reviewer that reported usage.
     expect(body).toMatch(/Tokens: 100 total/)
+  })
+
+  it('includes failed reviewer names and errors in the composite sticky comment', () => {
+    const body = buildCompositeCiCommentBody(
+      [{ reviewer: { name: 'security' }, content: 'sec findings', usage: usage(100, 0.01) }],
+      [{ reviewer: { name: 'architect' }, error: 'timed out' }],
+    )
+
+    expect(body).toMatch(/## security\n\nsec findings/)
+    expect(body).toMatch(/## Reviewer failures/)
+    expect(body).toMatch(/- \*\*architect\*\*: timed out/)
+    expect(body).toMatch(/across 1 reviewer\)/)
   })
 
   it('emits an "n/a" footer with a placeholder section when no reviewers succeeded', () => {

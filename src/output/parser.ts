@@ -268,7 +268,7 @@ export function extractVerdict(content: string): ReviewVerdict | null {
   }
 
   // Extract rationale
-  const rationaleMatch = section.match(/Rationale:\s*(.+?)(?=\n\n|\nIssues|\Z)/is)
+  const rationaleMatch = section.match(/Rationale:\s*(.+?)(?=\n\n|\nIssues|$)/is)
   const rationale = rationaleMatch?.[1]?.trim() || ''
 
   // Extract issue summary

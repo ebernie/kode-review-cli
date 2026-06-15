@@ -31,6 +31,11 @@ export interface CiComment {
   body: string
 }
 
+export interface ReviewerFailureForCi {
+  reviewer: { name: string }
+  error?: string
+}
+
 export interface CiCommentRunner {
   list(): Promise<CiComment[]>
   post(body: string): Promise<{ ok: boolean; id?: number }>
@@ -68,6 +73,29 @@ export function resolveCiExitCode(summary: ReviewSummary, failOn: FailOn): numbe
   if (failOn === 'critical' && summary.issuesByCount.critical > 0) return 1
   if (failOn === 'high' && (summary.issuesByCount.critical > 0 || summary.issuesByCount.high > 0)) return 1
   return 0
+}
+
+export function resolveReviewerFailureCiExitCode(
+  failedResults: ReadonlyArray<ReviewerFailureForCi>,
+  options: { ci: boolean; failOn: FailOn },
+): number | undefined {
+  if (!options.ci || options.failOn === 'none' || failedResults.length === 0) return undefined
+  return 1
+}
+
+export function resolveMultiReviewerCiExitCode(
+  successfulExitCodes: ReadonlyArray<number>,
+  failedResults: ReadonlyArray<ReviewerFailureForCi>,
+  options: { ci: boolean; failOn: FailOn },
+): number | undefined {
+  let aggregateCiExitCode = resolveReviewerFailureCiExitCode(failedResults, options)
+  for (const ciExitCode of successfulExitCodes) {
+    aggregateCiExitCode =
+      aggregateCiExitCode === undefined
+        ? ciExitCode
+        : Math.max(aggregateCiExitCode, ciExitCode)
+  }
+  return aggregateCiExitCode
 }
 
 export function buildCommentPayload(reviewMarkdown: string): string {
@@ -362,9 +390,16 @@ export function buildCompositeCiCommentBody(
     content: string
     usage?: UsageTotals
   }>,
+  failedResults: ReadonlyArray<ReviewerFailureForCi> = [],
 ): string {
+  const failureSection = failedResults.length === 0
+    ? ''
+    : `\n\n---\n\n## Reviewer failures\n\n${failedResults
+      .map((r) => `- **${r.reviewer.name}**: ${r.error?.trim() || 'reviewer failed without an error message'}`)
+      .join('\n')}`
+
   if (successfulResults.length === 0) {
-    return `_No reviewer produced output._\n\n---\n_${formatUsageOneLiner(undefined)}_`
+    return `_No reviewer produced output._${failureSection}\n\n---\n_${formatUsageOneLiner(undefined)}_`
   }
   const sections = successfulResults.map(
     (r) => `## ${r.reviewer.name}\n\n${r.content.trim()}`,
@@ -376,5 +411,5 @@ export function buildCompositeCiCommentBody(
   )
   const noun = successfulResults.length === 1 ? 'reviewer' : 'reviewers'
   const footer = `---\n_${formatUsageOneLiner(totalUsage)} (across ${successfulResults.length} ${noun})_`
-  return `${sections.join('\n\n---\n\n')}\n\n${footer}`
+  return `${sections.join('\n\n---\n\n')}${failureSection}\n\n${footer}`
 }
