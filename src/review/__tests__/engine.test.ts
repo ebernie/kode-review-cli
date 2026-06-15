@@ -9,17 +9,39 @@ interface CapturedSession {
   dispose: ReturnType<typeof vi.fn>
 }
 
+interface AgentEvent {
+  type: string
+  messages?: unknown[]
+  toolCallId?: string
+  toolName?: string
+  args?: unknown
+  result?: unknown
+  isError?: boolean
+}
+
+interface MockModel {
+  provider: string
+  id: string
+  api: string
+}
+
+interface CapturedAgentOptions {
+  resourceLoader: unknown
+  noTools: string
+  model: MockModel
+}
+
 const captured: {
-  options: any | null
-  subscriber: ((event: any) => void) | null
+  options: CapturedAgentOptions
+  subscriber: ((event: AgentEvent) => void) | null
   resolvePrompt: () => void
   rejectPrompt: (err: unknown) => void
   session: CapturedSession | null
-  modelsOverride: any[] | null
+  modelsOverride: MockModel[] | null
   piGlobalSettings: Record<string, unknown> | null
   piProjectSettings: Record<string, unknown> | null
 } = {
-  options: null,
+  options: {} as CapturedAgentOptions,
   subscriber: null,
   resolvePrompt: () => {},
   rejectPrompt: () => {},
@@ -29,7 +51,7 @@ const captured: {
   piProjectSettings: null,
 }
 
-const sessionState = { messages: [] as any[] }
+const sessionState = { messages: [] as unknown[] }
 
 vi.mock('@mariozechner/pi-coding-agent', () => {
   class FakeDefaultResourceLoader {
@@ -56,14 +78,14 @@ vi.mock('@mariozechner/pi-coding-agent', () => {
     DefaultResourceLoader: FakeDefaultResourceLoader,
     SessionManager: { inMemory: vi.fn(() => ({})) },
     getAgentDir: vi.fn(() => '/tmp/agent'),
-    createAgentSession: vi.fn(async (opts: any) => {
+    createAgentSession: vi.fn(async (opts: CapturedAgentOptions) => {
       captured.options = opts
       const session: CapturedSession & {
-        subscribe: (listener: (event: any) => void) => () => void
+        subscribe: (listener: (event: AgentEvent) => void) => () => void
         prompt: ReturnType<typeof vi.fn>
       } = {
         state: sessionState,
-        subscribe(listener: (event: any) => void) {
+        subscribe(listener: (event: AgentEvent) => void) {
           captured.subscriber = listener
           return () => { captured.subscriber = null }
         },
@@ -89,10 +111,15 @@ import { runReview, runAgenticReview } from '../engine.js'
 import { FINDINGS_FENCE_TAG } from '../finding-parser.js'
 import { AGENTIC_SYSTEM_PROMPT } from '../agentic-prompt.js'
 import { NONAGENTIC_SYSTEM_PROMPT } from '../prompt.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from '../untrusted-boundary.js'
+import { BUILTIN_REVIEWER_NAMES, resolveReviewer } from '../../reviewers/registry.js'
+import { loadReviewerSystemPrompt } from '../../reviewers/prompts.js'
+import { FEATURE_REVIEW_MODE_SUFFIX } from '../../repo-audit/prompts.js'
+import { REVALIDATION_MODE_SUFFIX } from '../../repo-audit/revalidation-prompts.js'
 import { logger } from '../../utils/logger.js'
 
 beforeEach(() => {
-  captured.options = null
+  captured.options = {} as CapturedAgentOptions
   captured.subscriber = null
   captured.session = null
   captured.modelsOverride = null
@@ -115,6 +142,18 @@ function pushTool() {
     captured.subscriber({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read_file', args: { path: 'a.ts' } })
     captured.subscriber({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'read_file', result: 'ok', isError: false })
   }
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1
+}
+
+function getSystemPromptOverride(): string {
+  const loader = captured.options.resourceLoader as {
+    options: { systemPromptOverride?: () => string }
+  }
+  expect(loader.options.systemPromptOverride).toBeDefined()
+  return loader.options.systemPromptOverride!()
 }
 
 describe('runReview', () => {
@@ -345,15 +384,14 @@ describe('runReview', () => {
     // The override is wired through DefaultResourceLoader's
     // `systemPromptOverride` constructor option as a `() => string`
     // thunk. Read it back via the captured session's resourceLoader.
-    const loader = captured.options.resourceLoader as { options: { systemPromptOverride?: () => string } }
-    expect(loader.options.systemPromptOverride).toBeTypeOf('function')
-    expect(loader.options.systemPromptOverride!()).toBe(NONAGENTIC_SYSTEM_PROMPT)
+    expect(getSystemPromptOverride()).toBe(NONAGENTIC_SYSTEM_PROMPT)
   })
 
-  it('honors a caller-supplied systemPrompt over the default boundary prompt (persona dispatch)', async () => {
+  it('preserves a caller-supplied systemPrompt and appends the untrusted boundary', async () => {
     // Persona reviewers and the repo-audit feature flow pass their own
     // system prompt. The default-boundary wiring must NOT override
     // those — otherwise persona-specific role text would be replaced.
+    // The engine still appends the shared boundary centrally.
     const customSystem = 'You are a security-focused reviewer.'
     const promise = runReview({ diffContent: 'd', context: 'c', systemPrompt: customSystem })
     await new Promise((resolve) => setImmediate(resolve))
@@ -361,11 +399,42 @@ describe('runReview', () => {
     captured.resolvePrompt()
     await promise
 
-    const loader = captured.options.resourceLoader as { options: { systemPromptOverride?: () => string } }
-    // toBe(customSystem) fully pins the contract — if the engine reverts
-    // to always passing NONAGENTIC_SYSTEM_PROMPT, this fails. No second
-    // assertion needed.
-    expect(loader.options.systemPromptOverride!()).toBe(customSystem)
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(customSystem)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(prompt).not.toBe(NONAGENTIC_SYSTEM_PROMPT)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+  })
+
+  it('appends the untrusted boundary to every built-in persona system prompt', async () => {
+    for (const name of BUILTIN_REVIEWER_NAMES) {
+      const reviewer = resolveReviewer(name)
+      const template = loadReviewerSystemPrompt(reviewer)
+      const promise = runReview({ diffContent: 'd', context: 'c', systemPrompt: template })
+      await new Promise((resolve) => setImmediate(resolve))
+      pushAssistantText('OK')
+      captured.resolvePrompt()
+      await promise
+
+      const prompt = getSystemPromptOverride()
+      expect(prompt).toContain(template)
+      expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+      expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+    }
+  })
+
+  it('appends the untrusted boundary to user-defined persona templates', async () => {
+    const template = 'CUSTOM USER REVIEWER TEMPLATE'
+    const promise = runReview({ diffContent: 'd', context: 'c', systemPrompt: template })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(template)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
   })
 })
 
@@ -623,14 +692,14 @@ describe('runWithPi failure paths', () => {
 async function installPromptCapturingSession(captures: unknown[]): Promise<void> {
   const { createAgentSession } = await import('@mariozechner/pi-coding-agent')
   const cas = createAgentSession as unknown as ReturnType<typeof vi.fn>
-  cas.mockImplementationOnce(async (opts: any) => {
+  cas.mockImplementationOnce(async (opts: CapturedAgentOptions) => {
     captured.options = opts
     const session: CapturedSession & {
-      subscribe: (listener: (event: any) => void) => () => void
+      subscribe: (listener: (event: AgentEvent) => void) => () => void
       prompt: ReturnType<typeof vi.fn>
     } = {
       state: sessionState,
-      subscribe(listener: (event: any) => void) {
+      subscribe(listener: (event: AgentEvent) => void) {
         captured.subscriber = listener
         return () => { captured.subscriber = null }
       },
@@ -716,14 +785,13 @@ describe('engine option overrides', () => {
     // The engine threads systemPromptOverride through DefaultResourceLoader.
     // Our FakeDefaultResourceLoader captures its constructor opts, exposed
     // indirectly via captured.options.resourceLoader.
-    const loader = captured.options.resourceLoader as {
-      options: { systemPromptOverride?: () => string }
-    }
-    expect(loader.options.systemPromptOverride).toBeDefined()
-    expect(loader.options.systemPromptOverride!()).toBe(SYSTEM_OVERRIDE_BASIC)
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(SYSTEM_OVERRIDE_BASIC)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
   })
 
-  it('runAgenticReview: systemPrompt override REPLACES the default AGENTIC_SYSTEM_PROMPT', async () => {
+  it('runAgenticReview: systemPrompt override preserves the role and appends the boundary', async () => {
     const promise = runAgenticReview({
       diffContent: 'd',
       context: 'c',
@@ -736,11 +804,116 @@ describe('engine option overrides', () => {
     captured.resolvePrompt()
     await promise
 
-    const loader = captured.options.resourceLoader as {
-      options: { systemPromptOverride?: () => string }
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(SYSTEM_OVERRIDE_AGENTIC)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(prompt).not.toBe(AGENTIC_SYSTEM_PROMPT)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+  })
+
+  it('runAgenticReview: appends the untrusted boundary to every built-in persona system prompt', async () => {
+    for (const name of BUILTIN_REVIEWER_NAMES) {
+      const reviewer = resolveReviewer(name)
+      const template = loadReviewerSystemPrompt(reviewer)
+      const promise = runAgenticReview({
+        diffContent: 'd',
+        context: 'c',
+        repoRoot: '/tmp/r',
+        repoUrl: 'u',
+        systemPrompt: template,
+      })
+      await new Promise((resolve) => setImmediate(resolve))
+      pushAssistantText('OK')
+      captured.resolvePrompt()
+      await promise
+
+      const prompt = getSystemPromptOverride()
+      expect(prompt).toContain(template)
+      expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+      expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
     }
-    expect(loader.options.systemPromptOverride).toBeDefined()
-    expect(loader.options.systemPromptOverride!()).toBe(SYSTEM_OVERRIDE_AGENTIC)
+  })
+
+  it('runAgenticReview: appends the untrusted boundary to user-defined persona templates', async () => {
+    const template = 'CUSTOM USER AGENTIC REVIEWER TEMPLATE'
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      systemPrompt: template,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(template)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+  })
+
+  it('runAgenticReview: does not duplicate an existing untrusted boundary', async () => {
+    const systemPrompt = `${SYSTEM_OVERRIDE_AGENTIC}\n\n${UNTRUSTED_CONTENT_BOUNDARY}`
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      systemPrompt,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toBe(systemPrompt)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+  })
+
+  it('runAgenticReview: does not duplicate repo-audit persona prompts that already carry the boundary', async () => {
+    const personaSystem = loadReviewerSystemPrompt(resolveReviewer('general'))
+    const systemPrompt = `${personaSystem}\n\n${FEATURE_REVIEW_MODE_SUFFIX}`
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      systemPrompt,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toBe(systemPrompt)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
+  })
+
+  it('runAgenticReview: appends the boundary to revalidation persona prompts', async () => {
+    const personaSystem = loadReviewerSystemPrompt(resolveReviewer('general'))
+    const systemPrompt = `${personaSystem}\n\n${REVALIDATION_MODE_SUFFIX}`
+    const promise = runAgenticReview({
+      diffContent: 'd',
+      context: 'c',
+      repoRoot: '/tmp/r',
+      repoUrl: 'u',
+      systemPrompt,
+      parseFindings: false,
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    pushAssistantText('OK')
+    captured.resolvePrompt()
+    await promise
+
+    const prompt = getSystemPromptOverride()
+    expect(prompt).toContain(personaSystem)
+    expect(prompt).toContain(REVALIDATION_MODE_SUFFIX)
+    expect(prompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(countOccurrences(prompt, UNTRUSTED_CONTENT_BOUNDARY)).toBe(1)
   })
 
   it('runAgenticReview: when systemPrompt is undefined, the default AGENTIC_SYSTEM_PROMPT is used', async () => {
@@ -755,11 +928,7 @@ describe('engine option overrides', () => {
     captured.resolvePrompt()
     await promise
 
-    const loader = captured.options.resourceLoader as {
-      options: { systemPromptOverride?: () => string }
-    }
-    expect(loader.options.systemPromptOverride).toBeDefined()
-    const defaultPrompt = loader.options.systemPromptOverride!()
+    const defaultPrompt = getSystemPromptOverride()
     // Pin to the actual exported constant: an unrelated non-empty string
     // (e.g. from a regression that hardcoded a different default) would
     // pass the previous length+inequality check but fail this one.

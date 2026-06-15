@@ -44,6 +44,7 @@ import { aggregateUsage, type UsageTotals } from './usage.js'
 import { parseFindingsBlock } from './finding-parser.js'
 import type { Finding } from './finding-schema.js'
 import { summarizeBoundariesForFiles } from './trust-boundaries.js'
+import { UNTRUSTED_CONTENT_BOUNDARY } from './untrusted-boundary.js'
 
 const DEFAULT_TIMEOUT_MS = 180_000
 const DEFAULT_AGENTIC_TIMEOUT_SEC = 600
@@ -251,6 +252,13 @@ interface RunOutcome {
   usage: UsageTotals
 }
 
+function withUntrustedContentBoundary(systemPrompt: string): string {
+  if (systemPrompt.includes(UNTRUSTED_CONTENT_BOUNDARY)) {
+    return systemPrompt
+  }
+  return `${systemPrompt.trimEnd()}\n\n${UNTRUSTED_CONTENT_BOUNDARY}`
+}
+
 async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
   const authStorage = AuthStorage.create()
   const modelRegistry = ModelRegistry.create(authStorage)
@@ -267,7 +275,7 @@ async function runWithPi(opts: RunOptions): Promise<RunOutcome> {
     agentDir: getAgentDir(),
     extensionFactories,
     systemPromptOverride: opts.systemPromptOverride
-      ? () => opts.systemPromptOverride!
+      ? () => withUntrustedContentBoundary(opts.systemPromptOverride!)
       : undefined,
     appendSystemPromptOverride: () => [],
   })

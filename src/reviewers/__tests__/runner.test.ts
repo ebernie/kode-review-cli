@@ -3,7 +3,6 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FINDINGS_BLOCK_INSTRUCTIONS } from '../../review/prompt.js'
-import { UNTRUSTED_CONTENT_BOUNDARY } from '../../review/untrusted-boundary.js'
 import type { UsageTotals } from '../../review/usage.js'
 
 // Capture every invocation of the underlying engine so we can verify that
@@ -182,7 +181,7 @@ describe('runReviewers — parallel orchestration', () => {
     ).toBeDefined()
   })
 
-  it('appends the shared untrusted-content boundary to reviewer system prompts', async () => {
+  it('leaves untrusted-content boundary appending to the engine', async () => {
     writeFileSync(join(tmp, 'performance.md'), 'PERFORMANCE REVIEWER TEMPLATE')
     const reviewers = resolveReviewerNames(['security', 'performance'])
     await runReviewers({
@@ -197,8 +196,8 @@ describe('runReviewers — parallel orchestration', () => {
     const customPrompt = captured.find((r) =>
       String(r.systemPrompt).includes('PERFORMANCE REVIEWER TEMPLATE'),
     )?.systemPrompt
-    expect(securityPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
-    expect(customPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+    expect(securityPrompt).not.toMatch(/Untrusted Content Boundary/i)
+    expect(customPrompt).not.toMatch(/Untrusted Content Boundary/i)
   })
 
   it('requires kode-findings in reviewer system prompts, including custom reviewers', async () => {
@@ -426,7 +425,7 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
     ).toBeDefined()
   })
 
-  it('appends the shared untrusted-content boundary to agentic reviewer system prompts', async () => {
+  it('leaves untrusted-content boundary appending to the agentic engine', async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'kode-review-runner-agentic-'))
     const originalEnv = process.env.KODE_REVIEW_REVIEWERS_DIR
     process.env.KODE_REVIEW_REVIEWERS_DIR = tmp
@@ -448,8 +447,8 @@ describe('runAgenticReviewers — parallel agentic orchestration', () => {
       const customPrompt = capturedAgentic.find((r) =>
         String(r.systemPrompt).includes('PERFORMANCE REVIEWER TEMPLATE'),
       )?.systemPrompt
-      expect(securityPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
-      expect(customPrompt).toContain(UNTRUSTED_CONTENT_BOUNDARY)
+      expect(securityPrompt).not.toMatch(/Untrusted Content Boundary/i)
+      expect(customPrompt).not.toMatch(/Untrusted Content Boundary/i)
     } finally {
       if (originalEnv === undefined) {
         delete process.env.KODE_REVIEW_REVIEWERS_DIR
