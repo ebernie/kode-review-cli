@@ -203,7 +203,9 @@ export function buildAgenticPrompt(options: AgenticPromptOptions): string {
     parts.push('')
     parts.push('The PR/MR author describes the purpose as:')
     parts.push('')
+    parts.push('<author_intent untrusted="true">')
     parts.push(sanitizeXmlContent(options.prDescriptionSummary, 'author_intent'))
+    parts.push('</author_intent>')
     parts.push('')
   }
 
@@ -219,17 +221,17 @@ export function buildAgenticPrompt(options: AgenticPromptOptions): string {
   if (options.prMrInfo) {
     parts.push('## PR/MR Information')
     parts.push('')
-    parts.push('```json')
+    parts.push('<pr_mr_info untrusted="true">')
     parts.push(sanitizeXmlContent(options.prMrInfo, 'pr_mr_info'))
-    parts.push('```')
+    parts.push('</pr_mr_info>')
     parts.push('')
   }
 
   parts.push('## Code Changes (Diff)')
   parts.push('')
-  parts.push('```diff')
+  parts.push('<diff_content untrusted="true">')
   parts.push(sanitizeXmlContent(options.diffContent, 'diff_content'))
-  parts.push('```')
+  parts.push('</diff_content>')
   parts.push('')
   parts.push('Please review these changes. Use the available tools to explore the codebase and gather context as needed for a thorough review.')
 
