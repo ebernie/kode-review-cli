@@ -16,6 +16,7 @@ COPY main.py .
 COPY indexer.py .
 COPY import_graph.py .
 COPY call_graph.py .
+COPY api_auth.py .
 COPY ast_chunker.py .
 COPY bm25.py .
 COPY hybrid.py .
@@ -31,7 +32,7 @@ EXPOSE 8000
 
 # Health check for API mode
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
+    CMD python -c "import os, urllib.request; req=urllib.request.Request('http://localhost:8000/health', headers={'x-kode-review-indexer-secret': os.environ.get('KODE_REVIEW_INDEXER_API_SECRET', '')}); urllib.request.urlopen(req)" || exit 1
 
 # Default: Run the FastAPI server (API mode)
 # For indexing, override with: python indexer.py

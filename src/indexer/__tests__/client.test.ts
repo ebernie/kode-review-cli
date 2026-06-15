@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach, Mock } from 'vitest'
 import { IndexerClient } from '../client.js'
+import { INDEXER_API_SECRET_HEADER } from '../env.js'
 
 describe('IndexerClient', () => {
   const baseUrl = 'http://localhost:8321'
@@ -859,6 +860,70 @@ describe('IndexerClient', () => {
       expect(mockFetch).toHaveBeenCalledWith(
         'http://localhost:8321/health',
         expect.any(Object)
+      )
+    })
+  })
+
+  describe('API authentication header', () => {
+    it('sends the shared secret on GET requests when configured', async () => {
+      const clientWithSecret = new IndexerClient(baseUrl, 'test-secret')
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ status: 'healthy' }),
+      })
+
+      await clientWithSecret.health()
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${baseUrl}/health`,
+        expect.objectContaining({
+          method: 'GET',
+          headers: { [INDEXER_API_SECRET_HEADER]: 'test-secret' },
+        })
+      )
+    })
+
+    it('merges the shared secret with JSON request headers', async () => {
+      const clientWithSecret = new IndexerClient(baseUrl, 'test-secret')
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ message: 'Indexing started', status: 'indexing' }),
+      })
+
+      await clientWithSecret.index({
+        repoUrl: 'https://github.com/test/repo',
+        repoPath: '/repo',
+        includePatterns: ['**/*.ts'],
+        excludePatterns: [],
+      })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${baseUrl}/index`,
+        expect.objectContaining({
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            [INDEXER_API_SECRET_HEADER]: 'test-secret',
+          },
+        })
+      )
+    })
+
+    it('sends the shared secret on destructive DELETE requests', async () => {
+      const clientWithSecret = new IndexerClient(baseUrl, 'test-secret')
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ message: 'Index deleted' }),
+      })
+
+      await clientWithSecret.deleteIndex('https://github.com/test/repo')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${baseUrl}/index/${encodeURIComponent('https://github.com/test/repo')}`,
+        expect.objectContaining({
+          method: 'DELETE',
+          headers: { [INDEXER_API_SECRET_HEADER]: 'test-secret' },
+        })
       )
     })
   })

@@ -1,11 +1,20 @@
 import { exec, execInteractive } from '../utils/exec.js'
-import { getConfig, getConfigPath } from '../config/index.js'
+import { getConfig } from '../config/index.js'
 import { logger } from '../utils/logger.js'
 import { IndexerClient } from './client.js'
 import type { IndexerStatus } from './types.js'
 import { fileURLToPath } from 'url'
 import { dirname, join, resolve } from 'path'
-import { existsSync, mkdirSync, copyFileSync, writeFileSync } from 'fs'
+import { existsSync, copyFileSync, readFileSync } from 'fs'
+import {
+  INDEXER_ENV_FILE,
+  buildIndexerDatabaseUrl,
+  ensureIndexerEnv,
+  getIndexerConfigDir,
+  parseEnvContent,
+  readIndexerApiSecret,
+  readIndexerDbPassword,
+} from './env.js'
 
 // Get the path to the bundled docker assets
 const __filename = fileURLToPath(import.meta.url)
@@ -56,21 +65,6 @@ function getDockerAssetsPath(): string {
 }
 
 /**
- * Get the config directory for indexer data
- */
-function getIndexerConfigDir(): string {
-  const configPath = getConfigPath()
-  const configDir = dirname(configPath)
-  const indexerDir = join(configDir, 'indexer')
-
-  if (!existsSync(indexerDir)) {
-    mkdirSync(indexerDir, { recursive: true })
-  }
-
-  return indexerDir
-}
-
-/**
  * Single source of truth for the asset files copied from the installed
  * package into the per-user indexer config directory by
  * `ensureDockerAssets`. `cleanupIndexer` derives its removal list from
@@ -103,6 +97,7 @@ export const BUNDLED_DOCKER_ASSETS: readonly string[] = [
   'bm25.py',
   'call_graph.py',
   'config_parser.py',
+  'api_auth.py',
   '.env.template',
 ]
 
@@ -140,19 +135,22 @@ export function getIndexerApiUrl(): string {
   return `http://localhost:${config.indexer.apiPort}`
 }
 
-/**
- * Write environment file for Docker Compose (API server only, no repo mount)
- */
-function writeEnvFile(configDir: string): void {
-  const config = getConfig()
-  const envContent = `
-KODE_REVIEW_API_PORT=${config.indexer.apiPort}
-KODE_REVIEW_DB_PORT=${config.indexer.dbPort}
-KODE_REVIEW_EMBEDDING_MODEL=${config.indexer.embeddingModel}
-`.trim()
-
-  writeFileSync(join(configDir, '.env'), envContent)
+function createIndexerClient(apiUrl: string): IndexerClient {
+  return new IndexerClient(apiUrl, readIndexerApiSecret())
 }
+
+function getIndexerDatabaseUrl(): string {
+  return buildIndexerDatabaseUrl(readIndexerDbPassword())
+}
+
+const INDEXER_COMPOSE_ENV_KEYS = new Set([
+  'KODE_REVIEW_API_PORT',
+  'KODE_REVIEW_DB_PORT',
+  'KODE_REVIEW_EMBEDDING_MODEL',
+  'KODE_REVIEW_DB_PASSWORD',
+  'COCOINDEX_DATABASE_URL',
+  'KODE_REVIEW_INDEXER_API_SECRET',
+])
 
 /**
  * Run a docker compose command
@@ -161,14 +159,29 @@ KODE_REVIEW_EMBEDDING_MODEL=${config.indexer.embeddingModel}
  * Get environment variables for Docker commands.
  * Removes DOCKER_DEFAULT_PLATFORM to ensure native architecture is used.
  */
-function getDockerEnv(): Record<string, string> {
+function getDockerEnv(configDir?: string): Record<string, string> {
   const env: Record<string, string> = {}
-  // Copy all env vars except DOCKER_DEFAULT_PLATFORM
+  // Copy all env vars except Docker architecture overrides and indexer compose
+  // interpolation keys. The generated .env is the trusted source for those.
   for (const [key, value] of Object.entries(process.env)) {
-    if (key !== 'DOCKER_DEFAULT_PLATFORM' && value !== undefined) {
+    if (key !== 'DOCKER_DEFAULT_PLATFORM' && !INDEXER_COMPOSE_ENV_KEYS.has(key) && value !== undefined) {
       env[key] = value
     }
   }
+
+  if (configDir) {
+    const envPath = join(configDir, INDEXER_ENV_FILE)
+    if (existsSync(envPath)) {
+      const indexerEnv = parseEnvContent(readFileSync(envPath, 'utf-8'))
+      for (const key of INDEXER_COMPOSE_ENV_KEYS) {
+        const value = indexerEnv[key]
+        if (value !== undefined) {
+          env[key] = value
+        }
+      }
+    }
+  }
+
   return env
 }
 
@@ -187,11 +200,21 @@ async function dockerCompose(
   ]
 
   if (options?.interactive) {
-    const exitCode = await execInteractive('docker', fullArgs, { cwd: configDir, env: getDockerEnv(), extendEnv: false })
+    const exitCode = await execInteractive('docker', fullArgs, { cwd: configDir, env: getDockerEnv(configDir), extendEnv: false })
     return { exitCode, stdout: '', stderr: '' }
   }
 
-  return await exec('docker', fullArgs, { cwd: configDir, env: getDockerEnv(), extendEnv: false })
+  return await exec('docker', fullArgs, { cwd: configDir, env: getDockerEnv(configDir), extendEnv: false })
+}
+
+async function stopUpgradedIndexerContainers(configDir: string): Promise<boolean> {
+  logger.warn('Indexer credentials or auth assets were upgraded; stopping existing containers before use.')
+  const result = await dockerCompose(['down'], { cwd: configDir })
+  if (result.exitCode !== 0) {
+    logger.warn(`Failed to stop upgraded indexer containers automatically: ${result.stderr}`)
+    return false
+  }
+  return true
 }
 
 /**
@@ -218,12 +241,12 @@ function getIndexerImage(): string {
  */
 export async function startIndexer(): Promise<string> {
   const configDir = ensureDockerAssets()
-  writeEnvFile(configDir)
+  ensureIndexerEnv(configDir)
 
   logger.info('Starting indexer containers...')
 
   // Build and start containers
-  const result = await dockerCompose(['up', '-d', '--build'], { cwd: configDir })
+  const result = await dockerCompose(['up', '-d', '--build', '--force-recreate'], { cwd: configDir })
 
   if (result.exitCode !== 0) {
     throw new Error(`Failed to start indexer: ${result.stderr}`)
@@ -233,7 +256,7 @@ export async function startIndexer(): Promise<string> {
   logger.info('Waiting for indexer to be ready...')
 
   const apiUrl = getIndexerApiUrl()
-  const client = new IndexerClient(apiUrl)
+  const client = createIndexerClient(apiUrl)
 
   // Poll for health
   const maxAttempts = 30
@@ -274,30 +297,41 @@ export async function stopIndexer(): Promise<void> {
  * Check if the indexer is currently running
  */
 export async function isIndexerRunning(): Promise<boolean> {
+  const configDir = ensureDockerAssets()
+  const env = ensureIndexerEnv(configDir)
+
   // Use the dockerCompose helper rather than calling docker directly: it
   // injects `-f compose.yaml` and the config dir as cwd, so this status check
   // works the same from any directory. Without it, `docker compose -p
   // <project>` outside the indexer config dir cannot find the compose file
   // and returns "not running" even when the containers are up.
-  const result = await dockerCompose(['ps', '-q'])
+  const result = await dockerCompose(['ps', '-q'], { cwd: configDir })
 
   if (result.exitCode !== 0) {
     return false
   }
 
   // If there's output, containers are running
-  return result.stdout.trim().length > 0
+  const running = result.stdout.trim().length > 0
+  if (running && env.credentialsUpgraded) {
+    await stopUpgradedIndexerContainers(configDir)
+    return false
+  }
+
+  return running
 }
 
 /**
  * Get the status of the indexer
  */
 export async function getIndexerStatus(): Promise<IndexerStatus> {
+  const configDir = ensureDockerAssets()
+  const env = ensureIndexerEnv(configDir)
   const apiUrl = getIndexerApiUrl()
 
   // Same rationale as isIndexerRunning — go through the helper so the
   // compose file is found regardless of caller cwd.
-  const psResult = await dockerCompose(['ps', '--format', 'json'])
+  const psResult = await dockerCompose(['ps', '--format', 'json'], { cwd: configDir })
 
   if (psResult.exitCode !== 0 || !psResult.stdout.trim()) {
     return {
@@ -331,7 +365,7 @@ export async function getIndexerStatus(): Promise<IndexerStatus> {
   } catch {
     // Failed to parse JSON output, fall back to the `-q` form. Same helper
     // path — must include the compose file to work from any cwd.
-    const qResult = await dockerCompose(['ps', '-q'])
+    const qResult = await dockerCompose(['ps', '-q'], { cwd: configDir })
     if (qResult.stdout.trim()) {
       apiStatus = 'running'
       dbStatus = 'running'
@@ -339,12 +373,24 @@ export async function getIndexerStatus(): Promise<IndexerStatus> {
   }
 
   const running = apiStatus === 'running' && dbStatus === 'running'
+  const anyContainerRunning = apiStatus === 'running' || dbStatus === 'running'
+
+  if (env.credentialsUpgraded && anyContainerRunning) {
+    const stopped = await stopUpgradedIndexerContainers(configDir)
+    return {
+      running: false,
+      apiUrl: null,
+      healthy: false,
+      containerStatus: stopped ? 'stopped' : apiStatus,
+      dbStatus: stopped ? 'stopped' : dbStatus,
+    }
+  }
 
   // Check health if running
   let healthy = false
   if (running) {
     try {
-      const client = new IndexerClient(apiUrl)
+      const client = createIndexerClient(apiUrl)
       healthy = await client.health()
     } catch {
       healthy = false
@@ -397,7 +443,7 @@ export async function indexRepository(
   // Build the ephemeral container command
   const network = getDockerNetwork()
   const image = getIndexerImage()
-  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+  const dbUrl = getIndexerDatabaseUrl()
 
   const dockerArgs = [
     'run',
@@ -520,7 +566,7 @@ export async function indexRepositoryIncremental(
   // Build the ephemeral container command
   const network = getDockerNetwork()
   const image = getIndexerImage()
-  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+  const dbUrl = getIndexerDatabaseUrl()
 
   const envVars = [
     '-e', `COCOINDEX_DATABASE_URL=${dbUrl}`,
@@ -648,7 +694,7 @@ export async function resetIndex(repoUrl: string, branch?: string): Promise<void
     throw new Error('Indexer is not running. Start it first with --setup-indexer.')
   }
 
-  const client = new IndexerClient(status.apiUrl!)
+  const client = createIndexerClient(status.apiUrl!)
 
   if (branch) {
     logger.info(`Resetting index for: ${repoUrl}@${branch}`)
@@ -670,7 +716,7 @@ export async function listIndexedRepos(): Promise<void> {
     throw new Error('Indexer is not running. Start it first with --setup-indexer.')
   }
 
-  const client = new IndexerClient(status.apiUrl!)
+  const client = createIndexerClient(status.apiUrl!)
 
   const repos = await client.listRepos()
 
@@ -805,7 +851,7 @@ export async function runCocoIndexFlow(
   // Build the ephemeral container command
   const network = getDockerNetwork()
   const image = getIndexerImage()
-  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+  const dbUrl = getIndexerDatabaseUrl()
 
   // Build CocoIndex CLI arguments
   const cocoindexArgs = ['update']
@@ -883,7 +929,7 @@ export async function extractRelationships(
 
   const network = getDockerNetwork()
   const image = getIndexerImage()
-  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+  const dbUrl = getIndexerDatabaseUrl()
 
   logger.info('Extracting relationships between code chunks...')
 
@@ -932,7 +978,7 @@ export async function verifyExport(
 
   const network = getDockerNetwork()
   const image = getIndexerImage()
-  const dbUrl = 'postgresql://cocoindex:cocoindex@db:5432/cocoindex'
+  const dbUrl = getIndexerDatabaseUrl()
 
   logger.info('Verifying export to Postgres...')
 

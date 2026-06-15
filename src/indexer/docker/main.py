@@ -24,6 +24,7 @@ from sentence_transformers import SentenceTransformer
 from psycopg_pool import ConnectionPool
 from pgvector.psycopg import register_vector
 
+from api_auth import install_indexer_api_auth
 from import_graph import ImportGraphBuilder, generate_repo_id as graph_generate_repo_id
 from bm25 import normalize_identifier, build_tsquery, calculate_exact_match_boost
 from hybrid import (
@@ -83,6 +84,8 @@ def compute_embedding(text: str) -> list[float]:
 # -----------------------------------------------------------------------------
 
 app = FastAPI(title="kode-review Indexer API", version="2.0.0")
+
+install_indexer_api_auth(app)
 
 
 # Request/Response Models
