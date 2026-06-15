@@ -698,6 +698,8 @@ Ready-to-copy workflow files for GitHub Actions and GitLab CI live in
 - Sticky-comment behavior — each run posts one comment and deletes prior
   kode-review comments, leaving human comments untouched.
 - Severity gating via `--fail-on critical|high|none`.
+- Multi-reviewer CI fails closed when any reviewer fails to run and
+  `--fail-on` is not `none`; the sticky comment names failed reviewers.
 - Suppressing specific findings inline with `// kode-review: ignore`.
 
 ---

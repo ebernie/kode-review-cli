@@ -35,12 +35,14 @@ import {
   detectCiPlatform,
   extractPrNumber,
   resolveCiExitCode,
+  resolveMultiReviewerCiExitCode,
   buildCommentPayload,
   buildCompositeCiCommentBody,
   parseReviewSummary,
   applyReviewFiltersForCi,
   postCiComment,
   type CiPlatform,
+  type ReviewerFailureForCi,
 } from './review/ci-mode.js'
 import type { Finding } from './review/finding-schema.js'
 import {
@@ -1164,7 +1166,8 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         // TODO: unify with the non-agentic branch's identical loop in a
         // follow-up — copy-paste is acceptable here to keep the single-mode
         // fast path's behavior byte-for-byte identical.
-        let aggregateCiExitCode: number | undefined
+        const failedForCi = reviewerFailuresForCi(results)
+        const successfulCiExitCodes: number[] = []
         for (const r of results) {
           if (!r.ok || r.content === undefined) continue
           const { content: filtered, ciExitCode } = await applyCiAndSuppressions(
@@ -1176,19 +1179,17 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
           )
           r.content = filtered
           if (ciExitCode !== undefined) {
-            aggregateCiExitCode =
-              aggregateCiExitCode === undefined
-                ? ciExitCode
-                : Math.max(aggregateCiExitCode, ciExitCode)
+            successfulCiExitCodes.push(ciExitCode)
           }
         }
+        const aggregateCiExitCode = multiReviewerCiExitCode(successfulCiExitCodes, failedForCi, options)
 
         if (options.ci) {
           const successful = results
             .filter((r) => r.ok && r.content !== undefined)
             .map((r) => ({ reviewer: r.reviewer, content: r.content!, usage: r.usage }))
           if (successful.length > 0) {
-            await postCiStickyComment(buildCompositeCiCommentBody(successful), options, repoRoot!)
+            await postCiStickyComment(buildCompositeCiCommentBody(successful, failedForCi), options, repoRoot!)
           }
         }
 
@@ -1246,7 +1247,8 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
       // - The sticky comment is posted ONCE after the loop as a single
       //   composite body with one section per reviewer — preventing each
       //   per-reviewer call from racing under the shared sticky marker.
-      let aggregateCiExitCode: number | undefined
+      const failedForCi = reviewerFailuresForCi(results)
+      const successfulCiExitCodes: number[] = []
       for (const r of results) {
         if (!r.ok || r.content === undefined) continue
         const { content: filtered, ciExitCode } = await applyCiAndSuppressions(
@@ -1258,19 +1260,17 @@ async function runCodeReview(options: CliOptions, ctx: CliContext): Promise<void
         )
         r.content = filtered
         if (ciExitCode !== undefined) {
-          aggregateCiExitCode =
-            aggregateCiExitCode === undefined
-              ? ciExitCode
-              : Math.max(aggregateCiExitCode, ciExitCode)
+          successfulCiExitCodes.push(ciExitCode)
         }
       }
+      const aggregateCiExitCode = multiReviewerCiExitCode(successfulCiExitCodes, failedForCi, options)
 
       if (options.ci) {
         const successful = results
           .filter((r) => r.ok && r.content !== undefined)
           .map((r) => ({ reviewer: r.reviewer, content: r.content!, usage: r.usage }))
         if (successful.length > 0) {
-          await postCiStickyComment(buildCompositeCiCommentBody(successful), options, repoRoot!)
+          await postCiStickyComment(buildCompositeCiCommentBody(successful, failedForCi), options, repoRoot!)
         }
       }
 
@@ -1633,6 +1633,30 @@ function perReviewerOutputPath(basePath: string, reviewerName: string): string {
     return `${basePath.slice(0, lastDot)}.${reviewerName}${basePath.slice(lastDot)}`
   }
   return `${basePath}-${reviewerName}`
+}
+
+function reviewerFailuresForCi(results: ReviewerRunResult[]): ReviewerFailureForCi[] {
+  return results
+    .filter((r) => !r.ok)
+    .map((r) => ({ reviewer: r.reviewer, error: r.error }))
+}
+
+function multiReviewerCiExitCode(
+  successfulExitCodes: number[],
+  failedResults: ReviewerFailureForCi[],
+  options: CliOptions,
+): number | undefined {
+  const ciExitCode = resolveMultiReviewerCiExitCode(successfulExitCodes, failedResults, {
+    ci: options.ci,
+    failOn: options.failOn,
+  })
+  if (ciExitCode !== undefined && options.ci && options.failOn !== 'none' && failedResults.length > 0) {
+    const detail = failedResults
+      .map((r) => `${r.reviewer.name}: ${r.error ?? 'reviewer failed without an error message'}`)
+      .join('; ')
+    logger.error(`CI mode: ${failedResults.length} reviewer(s) failed: ${detail}; failing.`)
+  }
+  return ciExitCode
 }
 
 /**
